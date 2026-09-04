@@ -33,6 +33,11 @@
 两个启动器都会**自动选择版本**:检测到 PySide6 时运行 Qt + Fluent 版(`winclipboard_qt.py`),
 否则自动回退到 tkinter 版(`clipboard_manager.py`,只需 pywin32 + Pillow),保证始终能启动。
 
+**Python 解释器解析顺序**(换环境/换机器时无需改启动器):
+1. `python.txt`(与启动器同目录,内容一行:pythonw.exe 完整路径)——显式指定,优先级最高
+2. hermes venv(本机已知可用)
+3. PATH 上的 `pythonw.exe`
+
 启动后:
 1. 右下角系统托盘出现蓝色剪贴板图标 📋
 2. 随便复制点东西(网页、文档、截图都行)
@@ -57,10 +62,12 @@
 ```
 WinClipboard\
 ├── winclipboard_qt.py        Qt + Fluent 版界面(默认;需要 PySide6 + PySide6-Fluent-Widgets)
-├── clipboard_manager.py      tkinter 版完整实现,同时被 Qt 版复用为后端模块
-│                             (热键/托盘/剪贴板/敏感隔离/持久化;仅需 pywin32 + Pillow)
+├── clipboard_manager.py      tkinter 版界面 + ClipboardCore 共享后端(热键/托盘/剪贴板/
+│                             敏感隔离/DPAPI 加密/持久化;仅需 pywin32 + Pillow)
+├── python.txt                指定 Python 解释器(一行 pythonw.exe 完整路径;可选)
 ├── 启动剪贴板.vbs            无窗口启动器(自动选择版本;桌面快捷方式指向它)
 ├── 启动剪贴板.bat            带控制台启动器(调试用,同样自动选择版本)
+├── _core_test.py             核心逻辑单元测试(python _core_test.py,无需 GUI)
 └── README.md
 
 %APPDATA%\WinClipboard\      用户数据(自动生成)
@@ -88,7 +95,7 @@ WinClipboard\
 
 ## 🧰 依赖
 
-- Python 3.11(已用 hermes venv 的解释器,无需额外配置)
+- Python 3.11(默认用 hermes venv 的解释器;可用 `python.txt` 或 PATH 换任意解释器)
 - **Qt + Fluent 版**(`winclipboard_qt.py`,启动器默认):
   - `PySide6` —— Qt6 界面框架
   - `PySide6-Fluent-Widgets` —— Fluent 风格组件库
