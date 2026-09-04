@@ -23,6 +23,7 @@ import re
 import time
 import math
 import struct
+import base64
 import queue
 import ctypes
 import hashlib
@@ -39,6 +40,10 @@ try:
     import win32clipboard, win32con, win32gui, win32api
 except ImportError:
     raise SystemExit("缺少 pywin32,请运行: pip install pywin32")
+try:
+    import win32crypt   # 私密区 DPAPI 加密(pywin32 自带)
+except ImportError:
+    win32crypt = None
 try:
     from PIL import Image, ImageDraw, ImageFont, ImageTk, ImageFilter, ImageOps, ImageChops
 except ImportError:
@@ -218,20 +223,72 @@ def save_history(hist):
             pass
 
 
+# ---- 私密区 DPAPI 加密(绑定当前 Windows 用户账号,同机其他用户/复制文件均不可读) ----
+_DPAPI_ENTROPY = b"WinClipboard.private"
+
+
+def _dpapi_protect(data):
+    """DPAPI(CurrentUser 作用域)加密;win32crypt 不可用或失败返回 None。"""
+    if win32crypt is None:
+        return None
+    try:
+        out = win32crypt.CryptProtectData(data, None, _DPAPI_ENTROPY, None, None, 0)
+        return out[-1] if isinstance(out, tuple) else out   # 兼容 (数据, 描述) 返回形式
+    except Exception:
+        return None
+
+
+def _dpapi_unprotect(blob):
+    if win32crypt is None:
+        return None
+    try:
+        # 注意:此版 pywin32 的 CryptUnprotectData 无 DataDescr 参数,只收 5 个
+        out = win32crypt.CryptUnprotectData(blob, _DPAPI_ENTROPY, None, None, 0)
+        return out[-1] if isinstance(out, tuple) else out
+    except Exception:
+        return None
+
+
 def load_private():
+    """读私密区:新版 {"dpapi":true,"data":<b64>} 自动解密;旧版明文列表直接兼容
+    (下次保存时自动升级为加密);解密失败不覆盖原文件,数据不丢。"""
     try:
         with open(PRIVATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return [s for s in data if isinstance(s, str)]
     except Exception:
         return []
+    if isinstance(data, list):
+        # 旧版明文格式
+        return [s for s in data if isinstance(s, str)]
+    if isinstance(data, dict) and "data" in data:
+        try:
+            blob = base64.b64decode(data["data"])
+            if data.get("dpapi"):
+                blob = _dpapi_unprotect(blob)
+                if blob is None:
+                    log("private.json 解密失败(DPAPI),内容暂不可用,原文件已保留")
+                    return []
+            return [s for s in json.loads(blob.decode("utf-8")) if isinstance(s, str)]
+        except Exception:
+            log("private.json 读取失败:\n%s" % traceback.format_exc())
+            return []
+    return []
 
 
 def save_private(priv):
+    """写私密区:整体 JSON 序列化后 DPAPI 加密落盘(原子替换);
+    win32crypt 不可用时退化为 base64 编码明文并记日志。"""
+    data = json.dumps([s for s in priv if isinstance(s, str)],
+                      ensure_ascii=False).encode("utf-8")
+    blob = _dpapi_protect(data)
+    if blob is None:
+        log("win32crypt 不可用,私密区退化为明文存储")
+    payload = {"dpapi": blob is not None,
+               "data": base64.b64encode(blob if blob is not None else data).decode("ascii")}
     tmp = PRIVATE_FILE + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(priv, f, ensure_ascii=False)
+            json.dump(payload, f)
         os.replace(tmp, PRIVATE_FILE)
     except Exception:
         try:
@@ -707,6 +764,8 @@ class ClipboardCore:
         self.on_change = on_change or (lambda: None)
         # 历史迁移:补齐哈希、合并重复图片、清理孤儿文件(须在后台线程启动前)
         self._migrate_images()
+        # 旧版明文私密区自动升级为 DPAPI 加密
+        self._migrate_private()
         # 后台线程(托盘 / 全局热键 / 剪贴板监听)
         self.worker = TrayWorker(self)
         self.worker.start()
@@ -796,6 +855,19 @@ class ClipboardCore:
                             pass
             if changed:
                 save_history(self.history)
+        except Exception:
+            pass
+
+    def _migrate_private(self):
+        """旧版明文私密区在启动时立即升级为 DPAPI 加密(不等待下次写入)。"""
+        try:
+            if not self.private:
+                return
+            with open(PRIVATE_FILE, "r", encoding="utf-8") as f:
+                if f.read(1) != "[":    # 已是新版加密格式({"dpapi":...})
+                    return
+            save_private(self.private)
+            log("私密区已自动升级为 DPAPI 加密")
         except Exception:
             pass
 

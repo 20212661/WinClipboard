@@ -101,9 +101,30 @@ core.add_item(("text", "gone"))
 core.clear_unpinned()
 check("清空保留置顶", [h["content"] for h in core.history] == ["keep"])
 
-# ---- 私密区持久化往返 ----
+# ---- 私密区持久化往返 + DPAPI 加密 ----
 cm.save_private(["甲", "b&c", "✓ 多行\n文本"])
 check("private 往返", cm.load_private() == ["甲", "b&c", "✓ 多行\n文本"])
+with open(cm.PRIVATE_FILE, "r", encoding="utf-8") as f:
+    raw = f.read()
+import json as _json
+stored = _json.loads(raw)
+check("private 已加密", stored.get("dpapi") is True and "甲" not in raw and "b&c" not in raw)
+# 旧版明文格式兼容(返回内容,下次保存自动升级)
+with open(cm.PRIVATE_FILE, "w", encoding="utf-8") as f:
+    _json.dump(["旧明文1", "旧明文2"], f, ensure_ascii=False)
+check("旧明文兼容", cm.load_private() == ["旧明文1", "旧明文2"])
+# 解密失败不覆盖原文件(伪造密文)
+with open(cm.PRIVATE_FILE, "w", encoding="utf-8") as f:
+    f.write('{"dpapi": true, "data": "AAAAzw=="}')
+check("坏密文返回空", cm.load_private() == [])
+# 启动迁移:明文文件 → 立即升级加密
+with open(cm.PRIVATE_FILE, "w", encoding="utf-8") as f:
+    _json.dump(["迁移项"], f, ensure_ascii=False)
+core = cm.ClipboardCore.__new__(cm.ClipboardCore)
+core.private = cm.load_private()
+core._migrate_private()
+with open(cm.PRIVATE_FILE, "r", encoding="utf-8") as f:
+    check("明文自动升级", _json.load(f).get("dpapi") is True)
 
 # ---- 敏感识别(顺带回归) ----
 check("识别 API key", cm.is_sensitive("sk-" + "a" * 30))
