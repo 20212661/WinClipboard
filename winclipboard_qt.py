@@ -10,9 +10,6 @@ clipboard_manager.py(热键 / 托盘 / 剪贴板 / 敏感隔离 / 持久化)。
 import os
 import sys
 import io
-import time
-import struct
-import hashlib
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -686,12 +683,8 @@ class PrivateWindow(QWidget):
         if not item:
             return
         i = self.lst.row(item)
-        content = self.app.private[i]
-        self.app._ignore_clip_until = time.monotonic() + 0.5
-        self.app._set_clipboard_text(content)
+        self.app.core.paste_text(self.app.private[i])
         self.hide()
-        if self.app.cfg.get("auto_paste", True):
-            self.app.worker.cmd_q.put(("paste",))
 
     def do_del(self):
         item = self.lst.currentItem()
@@ -703,7 +696,7 @@ class PrivateWindow(QWidget):
     def do_clear(self):
         box = MessageBox("私密内容", "确定清空全部私密内容?", self)
         if box.exec():
-            self.app.private = []
+            self.app.private.clear()   # 原地清空,保持核心引用有效
             cm.save_private(self.app.private)
             self.refresh()
 
@@ -1038,24 +1031,43 @@ class ImageEditor(QWidget):
 # 应用主体(后端逻辑不变)
 # ============================================================
 class WinClipboardApp(QObject):
+    # ---- 核心状态别名(只读代理到 self.core;容器原地修改,引用稳定) ----
+    @property
+    def cfg(self):
+        return self.core.cfg
+
+    @property
+    def history(self):
+        return self.core.history
+
+    @property
+    def private(self):
+        return self.core.private
+
+    @property
+    def worker(self):
+        return self.core.worker
+
+    @property
+    def signal_q(self):
+        return self.core.signal_q
+
+    def _after_history_change(self):
+        """核心回调:剪贴捕获入史后,面板可见时合并刷新(防抖)。"""
+        if getattr(self, "panel", None) is not None and self.panel.isVisible():
+            self._view_timer.start()
+
     def __init__(self, qapp):
         super().__init__()
         self.qapp = qapp
-        self.cfg = cm.load_config()
-        self.max_items = int(self.cfg.get("max_items", 100))
-        self.history = cm.load_history()
-        self.private = cm.load_private()
         self.category = "all"
         self.query = ""
         self.selected = None
         self._view = []
         self._card_widgets = []
-        self.signal_q = cm.queue.Queue()
-        self._ignore_clip_until = 0.0
         self._warned_hotkey = False
         self._editors = []
         self._thumbs = {}
-        self.icon = QIcon(cm.ICON_FILE) if os.path.exists(cm.ICON_FILE) else QIcon()
 
         cm.ensure_dirs()
         if not os.path.exists(cm.ICON_FILE):
@@ -1063,10 +1075,10 @@ class WinClipboardApp(QObject):
                 cm.make_icon(cm.ICON_FILE)
             except Exception:
                 pass
-        self._migrate_images()
+        self.icon = QIcon(cm.ICON_FILE) if os.path.exists(cm.ICON_FILE) else QIcon()
 
-        self.worker = cm.TrayWorker(self)
-        self.worker.start()
+        # 共享核心(状态加载 + 历史迁移 + 后台线程启动)
+        self.core = cm.ClipboardCore(on_change=self._after_history_change)
 
         self.panel = PanelWindow(self)
         self.private_win = None
@@ -1087,187 +1099,11 @@ class WinClipboardApp(QObject):
 
         QTimer.singleShot(600, self._prewarm)
 
-    # ---- 剪贴板读取(工作线程) ----
-    def read_clipboard_now(self):
-        hwnd = self.worker.hwnd
-        for _ in range(6):
-            try:
-                cm.win32clipboard.OpenClipboard(hwnd)
-                try:
-                    if cm.win32clipboard.IsClipboardFormatAvailable(cm.win32clipboard.CF_HDROP):
-                        files = cm.win32clipboard.GetClipboardData(cm.win32clipboard.CF_HDROP)
-                        files = [str(f) for f in (files or [])][:50]
-                        if files:
-                            return ("files", files)
-                    if cm.win32clipboard.IsClipboardFormatAvailable(cm.win32clipboard.CF_DIB):
-                        dib = cm.win32clipboard.GetClipboardData(cm.win32clipboard.CF_DIB)
-                        return self._store_image(dib)
-                    if cm.win32clipboard.IsClipboardFormatAvailable(cm.win32clipboard.CF_UNICODETEXT):
-                        t = cm.win32clipboard.GetClipboardData(cm.win32clipboard.CF_UNICODETEXT)
-                        if t:
-                            t = t.rstrip("\r\n")
-                            if t.strip("\r\n\t "):
-                                return ("text", t)
-                finally:
-                    cm.win32clipboard.CloseClipboard()
-                return None
-            except Exception:
-                time.sleep(0.03)
-        return None
-
-    def _store_image(self, dib):
-        try:
-            data = cm.dib_to_png_bytes(dib)
-            hsh = hashlib.sha1(data).hexdigest()
-            path = os.path.join(cm.IMAGE_DIR, "img_%s.png" % hsh)
-            if not os.path.exists(path):
-                with open(path, "wb") as f:
-                    f.write(data)
-            w = struct.unpack("<i", dib[4:8])[0]
-            h = abs(struct.unpack("<i", dib[8:12])[0])
-            return ("image", {"path": path, "w": w, "h": h, "hash": hsh})
-        except Exception:
-            return None
-
-    def _migrate_images(self):
-        try:
-            changed = False
-            for h in self.history:
-                if h.get("type") == "image" and not h.get("hash"):
-                    p = h.get("content", "")
-                    if os.path.exists(p):
-                        try:
-                            h["hash"] = cm.file_sha1(p)
-                            changed = True
-                        except Exception:
-                            h["hash"] = ""
-            seen, keep = set(), []
-            for h in self.history:
-                if h.get("type") != "image":
-                    keep.append(h)
-                    continue
-                p, hsh = h.get("content", ""), h.get("hash", "")
-                if not p or not os.path.exists(p):
-                    continue
-                if hsh and hsh in seen:
-                    continue
-                seen.add(hsh)
-                keep.append(h)
-            if len(keep) != len(self.history):
-                changed = True
-            self.history = keep
-            refs = {h["content"] for h in keep if h.get("type") == "image"}
-            if os.path.isdir(cm.IMAGE_DIR):
-                for fn in os.listdir(cm.IMAGE_DIR):
-                    fp = os.path.join(cm.IMAGE_DIR, fn)
-                    if fn.lower().endswith(".png") and fp not in refs:
-                        try:
-                            os.remove(fp)
-                            changed = True
-                        except Exception:
-                            pass
-            if changed:
-                cm.save_history(self.history)
-        except Exception:
-            pass
-
-    # ---- 历史维护 ----
-    def add_item(self, item):
-        kind, content = item
-        ts = time.time()
-        if kind == "text":
-            if self.cfg.get("sensitive_guard", True) and cm.is_sensitive(content):
-                self._add_private(content)
-                return
-            rec = {"type": "text", "content": content, "pinned": False, "ts": ts}
-            key = content
-        elif kind == "files":
-            paths = tuple(content)
-            rec = {"type": "files", "content": list(paths), "pinned": False, "ts": ts}
-            key = ("files", paths)
-        else:
-            rec = {"type": "image", "content": content["path"], "pinned": False,
-                   "w": content.get("w", 0), "h": content.get("h", 0),
-                   "hash": content.get("hash", ""), "ts": ts}
-            key = ("img", content.get("hash", ""))
-        for i, h in enumerate(self.history):
-            if h["type"] == "text":
-                k = h["content"]
-            elif h["type"] == "files":
-                k = ("files", tuple(h.get("content", [])))
-            else:
-                k = ("img", h.get("hash") or cm.file_sha1(h["content"]))
-            if k == key:
-                if h.get("pinned"):
-                    return
-                self.history.pop(i)
-                break
-        self.history.insert(0, rec)
-        self._evict()
-        cm.save_history(self.history)
-        if self.panel.isVisible():
-            self._view_timer.start()   # 合并短时间内的多次捕获,防抖刷新
-
-    def _evict(self):
-        excess = len(self.history) - self.max_items
-        if excess <= 0:
-            return
-        removed = 0
-        to_del = []
-        for i in range(len(self.history) - 1, -1, -1):
-            if removed >= excess:
-                break
-            if not self.history[i].get("pinned"):
-                if self.history[i]["type"] == "image":
-                    try:
-                        os.remove(self.history[i]["content"])
-                    except Exception:
-                        pass
-                to_del.append(i)
-                removed += 1
-        for i in sorted(to_del, reverse=True):
-            self.history.pop(i)
-
-    def _add_private(self, content):
-        try:
-            for i, s in enumerate(self.private):
-                if s == content:
-                    self.private.pop(i)
-                    break
-            self.private.insert(0, content)
-            del self.private[100:]
-            cm.save_private(self.private)
-            cm.log("敏感内容已隔离(仅入私密区,不写入普通历史)")
-        except Exception:
-            cm.log("私密区写入失败:\n%s" % traceback.format_exc())
+    # ---- 剪贴板读取 / 历史维护:见 cm.ClipboardCore(共享后端) ----
 
     # ---- 视图 ----
     def refresh_view(self):
-        q = self.query.strip().lower()
-        view = []
-        for i, h in enumerate(self.history):
-            t = h["type"]
-            if self.category == "text" and t != "text":
-                continue
-            if self.category == "image" and t != "image":
-                continue
-            if self.category == "files" and t != "files":
-                continue
-            if self.category == "link" and not (t == "text" and cm.url_info(h["content"])):
-                continue
-            if q:
-                if t == "text":
-                    if q not in h["content"].lower():
-                        continue
-                elif t == "files":
-                    blob = (os.path.basename(h["content"][0]).lower() + " "
-                            + " ".join(h["content"]).lower())
-                    if q not in blob:
-                        continue
-                elif t == "image":
-                    if q not in ("图片 截图 %s×%s" % (h.get("w", 0), h.get("h", 0))).lower():
-                        continue
-            view.append(i)
+        view = self.core.filter_view(self.category, self.query)
         self._view = view
         self.panel.set_view(view, self.history)
         total = len(self.history)
@@ -1315,47 +1151,10 @@ class WinClipboardApp(QObject):
         self.paste_rec(rec)
 
     def paste_rec(self, rec):
-        if rec["type"] == "files":
-            existing = [p for p in rec["content"] if os.path.exists(p)]
-            if not existing:
-                MessageBox("WinClipboard", "文件已不存在,无法粘贴。", self.panel).exec()
-                return
-            rec["content"] = existing
-        self._ignore_clip_until = time.monotonic() + 0.5
-        self._set_clipboard(rec)
+        if not self.core.paste_record(rec):
+            MessageBox("WinClipboard", "文件已不存在,无法粘贴。", self.panel).exec()
+            return
         self.panel.hide_panel()
-        if self.cfg.get("auto_paste", True):
-            self.worker.cmd_q.put(("paste",))
-        try:
-            self.history.remove(rec)
-            self.history.insert(0, rec)
-            cm.save_history(self.history)
-        except Exception:
-            pass
-
-    def _set_clipboard(self, rec):
-        for _ in range(6):
-            try:
-                cm.win32clipboard.OpenClipboard(self.worker.hwnd)
-                try:
-                    cm.win32clipboard.EmptyClipboard()
-                    if rec["type"] == "text":
-                        cm.win32clipboard.SetClipboardData(
-                            cm.win32clipboard.CF_UNICODETEXT, rec["content"])
-                    elif rec["type"] == "files":
-                        cm.win32clipboard.SetClipboardData(
-                            cm.win32clipboard.CF_HDROP, cm.build_dropfiles(rec["content"]))
-                    else:
-                        cm.win32clipboard.SetClipboardData(
-                            cm.win32clipboard.CF_DIB, cm.png_to_dib(rec["content"]))
-                finally:
-                    cm.win32clipboard.CloseClipboard()
-                return
-            except Exception:
-                time.sleep(0.03)
-
-    def _set_clipboard_text(self, content):
-        self._set_clipboard({"type": "text", "content": content})
 
     # ---- 卡片动作 / 菜单 ----
     def card_action(self, act, card):
@@ -1387,23 +1186,13 @@ class WinClipboardApp(QObject):
     def toggle_pin(self):
         if self.selected is None or self.selected >= len(self._view):
             return
-        hi = self._view[self.selected]
-        self.history[hi]["pinned"] = not self.history[hi].get("pinned", False)
-        cm.save_history(self.history)
+        self.core.toggle_pin_at(self._view[self.selected])
         self.refresh_view()
 
     def delete_selected(self):
         if self.selected is None or self.selected >= len(self._view):
             return
-        hi = self._view[self.selected]
-        rec = self.history[hi]
-        if rec["type"] == "image":
-            try:
-                os.remove(rec["content"])
-            except Exception:
-                pass
-        self.history.pop(hi)
-        cm.save_history(self.history)
+        self.core.delete_at(self._view[self.selected])
         self.refresh_view()
 
     def open_editor(self, rec):
@@ -1417,14 +1206,7 @@ class WinClipboardApp(QObject):
 
     # ---- 托盘动作 ----
     def clear_all(self):
-        for h in self.history:
-            if not h.get("pinned") and h["type"] == "image":
-                try:
-                    os.remove(h["content"])
-                except Exception:
-                    pass
-        self.history = [h for h in self.history if h.get("pinned")]
-        cm.save_history(self.history)
+        self.core.clear_unpinned()
         self.refresh_view()
 
     def show_private(self):
@@ -1447,39 +1229,6 @@ class WinClipboardApp(QObject):
                    "右键托盘图标: 菜单\n\n"
                    "数据目录:\n" + cm.APP_DIR, self.panel).exec()
 
-    def is_autostart(self):
-        try:
-            key = cm.win32api.RegOpenKeyEx(
-                cm.win32con.HKEY_CURRENT_USER, cm.RUN_KEY, 0, cm.win32con.KEY_READ)
-            try:
-                cm.win32api.RegQueryValueEx(key, cm.APP_NAME)
-                return True
-            finally:
-                cm.win32api.RegCloseKey(key)
-        except Exception:
-            return False
-
-    def toggle_autostart(self):
-        if self.is_autostart():
-            try:
-                key = cm.win32api.RegOpenKeyEx(
-                    cm.win32con.HKEY_CURRENT_USER, cm.RUN_KEY, 0, cm.win32con.KEY_SET_VALUE)
-                cm.win32api.RegDeleteValue(key, cm.APP_NAME)
-                cm.win32api.RegCloseKey(key)
-            except Exception:
-                pass
-        else:
-            pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-            val = '"%s" "%s"' % (pyw if os.path.exists(pyw) else sys.executable,
-                                 os.path.abspath(__file__))
-            try:
-                key = cm.win32api.RegOpenKeyEx(
-                    cm.win32con.HKEY_CURRENT_USER, cm.RUN_KEY, 0, cm.win32con.KEY_SET_VALUE)
-                cm.win32api.RegSetValueEx(key, cm.APP_NAME, 0, cm.win32con.REG_SZ, val)
-                cm.win32api.RegCloseKey(key)
-            except Exception:
-                pass
-
     def _warn_hotkey(self):
         if self._warned_hotkey:
             return
@@ -1490,8 +1239,7 @@ class WinClipboardApp(QObject):
                    self.panel).exec()
 
     def quit_app(self):
-        cm.save_history(self.history)
-        cm.save_private(self.private)
+        self.core.save_all()
         self.worker.cmd_q.put(("quit",))
         self.qapp.quit()
 
@@ -1511,7 +1259,7 @@ class WinClipboardApp(QObject):
         if kind == "clip":
             item = rest[0]
             if item:
-                self.add_item(item)
+                self.core.add_item(item)
         elif kind == "hotkey":
             if self.panel.isVisible():
                 self.panel.hide_panel()
@@ -1529,7 +1277,7 @@ class WinClipboardApp(QObject):
             elif act == "private":
                 self.show_private()
             elif act == "autostart":
-                self.toggle_autostart()
+                self.core.toggle_autostart()
             elif act == "about":
                 self.about()
             elif act == "hotkey_fail":

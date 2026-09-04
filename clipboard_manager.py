@@ -685,6 +685,343 @@ class TrayWorker(threading.Thread):
 
 
 # ============================================================
+# 核心后端(与 UI 无关;tkinter / Qt 两版前端共用同一实例)
+# ============================================================
+class ClipboardCore:
+    """剪贴板核心状态机:配置 / 历史 / 私密区 / 捕获 / 回写 / 淘汰 / 自启。
+
+    约定:
+    - history / private / cfg 容器始终原地修改(不重新绑定),
+      前端在初始化后可安全持有同名别名;
+    - on_change:普通历史变化(剪贴捕获)后的回调,由前端决定是否/何时刷新视图;
+    - 托盘/热键/监听线程(worker)由本类创建并启动,事件经 signal_q 抛给前端轮询。
+    """
+
+    def __init__(self, on_change=None):
+        self.cfg = load_config()
+        self.max_items = int(self.cfg.get("max_items", 100))
+        self.history = load_history()
+        self.private = load_private()   # 敏感内容隔离区(不进普通面板)
+        self.signal_q = queue.Queue()
+        self._ignore_clip_until = 0.0   # 抑制自写入剪贴板事件的截止时间(单调钟)
+        self.on_change = on_change or (lambda: None)
+        # 历史迁移:补齐哈希、合并重复图片、清理孤儿文件(须在后台线程启动前)
+        self._migrate_images()
+        # 后台线程(托盘 / 全局热键 / 剪贴板监听)
+        self.worker = TrayWorker(self)
+        self.worker.start()
+
+    # ---- 剪贴板读取(在工作线程调用) ----
+    def read_clipboard_now(self):
+        hwnd = self.worker.hwnd
+        for _ in range(6):
+            try:
+                win32clipboard.OpenClipboard(hwnd)
+                try:
+                    # 文件(资源管理器复制文件/文件夹)优先
+                    if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_HDROP):
+                        files = win32clipboard.GetClipboardData(win32clipboard.CF_HDROP)
+                        files = [str(f) for f in (files or [])][:50]
+                        if files:
+                            return ("files", files)
+                    if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_DIB):
+                        dib = win32clipboard.GetClipboardData(win32clipboard.CF_DIB)
+                        return self._store_image(dib)
+                    if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
+                        t = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+                        if t:
+                            t = t.rstrip("\r\n")   # 统一尾随换行,便于去重
+                            if t.strip("\r\n\t "):
+                                return ("text", t)
+                finally:
+                    win32clipboard.CloseClipboard()
+                return None
+            except Exception:
+                time.sleep(0.03)
+        return None
+
+    def _store_image(self, dib):
+        try:
+            data = dib_to_png_bytes(dib)
+            hsh = hashlib.sha1(data).hexdigest()
+            path = os.path.join(IMAGE_DIR, "img_%s.png" % hsh)
+            if not os.path.exists(path):
+                with open(path, "wb") as f:
+                    f.write(data)
+            w = struct.unpack("<i", dib[4:8])[0]
+            h = abs(struct.unpack("<i", dib[8:12])[0])
+            return ("image", {"path": path, "w": w, "h": h, "hash": hsh})
+        except Exception:
+            return None
+
+    def _migrate_images(self):
+        """图片历史迁移:补齐 SHA-1 哈希、合并重复内容、清理孤儿文件。"""
+        try:
+            changed = False
+            for h in self.history:
+                if h.get("type") == "image" and not h.get("hash"):
+                    p = h.get("content", "")
+                    if os.path.exists(p):
+                        try:
+                            h["hash"] = file_sha1(p)
+                            changed = True
+                        except Exception:
+                            h["hash"] = ""
+            # 内容去重:同一哈希只保留第一条
+            seen, keep = set(), []
+            for h in self.history:
+                if h.get("type") != "image":
+                    keep.append(h)
+                    continue
+                p, hsh = h.get("content", ""), h.get("hash", "")
+                if not p or not os.path.exists(p):
+                    continue            # 丢弃文件已丢失的条目
+                if hsh and hsh in seen:
+                    continue            # 重复内容,丢弃条目
+                seen.add(hsh)
+                keep.append(h)
+            if len(keep) != len(self.history):
+                changed = True
+            self.history[:] = keep      # 原地替换,保持前端别名有效
+            # 清理不被任何条目引用的孤儿图片文件
+            refs = {h["content"] for h in keep if h.get("type") == "image"}
+            if os.path.isdir(IMAGE_DIR):
+                for fn in os.listdir(IMAGE_DIR):
+                    fp = os.path.join(IMAGE_DIR, fn)
+                    if fn.lower().endswith(".png") and fp not in refs:
+                        try:
+                            os.remove(fp)
+                            changed = True
+                        except Exception:
+                            pass
+            if changed:
+                save_history(self.history)
+        except Exception:
+            pass
+
+    # ---- 历史维护 ----
+    def add_item(self, item):
+        kind, content = item
+        ts = time.time()
+        if kind == "text":
+            # 敏感内容自动隔离:进私密区,不写入普通历史
+            if self.cfg.get("sensitive_guard", True) and is_sensitive(content):
+                self._add_private(content)
+                return
+            rec = {"type": "text", "content": content, "pinned": False, "ts": ts}
+            key = content
+        elif kind == "files":
+            paths = tuple(content)
+            rec = {"type": "files", "content": list(paths), "pinned": False, "ts": ts}
+            key = ("files", paths)
+        else:
+            rec = {"type": "image", "content": content["path"], "pinned": False,
+                   "w": content.get("w", 0), "h": content.get("h", 0),
+                   "hash": content.get("hash", ""), "ts": ts}
+            key = ("img", content.get("hash", ""))
+
+        # 去重:已存在则移除旧的,放到最前(置顶的不动)
+        for i, h in enumerate(self.history):
+            if h["type"] == "text":
+                k = h["content"]
+            elif h["type"] == "files":
+                k = ("files", tuple(h.get("content", [])))
+            else:
+                k = ("img", h.get("hash") or file_sha1(h["content"]))
+            if k == key:
+                if h.get("pinned"):
+                    return
+                self.history.pop(i)
+                break
+        self.history.insert(0, rec)
+        self._evict()
+        save_history(self.history)
+        self.on_change()
+
+    def _evict(self):
+        excess = len(self.history) - self.max_items
+        if excess <= 0:
+            return
+        removed = 0
+        to_del = []
+        for i in range(len(self.history) - 1, -1, -1):
+            if removed >= excess:
+                break
+            if not self.history[i].get("pinned"):
+                if self.history[i]["type"] == "image":
+                    try:
+                        os.remove(self.history[i]["content"])
+                    except Exception:
+                        pass
+                to_del.append(i)
+                removed += 1
+        for i in sorted(to_del, reverse=True):
+            self.history.pop(i)
+
+    def _add_private(self, content):
+        """敏感内容写入私密区(去重、上限 100 条)。"""
+        try:
+            for i, s in enumerate(self.private):
+                if s == content:
+                    self.private.pop(i)
+                    break
+            self.private.insert(0, content)
+            del self.private[100:]
+            save_private(self.private)
+            log("敏感内容已隔离(仅入私密区,不写入普通历史)")
+        except Exception:
+            log("私密区写入失败:\n%s" % traceback.format_exc())
+
+    # ---- 列表过滤 ----
+    def filter_view(self, category, query=""):
+        """按分类 + 关键词过滤,返回命中条目在 history 中的索引列表。"""
+        q = (query or "").strip().lower()
+        view = []
+        for i, h in enumerate(self.history):
+            t = h["type"]
+            if category == "text" and t != "text":
+                continue
+            if category == "image" and t != "image":
+                continue
+            if category == "files" and t != "files":
+                continue
+            if category == "link" and not (t == "text" and url_info(h["content"])):
+                continue
+            if q:
+                if t == "text":
+                    if q not in h["content"].lower():
+                        continue
+                elif t == "files":
+                    blob = (os.path.basename(h["content"][0]).lower() + " "
+                            + " ".join(h["content"]).lower())
+                    if q not in blob:
+                        continue
+                elif t == "image":
+                    if q not in ("图片 截图 %s×%s" % (h.get("w", 0), h.get("h", 0))).lower():
+                        continue
+            view.append(i)
+        return view
+
+    # ---- 回写 / 粘贴 ----
+    def paste_record(self, rec):
+        """写回剪贴板 + 自动粘贴排队 + 置顶到最近。文件全部丢失时返回 False。"""
+        if rec["type"] == "files":
+            existing = [p for p in rec["content"] if os.path.exists(p)]
+            if not existing:
+                return False
+            rec["content"] = existing
+        # 时间窗抑制本次自写入触发的剪贴板回调
+        self._ignore_clip_until = time.monotonic() + 0.5
+        self._set_clipboard(rec)
+        if self.cfg.get("auto_paste", True):
+            self.worker.cmd_q.put(("paste",))
+        try:
+            self.history.remove(rec)
+            self.history.insert(0, rec)
+            save_history(self.history)
+        except Exception:
+            pass
+        return True
+
+    def paste_text(self, content):
+        """私密区文本:写回剪贴板 + 自动粘贴排队。"""
+        self._ignore_clip_until = time.monotonic() + 0.5
+        self._set_clipboard({"type": "text", "content": content})
+        if self.cfg.get("auto_paste", True):
+            self.worker.cmd_q.put(("paste",))
+
+    def _set_clipboard(self, rec):
+        for _ in range(6):
+            try:
+                win32clipboard.OpenClipboard(self.worker.hwnd)
+                try:
+                    win32clipboard.EmptyClipboard()
+                    if rec["type"] == "text":
+                        win32clipboard.SetClipboardData(
+                            win32clipboard.CF_UNICODETEXT, rec["content"])
+                    elif rec["type"] == "files":
+                        win32clipboard.SetClipboardData(
+                            win32clipboard.CF_HDROP, build_dropfiles(rec["content"]))
+                    else:
+                        win32clipboard.SetClipboardData(
+                            win32clipboard.CF_DIB, png_to_dib(rec["content"]))
+                finally:
+                    win32clipboard.CloseClipboard()
+                return
+            except Exception:
+                time.sleep(0.03)
+
+    # ---- 条目状态操作 ----
+    def toggle_pin_at(self, hi):
+        self.history[hi]["pinned"] = not self.history[hi].get("pinned", False)
+        save_history(self.history)
+
+    def delete_at(self, hi):
+        rec = self.history.pop(hi)
+        if rec["type"] == "image":
+            try:
+                os.remove(rec["content"])
+            except Exception:
+                pass
+        save_history(self.history)
+        return rec
+
+    def clear_unpinned(self):
+        """清空未置顶条目(连同其图片文件);置顶保留。"""
+        for h in self.history:
+            if not h.get("pinned") and h["type"] == "image":
+                try:
+                    os.remove(h["content"])
+                except Exception:
+                    pass
+        self.history[:] = [h for h in self.history if h.get("pinned")]
+        save_history(self.history)
+
+    def save_all(self):
+        save_history(self.history)
+        save_private(self.private)
+
+    # ---- 开机自启 ----
+    def is_autostart(self):
+        try:
+            key = win32api.RegOpenKeyEx(
+                win32con.HKEY_CURRENT_USER, RUN_KEY, 0, win32con.KEY_READ)
+            try:
+                win32api.RegQueryValueEx(key, APP_NAME)
+                return True
+            finally:
+                win32api.RegCloseKey(key)
+        except Exception:
+            return False
+
+    def toggle_autostart(self):
+        if self.is_autostart():
+            try:
+                key = win32api.RegOpenKeyEx(
+                    win32con.HKEY_CURRENT_USER, RUN_KEY, 0, win32con.KEY_SET_VALUE)
+                win32api.RegDeleteValue(key, APP_NAME)
+                win32api.RegCloseKey(key)
+            except Exception:
+                pass
+        else:
+            # sys.argv[0] 是实际运行的入口脚本(两版各自正确)
+            val = '"{}" "{}"'.format(self._pythonw(), os.path.abspath(sys.argv[0]))
+            try:
+                key = win32api.RegOpenKeyEx(
+                    win32con.HKEY_CURRENT_USER, RUN_KEY, 0, win32con.KEY_SET_VALUE)
+                win32api.RegSetValueEx(key, APP_NAME, 0, win32con.REG_SZ, val)
+                win32api.RegCloseKey(key)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _pythonw():
+        d = os.path.dirname(sys.executable)
+        cand = os.path.join(d, "pythonw.exe")
+        return cand if os.path.exists(cand) else sys.executable
+
+
+# ============================================================
 # 图片标注辅助(模块级函数,供 ImageEditor 使用)
 # ============================================================
 def _load_font(size):
@@ -1591,15 +1928,34 @@ class ClipboardApp:
     PANEL_H_MAX = 720
     F_FAMILY = "Segoe UI"   # 实际字体在 __init__ 中按可用性解析(需根窗口)
 
+    # ---- 核心状态别名(只读代理到 self.core;容器原地修改,引用稳定) ----
+    @property
+    def cfg(self):
+        return self.core.cfg
+
+    @property
+    def history(self):
+        return self.core.history
+
+    @property
+    def private(self):
+        return self.core.private
+
+    @property
+    def worker(self):
+        return self.core.worker
+
+    @property
+    def signal_q(self):
+        return self.core.signal_q
+
+    def _after_history_change(self):
+        """核心回调:剪贴捕获入史后,面板可见时刷新列表。"""
+        if self._visible():
+            self.refresh_list(self._query())
+
     def __init__(self):
-        self.cfg = load_config()
-        self.max_items = int(self.cfg.get("max_items", 100))
-        self.history = load_history()
-        self.private = load_private()   # 敏感内容隔离区(不进普通面板)
         self.category = "all"           # all/text/image/link/files
-        self.signal_q = queue.Queue()
-        self.cmd_q_holder = None
-        self._ignore_clip_until = 0.0   # 抑制自写入剪贴板事件的截止时间(单调钟)
         self._view = []          # 历史索引视图(由 CardList 维护)
         self._editors = []       # 打开的图片编辑器
         self._warned_hotkey = False
@@ -1607,12 +1963,8 @@ class ClipboardApp:
         # 环境 DWM 缩放补偿(正常桌面为 1.0)
         self._scale = env_scale()
 
-        # 历史迁移:补齐哈希、合并重复图片、清理孤儿文件(须在后台线程启动前)
-        self._migrate_images()
-
-        # 后台线程
-        self.worker = TrayWorker(self)
-        self.worker.start()
+        # 共享核心(状态加载 + 历史迁移 + 后台线程启动)
+        self.core = ClipboardCore(on_change=self._after_history_change)
 
         # 主窗口
         self.root = tk.Tk()
@@ -1819,7 +2171,7 @@ class ClipboardApp:
         if kind == "clip":
             item = rest[0]
             if item:
-                self.add_item(item)
+                self.core.add_item(item)
         elif kind == "hotkey":
             self.toggle()
         elif kind == "tray":
@@ -1831,7 +2183,7 @@ class ClipboardApp:
             elif act == "private":
                 self.show_private()
             elif act == "autostart":
-                self.toggle_autostart()
+                self.core.toggle_autostart()
             elif act == "about":
                 self.about()
             elif act == "hotkey_fail":
@@ -1849,195 +2201,11 @@ class ClipboardApp:
             "可在 {} 中修改 hotkey_mod / hotkey_key 后重启。".format(CONFIG_FILE),
             parent=self.root)
 
-    # ---- 剪贴板读取(在工作线程调用) ----
-    def read_clipboard_now(self):
-        hwnd = self.worker.hwnd
-        for _ in range(6):
-            try:
-                win32clipboard.OpenClipboard(hwnd)
-                try:
-                    # 文件(资源管理器复制文件/文件夹)优先
-                    if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_HDROP):
-                        files = win32clipboard.GetClipboardData(win32clipboard.CF_HDROP)
-                        files = [str(f) for f in (files or [])][:50]
-                        if files:
-                            return ("files", files)
-                    if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_DIB):
-                        dib = win32clipboard.GetClipboardData(win32clipboard.CF_DIB)
-                        return self._store_image(dib)
-                    if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
-                        t = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-                        if t:
-                            t = t.rstrip("\r\n")   # 统一尾随换行,便于去重
-                            if t.strip("\r\n\t "):
-                                return ("text", t)
-                finally:
-                    win32clipboard.CloseClipboard()
-                return None
-            except Exception:
-                time.sleep(0.03)
-        return None
-
-    def _store_image(self, dib):
-        try:
-            data = dib_to_png_bytes(dib)
-            hsh = hashlib.sha1(data).hexdigest()
-            path = os.path.join(IMAGE_DIR, "img_%s.png" % hsh)
-            if not os.path.exists(path):
-                with open(path, "wb") as f:
-                    f.write(data)
-            w = struct.unpack("<i", dib[4:8])[0]
-            h = abs(struct.unpack("<i", dib[8:12])[0])
-            return ("image", {"path": path, "w": w, "h": h, "hash": hsh})
-        except Exception:
-            return None
-
-    def _migrate_images(self):
-        """图片历史迁移:补齐 SHA-1 哈希、合并重复内容、清理孤儿文件。"""
-        try:
-            changed = False
-            for h in self.history:
-                if h.get("type") == "image" and not h.get("hash"):
-                    p = h.get("content", "")
-                    if os.path.exists(p):
-                        try:
-                            h["hash"] = file_sha1(p)
-                            changed = True
-                        except Exception:
-                            h["hash"] = ""
-            # 内容去重:同一哈希只保留第一条
-            seen, keep = set(), []
-            for h in self.history:
-                if h.get("type") != "image":
-                    keep.append(h)
-                    continue
-                p, hsh = h.get("content", ""), h.get("hash", "")
-                if not p or not os.path.exists(p):
-                    continue            # 丢弃文件已丢失的条目
-                if hsh and hsh in seen:
-                    continue            # 重复内容,丢弃条目
-                seen.add(hsh)
-                keep.append(h)
-            if len(keep) != len(self.history):
-                changed = True
-            self.history = keep
-            # 清理不被任何条目引用的孤儿图片文件
-            refs = {h["content"] for h in keep if h.get("type") == "image"}
-            if os.path.isdir(IMAGE_DIR):
-                for fn in os.listdir(IMAGE_DIR):
-                    fp = os.path.join(IMAGE_DIR, fn)
-                    if fn.lower().endswith(".png") and fp not in refs:
-                        try:
-                            os.remove(fp)
-                            changed = True
-                        except Exception:
-                            pass
-            if changed:
-                save_history(self.history)
-        except Exception:
-            pass
-
-    # ---- 历史维护 ----
-    def add_item(self, item):
-        kind, content = item
-        ts = time.time()
-        if kind == "text":
-            # 敏感内容自动隔离:进私密区,不写入普通历史
-            if self.cfg.get("sensitive_guard", True) and is_sensitive(content):
-                self._add_private(content)
-                return
-            rec = {"type": "text", "content": content, "pinned": False, "ts": ts}
-            key = content
-        elif kind == "files":
-            paths = tuple(content)
-            rec = {"type": "files", "content": list(paths), "pinned": False, "ts": ts}
-            key = ("files", paths)
-        else:
-            rec = {"type": "image", "content": content["path"], "pinned": False,
-                   "w": content.get("w", 0), "h": content.get("h", 0),
-                   "hash": content.get("hash", ""), "ts": ts}
-            key = ("img", content.get("hash", ""))
-
-        # 去重:已存在则移除旧的,放到最前(置顶的不动)
-        for i, h in enumerate(self.history):
-            if h["type"] == "text":
-                k = h["content"]
-            elif h["type"] == "files":
-                k = ("files", tuple(h.get("content", [])))
-            else:
-                k = ("img", h.get("hash") or file_sha1(h["content"]))
-            if k == key:
-                if h.get("pinned"):
-                    return
-                self.history.pop(i)
-                break
-        self.history.insert(0, rec)
-        self._evict()
-        save_history(self.history)
-        if self._visible():
-            self.refresh_list(self._query())
-
-    def _add_private(self, content):
-        """敏感内容写入私密区(去重、上限 100 条)。"""
-        try:
-            for i, s in enumerate(self.private):
-                if s == content:
-                    self.private.pop(i)
-                    break
-            self.private.insert(0, content)
-            del self.private[100:]
-            save_private(self.private)
-            log("敏感内容已隔离(仅入私密区,不写入普通历史)")
-        except Exception:
-            log("私密区写入失败:\n%s" % traceback.format_exc())
-
-    def _evict(self):
-        excess = len(self.history) - self.max_items
-        if excess <= 0:
-            return
-        removed = 0
-        to_del = []
-        for i in range(len(self.history) - 1, -1, -1):
-            if removed >= excess:
-                break
-            if not self.history[i].get("pinned"):
-                if self.history[i]["type"] == "image":
-                    try:
-                        os.remove(self.history[i]["content"])
-                    except Exception:
-                        pass
-                to_del.append(i)
-                removed += 1
-        for i in sorted(to_del, reverse=True):
-            self.history.pop(i)
+    # ---- 剪贴板读取 / 历史维护:见 ClipboardCore(共享后端) ----
 
     # ---- 列表显示 / 过滤 ----
     def refresh_list(self, query=""):
-        q = (query or "").strip().lower()
-        view = []
-        for i, h in enumerate(self.history):
-            t = h["type"]
-            if self.category == "text" and t != "text":
-                continue
-            if self.category == "image" and t != "image":
-                continue
-            if self.category == "files" and t != "files":
-                continue
-            if self.category == "link" and not (t == "text" and url_info(h["content"])):
-                continue
-            if q:
-                if t == "text":
-                    if q not in h["content"].lower():
-                        continue
-                elif t == "files":
-                    blob = (os.path.basename(h["content"][0]).lower() + " "
-                            + " ".join(h["content"]).lower())
-                    if q not in blob:
-                        continue
-                elif t == "image":
-                    if q not in ("图片 截图 %s×%s" % (h.get("w", 0), h.get("h", 0))).lower():
-                        continue
-            view.append(i)
+        view = self.core.filter_view(self.category, query)
         self.cl.set_view(view)
         self.foot.set_count(len(self.history), len(view))
 
@@ -2056,48 +2224,11 @@ class ClipboardApp:
         self._paste_record(self.history[hi])
 
     def _paste_record(self, rec):
-        if rec["type"] == "files":
-            # 过滤已不存在的文件;全都不在则提示
-            existing = [p for p in rec["content"] if os.path.exists(p)]
-            if not existing:
-                messagebox.showwarning("WinClipboard", "文件已不存在,无法粘贴。",
-                                       parent=self.root)
-                return
-            rec["content"] = existing
-        # 时间窗抑制本次自写入触发的剪贴板回调
-        self._ignore_clip_until = time.monotonic() + 0.5
-        self._set_clipboard(rec)
+        if not self.core.paste_record(rec):
+            messagebox.showwarning("WinClipboard", "文件已不存在,无法粘贴。",
+                                   parent=self.root)
+            return
         self.hide()
-        if self.cfg.get("auto_paste", True):
-            self.worker.cmd_q.put(("paste",))
-        # 置顶到最近
-        try:
-            self.history.remove(rec)
-            self.history.insert(0, rec)
-            save_history(self.history)
-        except Exception:
-            pass
-
-    def _set_clipboard(self, rec):
-        for _ in range(6):
-            try:
-                win32clipboard.OpenClipboard(self.worker.hwnd)
-                try:
-                    win32clipboard.EmptyClipboard()
-                    if rec["type"] == "text":
-                        win32clipboard.SetClipboardData(
-                            win32clipboard.CF_UNICODETEXT, rec["content"])
-                    elif rec["type"] == "files":
-                        win32clipboard.SetClipboardData(
-                            win32clipboard.CF_HDROP, build_dropfiles(rec["content"]))
-                    else:
-                        win32clipboard.SetClipboardData(
-                            win32clipboard.CF_DIB, png_to_dib(rec["content"]))
-                finally:
-                    win32clipboard.CloseClipboard()
-                return
-            except Exception:
-                time.sleep(0.03)
 
     def card_action(self, act, vi):
         """卡片悬停操作按钮:粘贴 / 固定 / 删除 / 更多。"""
@@ -2147,27 +2278,17 @@ class ClipboardApp:
         self._editors.append(ImageEditor(self, rec))
 
     def toggle_pin(self):
-        vi = self.cl.selected()
-        hi = self.cl.view_index(vi)
+        hi = self._selected_index()
         if hi is None:
             return
-        self.history[hi]["pinned"] = not self.history[hi].get("pinned", False)
-        save_history(self.history)
+        self.core.toggle_pin_at(hi)
         self.refresh_list(self._query())
 
     def delete_selected(self):
-        vi = self.cl.selected()
-        hi = self.cl.view_index(vi)
+        hi = self._selected_index()
         if hi is None:
             return
-        rec = self.history[hi]
-        if rec["type"] == "image":
-            try:
-                os.remove(rec["content"])
-            except Exception:
-                pass
-        self.history.pop(hi)
-        save_history(self.history)
+        self.core.delete_at(hi)
         self.refresh_list(self._query())
 
     # ---- 显隐 ----
@@ -2323,12 +2444,7 @@ class ClipboardApp:
             i = sel()
             if i is None:
                 return
-            content = self.private[i]
-            self._ignore_clip_until = time.monotonic() + 0.5
-            self._set_clipboard({"type": "text", "content": content})
-            top.withdraw()
-            if self.cfg.get("auto_paste", True):
-                self.worker.cmd_q.put(("paste",))
+            self.core.paste_text(self.private[i])
             top.destroy()
 
         def do_delete():
@@ -2342,7 +2458,7 @@ class ClipboardApp:
         def do_clear():
             if not messagebox.askyesno("私密内容", "确定清空全部私密内容?", parent=top):
                 return
-            self.private = []
+            self.private.clear()   # 原地清空,保持核心引用有效
             save_private(self.private)
             lb.delete(0, "end")
 
@@ -2361,14 +2477,7 @@ class ClipboardApp:
             pass
 
     def clear_all(self):
-        for h in self.history:
-            if not h.get("pinned") and h["type"] == "image":
-                try:
-                    os.remove(h["content"])
-                except Exception:
-                    pass
-        self.history = [h for h in self.history if h.get("pinned")]
-        save_history(self.history)
+        self.core.clear_unpinned()
         if self._visible():
             self.refresh_list(self._query())
 
@@ -2390,48 +2499,9 @@ class ClipboardApp:
         foot.pack(pady=(0, 16))
         self._flat_btn(foot, "确定", top.destroy, primary=True, side="top")
 
-    # ---- 开机自启 ----
-    def is_autostart(self):
-        try:
-            key = win32api.RegOpenKeyEx(
-                win32con.HKEY_CURRENT_USER, RUN_KEY, 0, win32con.KEY_READ)
-            try:
-                win32api.RegQueryValueEx(key, APP_NAME)
-                return True
-            finally:
-                win32api.RegCloseKey(key)
-        except Exception:
-            return False
-
-    def toggle_autostart(self):
-        if self.is_autostart():
-            try:
-                key = win32api.RegOpenKeyEx(
-                    win32con.HKEY_CURRENT_USER, RUN_KEY, 0, win32con.KEY_SET_VALUE)
-                win32api.RegDeleteValue(key, APP_NAME)
-                win32api.RegCloseKey(key)
-            except Exception:
-                pass
-        else:
-            val = '"{}" "{}"'.format(self._pythonw(), os.path.abspath(sys.argv[0]))
-            try:
-                key = win32api.RegOpenKeyEx(
-                    win32con.HKEY_CURRENT_USER, RUN_KEY, 0, win32con.KEY_SET_VALUE)
-                win32api.RegSetValueEx(key, APP_NAME, 0, win32con.REG_SZ, val)
-                win32api.RegCloseKey(key)
-            except Exception:
-                pass
-
-    @staticmethod
-    def _pythonw():
-        d = os.path.dirname(sys.executable)
-        cand = os.path.join(d, "pythonw.exe")
-        return cand if os.path.exists(cand) else sys.executable
-
     # ---- 退出 ----
     def quit_app(self):
-        save_history(self.history)
-        save_private(self.private)
+        self.core.save_all()
         self.worker.cmd_q.put(("quit",))
         try:
             self.root.destroy()
