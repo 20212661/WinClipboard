@@ -32,8 +32,9 @@ from qfluentwidgets import (FluentIcon as FIF, setTheme, Theme,
                             setThemeColor, CardWidget,
                             SearchLineEdit, SegmentedWidget, ScrollArea, ToolButton,
                             TransparentToolButton, PrimaryPushButton, PushButton,
-                            RoundMenu, MessageBox, InfoBar, InfoBarPosition,
-                            BodyLabel, StrongBodyLabel, CaptionLabel, TitleLabel, Dialog)
+                            RoundMenu, MessageBox, MessageBoxBase, InfoBar,
+                            InfoBarPosition, BodyLabel, StrongBodyLabel,
+                            CaptionLabel, TitleLabel)
 from PySide6.QtWidgets import QGraphicsDropShadowEffect
 
 # ============================================================
@@ -710,6 +711,97 @@ class PrivateWindow(QWidget):
 # ============================================================
 # 图片编辑器
 # ============================================================
+class CompressDialog(MessageBoxBase):
+    """压缩 / 格式转换对话框。
+
+    基于 MessageBoxBase:内容放 viewLayout(自适应高度);
+    「复制到剪贴板」复用 yesButton,点击时经 validate() 执行压缩。
+    (不能直接用 Dialog —— 它 setFixedSize 固定了尺寸,且已有顶层布局,
+    再套 QVBoxLayout 不会生效。)
+    """
+
+    def __init__(self, editor):
+        super().__init__(editor)
+        self.editor = editor
+
+        self.titleLabel = StrongBodyLabel("压缩 / 格式转换")
+        self.viewLayout.addWidget(self.titleLabel)
+
+        self.quality = QSlider(Qt.Horizontal)
+        self.quality.setRange(10, 95)
+        self.quality.setValue(80)
+        self.viewLayout.addWidget(self.quality)
+        self.valueLabel = CaptionLabel("80")
+        self.quality.valueChanged.connect(self.valueLabel.setNum)
+        self.viewLayout.addWidget(self.valueLabel, 0, Qt.AlignRight)
+
+        self.radioJpg = QRadioButton("JPG(体积小,质量可调)")
+        self.radioPng = QRadioButton("PNG(无损)")
+        self.radioJpg.setChecked(True)
+        self.radioJpg.toggled.connect(self._on_format)
+        self.viewLayout.addWidget(self.radioJpg)
+        self.viewLayout.addWidget(self.radioPng)
+
+        self.saveButton = PushButton("💾 保存文件…")
+        self.saveButton.clicked.connect(self._on_save)
+        self.viewLayout.addWidget(self.saveButton, 0, Qt.AlignLeft)
+
+        self.yesButton.setText("复制到剪贴板")
+        self.cancelButton.setText("取消")
+        self.widget.setFixedWidth(380)
+
+    def _on_format(self, _):
+        # PNG 无损,质量滑条仅对 JPG 有效
+        on = self.radioJpg.isChecked()
+        self.quality.setEnabled(on)
+        self.valueLabel.setEnabled(on)
+
+    def _encode(self):
+        """按当前选项编码图片,返回字节流。"""
+        buf = io.BytesIO()
+        if self.radioJpg.isChecked():
+            self.editor.base.save(buf, "JPEG", quality=self.quality.value())
+        else:
+            self.editor.base.save(buf, "PNG")
+        return buf.getvalue()
+
+    def validate(self):
+        """点「复制到剪贴板」时执行(qfluentwidgets 扩展点);True 才关闭。"""
+        try:
+            img = cm.Image.open(io.BytesIO(self._encode()))
+            ok = cm.set_dib_to_clipboard(self.editor.app.worker.hwnd,
+                                         cm.pil_to_dib(img))
+        except Exception:
+            MessageBox("WinClipboard", "压缩失败。", self).exec()
+            return False
+        if ok:
+            self.editor.lbl_status.setText("✅ 已压缩并复制到剪贴板")
+            return True
+        InfoBar.error("复制失败", "剪贴板被占用,请稍后重试", parent=self.editor,
+                      position=InfoBarPosition.BOTTOM_LEFT)
+        return False
+
+    def _on_save(self):
+        if self.radioJpg.isChecked():
+            path, _ = QFileDialog.getSaveFileName(
+                self, "保存图片", "clipboard_compressed.jpg",
+                "JPEG 图片 (*.jpg)")
+        else:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "保存图片", "clipboard_compressed.png",
+                "PNG 图片 (*.png)")
+        if not path:
+            return
+        try:
+            with open(path, "wb") as f:
+                f.write(self._encode())
+        except Exception:
+            MessageBox("WinClipboard", "保存失败。", self).exec()
+            return
+        self.editor.lbl_status.setText("✅ 已保存: " + path)
+        self.accept()
+
+
 class ImageEditor(QWidget):
     def __init__(self, app, rec):
         super().__init__(None)
@@ -939,54 +1031,7 @@ class ImageEditor(QWidget):
                 MessageBox("WinClipboard", "保存失败。", self).exec()
 
     def _on_compress(self):
-        dlg = Dialog("压缩 / 格式转换", self)
-        v = QVBoxLayout(dlg)
-        v.addWidget(BodyLabel("质量"))
-        q = QSlider(Qt.Horizontal)
-        q.setRange(10, 95)
-        q.setValue(80)
-        v.addWidget(q)
-        rj = QRadioButton("JPG(体积小)")
-        rp = QRadioButton("PNG(无损)")
-        rj.setChecked(True)
-        v.addWidget(rj)
-        v.addWidget(rp)
-
-        def do_copy():
-            try:
-                b = io.BytesIO()
-                if rj.isChecked():
-                    self.base.save(b, "JPEG", quality=q.value())
-                else:
-                    self.base.save(b, "PNG")
-                b.seek(0)
-                ok = cm.set_dib_to_clipboard(self.app.worker.hwnd,
-                                             cm.pil_to_dib(cm.Image.open(b)))
-                self.lbl_status.setText("✅ 已压缩并复制到剪贴板" if ok else "❌ 复制失败")
-                dlg.accept()
-            except Exception:
-                MessageBox("WinClipboard", "压缩失败。", dlg).exec()
-
-        def do_save():
-            ext = ".jpg" if rj.isChecked() else ".png"
-            p, _ = QFileDialog.getSaveFileName(
-                dlg, "保存", "clipboard_compressed" + ext,
-                "JPEG 图片 (*.jpg)" if ext == ".jpg" else "PNG 图片 (*.png)")
-            if not p:
-                return
-            try:
-                if ext == ".jpg":
-                    self.base.save(p, "JPEG", quality=q.value())
-                else:
-                    self.base.save(p, "PNG")
-                self.lbl_status.setText("✅ 已保存: " + p)
-                dlg.accept()
-            except Exception:
-                MessageBox("WinClipboard", "保存失败。", dlg).exec()
-
-        dlg.setFixedWidth(320)
-        if dlg.exec():
-            pass
+        CompressDialog(self).exec()
 
 
 # ============================================================
