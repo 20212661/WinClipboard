@@ -98,6 +98,11 @@ DEFAULT_CFG = {
     "max_items": 100,
     "window_w": 600,
     "window_h_max": 720,
+    # ---- AI 工作流(Qt 版 UI 使用;两版前端共享配置) ----
+    # 服务: {"name","base_url","model","api_key"}  base_url 需兼容 OpenAI /chat/completions
+    # 工作流: {"name","steps":[{"service","prompt"}]}  prompt 中 {input} 为上一步输出
+    "ai_services": [],
+    "ai_workflows": [],
 }
 
 # ---- 面板外观(Apple 风格)----
@@ -153,6 +158,10 @@ def load_config():
             cfg.update(json.load(f))
     except Exception:
         pass
+    # 列表键深拷贝,避免与 DEFAULT_CFG 共享可变对象(改配置时污染默认值)
+    for k in ("ai_services", "ai_workflows"):
+        if isinstance(cfg.get(k), list):
+            cfg[k] = [dict(x) if isinstance(x, dict) else x for x in cfg[k]]
     return cfg
 
 
@@ -1486,6 +1495,90 @@ def url_info(text):
     except Exception:
         return None
     return (host, t)
+
+
+# ============================================================
+# AI 工作流(OpenAI 兼容 /chat/completions;标准库 urllib,零新依赖)
+# 服务:  {"name","base_url","model","api_key"}
+# 工作流:{"name","steps":[{"service","prompt"}]}  prompt 中 {input} 为上一步输出
+# ============================================================
+def ai_service_by_name(cfg, name):
+    for s in cfg.get("ai_services") or []:
+        if s.get("name") == name:
+            return s
+    return None
+
+
+def render_prompt(prompt, content):
+    """提示词模板渲染:{input} 占位符替换为输入内容。"""
+    return str(prompt or "").replace("{input}", str(content or ""))
+
+
+def ai_chat(service, prompt, timeout=90):
+    """调用 OpenAI 兼容接口,返回 (ok, 回复文本或错误信息)。阻塞函数,请在后台线程调用。"""
+    import urllib.request
+    import urllib.error
+    base = str(service.get("base_url") or "").rstrip("/")
+    if not base:
+        return False, "该服务未配置 base_url"
+    url = base + "/chat/completions"
+    body = json.dumps({
+        "model": service.get("model") or "",
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+    }).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + str(service.get("api_key") or ""),
+    }
+    try:
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        choices = data.get("choices") or [{}]
+        text = ((choices[0].get("message") or {}).get("content") or "").strip()
+        if not text:
+            return False, "AI 返回为空(响应格式异常)"
+        return True, text
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            detail = ""
+        return False, "HTTP %s %s" % (e.code, detail or e.reason)
+    except Exception as e:
+        return False, "%s: %s" % (type(e).__name__, e)
+
+
+# 内置示例工作流(首次"填入示例"时写入 config)
+# 步骤类型 kind:web=网页 AI(复制提示词/打开网页) / human=人工确认 / ai=本地 API(可选)
+# {input} 为输入内容或上一步输出;web 步骤的 url 模板中 {prompt} 为渲染后的提示词
+AI_SEED_SERVICES = [
+    {"name": "GLM", "base_url": "https://open.bigmodel.cn/api/paas/v4",
+     "model": "glm-4-flash", "api_key": ""},
+    {"name": "DeepSeek", "base_url": "https://api.deepseek.com/v1",
+     "model": "deepseek-chat", "api_key": ""},
+]
+AI_SEED_WORKFLOWS = [
+    {"name": "网页 AI 串联(评审→修改)", "steps": [
+        {"kind": "web", "prompt": "你是严格的审稿人。请从逻辑、结构、表达三个维度评审下面内容,指出问题并给出修改建议:\n{input}", "url": ""},
+        {"kind": "human", "prompt": "切到网页 AI 粘贴提示词(Ctrl+V),等回答;复制回答后回到这里点「从剪贴板粘贴」"},
+        {"kind": "web", "prompt": "你是作者。请根据下面这份审稿意见,逐条回应并输出修改后的完整版本:\n{input}", "url": "https://chatgpt.com/?q={prompt}"},
+        {"kind": "human", "prompt": "粘贴修改稿,可先编辑再继续"},
+    ]},
+    {"name": "概念解释器(网页版)", "steps": [
+        {"kind": "web", "prompt": "你是概念解释器。请用通俗语言解释下面概念,先一句话定义,再给一个直观类比,最后指出常见误解:\n{input}", "url": ""},
+        {"kind": "human", "prompt": "粘贴网页 AI 的解释"},
+    ]},
+    {"name": "苏格拉底追问(网页版)", "steps": [
+        {"kind": "web", "prompt": "扮演苏格拉底。针对我给出的想法,从至少 4 个不同角度连续追问,帮助我把模糊的想法变清晰。只输出问题:\n{input}", "url": ""},
+        {"kind": "human", "prompt": "粘贴追问,逐一回答后再继续下一步"},
+    ]},
+    {"name": "翻译(G)→润色(D)[本地 API]", "steps": [
+        {"kind": "ai", "service": "GLM", "prompt": "把下面的文本翻译成英文,只输出译文:\n{input}"},
+        {"kind": "ai", "service": "DeepSeek", "prompt": "润色以下英文,使其更自然地道、符合书面表达,只输出结果:\n{input}"},
+    ]},
+]
 
 
 def make_panel_face(win_w, win_h):
