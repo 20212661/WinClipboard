@@ -2436,12 +2436,23 @@ class WinClipboardApp(QObject):
     # ---- AI 工作流 ----
     def show_ai_hub(self):
         try:
+            # 临时诊断日志:定位「点机器人无反应」。确认问题后可移除。
+            existed = self.ai_hub is not None
+            cm.log("[ai_hub] 被调用: 已存在=%s" % existed)
             if self.ai_hub is None:
                 self.ai_hub = WorkflowsWindow(self)
+                cm.log("[ai_hub] 已创建窗口")
             self.ai_hub.refresh()
             self.ai_hub.show()
             self.ai_hub.raise_()
             self.ai_hub.activateWindow()
+            hub = self.ai_hub
+            scr = QGuiApplication.screenAt(hub.frameGeometry().center())
+            cm.log("[ai_hub] 结果: isVisible=%s isHidden=%s isMinimized=%s "
+                   "geo=(%d,%d,%d,%d) 屏幕=%s 面板可见=%s"
+                   % (hub.isVisible(), hub.isHidden(), hub.isMinimized(),
+                      hub.x(), hub.y(), hub.width(), hub.height(),
+                      scr.name() if scr else None, self.panel.isVisible()))
         except Exception:
             cm.log("打开 AI 工作流窗口失败:\n%s" % traceback.format_exc())
             MessageBox("WinClipboard", "AI 窗口打开失败,详情见:\n%s" % cm.LOG_FILE,
