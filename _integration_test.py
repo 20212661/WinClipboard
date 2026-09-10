@@ -51,6 +51,14 @@ from qfluentwidgets import setTheme, Theme
 
 FAKE_PNG = os.path.join(cm.IMAGE_DIR, "img_test.png")
 
+# 热键冲突规避:测试不该占用 Ctrl+Shift+V,否则会与正在运行的真实实例冲突。
+# 冲突时核心投递 ("tray","hotkey_fail"),前端随即弹出模态告警框,离屏模式下
+# 无人可关 → processEvents() 永久阻塞。这里直接屏蔽告警方法。
+# 注意两个坑:(1) _warn_hotkey 定义在 WinClipboardApp 上,不是 ClipboardCore;
+# (2) 不能改写 cm.user32.RegisterHotKey —— 该 C 函数设了 argtypes,赋普通
+# lambda 会被 ctypes 的类型检查覆盖,实际仍调用真实函数。
+wq.WinClipboardApp._warn_hotkey = lambda self: None
+
 FAILS = []
 
 
@@ -137,7 +145,12 @@ a.quit_app()
 pump(0.2)
 
 log = open(cm.LOG_FILE, encoding="utf-8").read()
-bad = [l for l in log.splitlines() if "Traceback" in l or "失败" in l or "异常" in l]
+# 「全局热键注册失败」是预期内的:测试与正在运行的真实实例抢同一个热键,
+# 且已在上方屏蔽其模态告警。其余任何异常/失败都算问题。
+IGNORE = ("全局热键注册失败",)
+bad = [l for l in log.splitlines()
+       if ("Traceback" in l or "失败" in l or "异常" in l)
+       and not any(k in l for k in IGNORE)]
 check("运行期无异常日志", not bad, str(bad[:3]))
 
 print()
