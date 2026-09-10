@@ -151,26 +151,170 @@ def ensure_dirs():
     os.makedirs(IMAGE_DIR, exist_ok=True)
 
 
-def load_config():
+def _dec_field(value):
+    """解密一个密文字段({"dpapi":bool,"data":<b64>});明文原样返回,解密失败返回 None。"""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and "data" in value:
+        try:
+            blob = base64.b64decode(value["data"])
+        except Exception:
+            return None
+        if value.get("dpapi"):
+            blob = _dpapi_unprotect(blob)
+            if blob is None:
+                return None
+        try:
+            return blob.decode("utf-8")
+        except Exception:
+            return None
+    return None
+
+
+def _enc_field(text):
+    """把明文字段封装为密文 dict;DPAPI 不可用时退化为编码明文(并记日志)。"""
+    raw = str(text).encode("utf-8")
+    blob = _dpapi_protect(raw)
+    if blob is None:
+        log("win32crypt 不可用,AI 服务密钥退化为明文存储")
+    return {"dpapi": blob is not None,
+            "data": base64.b64encode(blob if blob is not None else raw).decode("ascii")}
+
+
+def _load_config_raw():
+    """读 config.json,返回 (配置, 是否需要回写)。
+
+    主文件损坏时依次回退 .bak1~.bak3(与 history.json 同策略);
+    旧版明文密钥在加载时即标记回写,由 ClipboardCore 落盘时加密。
+    """
     cfg = dict(DEFAULT_CFG)
+    upgraded = False
+    data = None
+    for fp in (CONFIG_FILE, CONFIG_FILE + ".bak1",
+               CONFIG_FILE + ".bak2", CONFIG_FILE + ".bak3"):
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            if fp != CONFIG_FILE:
+                log("config.json 不可用,已从备份恢复: %s" % os.path.basename(fp))
+            break
+        data = None
+    if not isinstance(data, dict):
+        data = {}
+
     try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            cfg.update(json.load(f))
+        cfg.update(data)
     except Exception:
         pass
     # 列表键深拷贝,避免与 DEFAULT_CFG 共享可变对象(改配置时污染默认值)
     for k in ("ai_services", "ai_workflows"):
         if isinstance(cfg.get(k), list):
             cfg[k] = [dict(x) if isinstance(x, dict) else x for x in cfg[k]]
-    return cfg
+    # AI 服务密钥:明文 → 内存明文 + 标记回写(下次写入即加密);
+    # 密文解不开(换用户 / 换机器)时保留原文件不动,只把该字段置空提示重填。
+    for s in cfg.get("ai_services") or []:
+        if not isinstance(s, dict):
+            continue
+        v = s.get("api_key")
+        if isinstance(v, str):
+            upgraded = True          # 明文格式(旧版 / 手工编辑)
+        elif isinstance(v, dict) and "data" in v:
+            plain = _dec_field(v)
+            if plain is None:
+                # 换 Windows 用户 / 换机器后 DPAPI 解不开:本次置空提示重填,
+                # 但不置位回写标志,原文件保持原样便于排查
+                s["api_key"] = ""
+                log("AI 服务「%s」的密钥解密失败(DPAPI),本次置空,原文件已保留,请重新填写"
+                    % s.get("name"))
+            else:
+                s["api_key"] = plain
+    # 无配置文件 / 存在明文密钥 → 需要落盘一次
+    return cfg, (upgraded or not data)
+
+
+def _load_config_dict():
+    return _load_config_raw()[0]
+
+
+def load_config():
+    """读配置(config.json 损坏时回退备份);字段缺失用 DEFAULT_CFG 补齐。"""
+    return _load_config_dict()
+
+
+def _migrate_config_file():
+    """就地把 config.json 里的明文密钥封装为密文(不轮转备份)。
+
+    启动迁移必须先跑这一步再 save_config:否则旧的明文文件会被轮转进
+    config.json.bak1,密钥以明文形式残留在备份里,等于没加密。
+    """
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            raw = f.read()
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return
+        changed = False
+        for s in data.get("ai_services") or []:
+            if isinstance(s, dict) and isinstance(s.get("api_key"), str) and s["api_key"]:
+                s["api_key"] = _enc_field(s["api_key"])
+                changed = True
+        if not changed:
+            return
+        tmp = CONFIG_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, CONFIG_FILE)
+    except Exception:
+        pass
+
+
+def _rotate_config_backup():
+    """config.json 滚动备份(旧 → .bak1 → .bak2 → .bak3)。
+
+    备份内容与主文件同为密文(密钥已在 load 阶段封装),不会留下明文副本。
+    """
+    try:
+        if not os.path.exists(CONFIG_FILE):
+            return
+        for i in (2, 1):
+            src = "%s.bak%d" % (CONFIG_FILE, i)
+            dst = "%s.bak%d" % (CONFIG_FILE, i + 1)
+            if os.path.exists(src):
+                os.replace(src, dst)
+        os.replace(CONFIG_FILE, CONFIG_FILE + ".bak1")
+    except Exception:
+        pass
 
 
 def save_config(cfg):
+    """原子写配置:滚动备份 + 临时文件替换;密钥字段落盘前一律 DPAPI 加密。"""
+    out = dict(cfg)
     try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        svcs = []
+        for s in out.get("ai_services") or []:
+            s = dict(s) if isinstance(s, dict) else s
+            if isinstance(s, dict) and s.get("api_key") and \
+                    not (isinstance(s["api_key"], dict) and "data" in s["api_key"]):
+                s["api_key"] = _enc_field(s["api_key"])
+            svcs.append(s)
+        out["ai_services"] = svcs
     except Exception:
-        pass
+        log("配置密钥加密失败:\n%s" % traceback.format_exc())
+    tmp = CONFIG_FILE + ".tmp"
+    try:
+        _rotate_config_backup()
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, CONFIG_FILE)
+    except Exception:
+        log("配置写入失败:\n%s" % traceback.format_exc())
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
 
 
 def load_history():
@@ -759,22 +903,24 @@ class ClipboardCore:
     约定:
     - history / private / cfg 容器始终原地修改(不重新绑定),
       前端在初始化后可安全持有同名别名;
-    - on_change:普通历史变化(剪贴捕获)后的回调,由前端决定是否/何时刷新视图;
-    - 托盘/热键/监听线程(worker)由本类创建并启动,事件经 signal_q 抛给前端轮询。
+    - 所有事件(剪贴捕获 / 历史变化 / 热键 / 托盘)一律经 signal_q 投递给前端,
+      由前端在自己的 UI 线程轮询处理;核心不会直接调用任何 UI 代码;
+    - 托盘/热键/监听线程(worker)由本类创建并启动。
     """
 
-    def __init__(self, on_change=None):
-        self.cfg = load_config()
+    def __init__(self):
+        self.cfg, _cfg_stale = _load_config_raw()
+        self._cfg_need_save = _cfg_stale
         self.max_items = int(self.cfg.get("max_items", 100))
         self.history = load_history()
         self.private = load_private()   # 敏感内容隔离区(不进普通面板)
         self.signal_q = queue.Queue()
         self._ignore_clip_until = 0.0   # 抑制自写入剪贴板事件的截止时间(单调钟)
-        self.on_change = on_change or (lambda: None)
         # 历史迁移:补齐哈希、合并重复图片、清理孤儿文件(须在后台线程启动前)
         self._migrate_images()
-        # 旧版明文私密区自动升级为 DPAPI 加密
+        # 旧版明文私密区/密钥自动升级为 DPAPI 加密
         self._migrate_private()
+        self._migrate_config_secrets()
         # 后台线程(托盘 / 全局热键 / 剪贴板监听)
         self.worker = TrayWorker(self)
         self.worker.start()
@@ -880,6 +1026,28 @@ class ClipboardCore:
         except Exception:
             pass
 
+    def _migrate_config_secrets(self):
+        """config.json 需要落盘时写一次:无配置文件(补齐默认值)或存在明文密钥
+        (立即封装为 DPAPI 密文,不留明文副本);损坏/备份恢复时不覆盖原文件,
+        便于排查——配置会在下次正常保存时自愈。"""
+        if not self._cfg_need_save:
+            return
+        had_key = any(isinstance(s, dict) and s.get("api_key")
+                      for s in (self.cfg.get("ai_services") or []))
+        try:
+            # 先把明文文件就地加密,再轮转/落盘,避免明文残留进 .bak1
+            if had_key:
+                _migrate_config_file()
+            save_config(self.cfg)
+            if had_key and win32crypt is None:
+                log("config.json 已写入(AI 服务密钥仍为明文:DPAPI 不可用)")
+            elif had_key:
+                log("config.json 已写入,AI 服务密钥已升级为 DPAPI 密文")
+            else:
+                log("config.json 已写入")
+        except Exception:
+            log("config.json 升级写入失败:\n%s" % traceback.format_exc())
+
     # ---- 历史维护 ----
     def add_item(self, item):
         kind, content = item
@@ -917,7 +1085,15 @@ class ClipboardCore:
         self.history.insert(0, rec)
         self._evict()
         save_history(self.history)
-        self.on_change()
+        self._notify_change()
+
+    def _notify_change(self):
+        """通知前端历史已变。
+
+        只投递队列信号,不在本方法内直接碰 UI:add_item 由前端的轮询回调触发,
+        而 TrayWorker 也会经 signal_q 投递,统一走队列可避免跨线程访问部件。
+        """
+        self.signal_q.put(("change",))
 
     def _evict(self):
         excess = len(self.history) - self.max_items
@@ -2114,8 +2290,8 @@ class ClipboardApp:
     def signal_q(self):
         return self.core.signal_q
 
-    def _after_history_change(self):
-        """核心回调:剪贴捕获入史后,面板可见时刷新列表。"""
+    def _on_history_change(self):
+        """核心投递的 "change" 信号:剪贴捕获入史后,面板可见时刷新列表。"""
         if self._visible():
             self.refresh_list(self._query())
 
@@ -2129,7 +2305,7 @@ class ClipboardApp:
         self._scale = env_scale()
 
         # 共享核心(状态加载 + 历史迁移 + 后台线程启动)
-        self.core = ClipboardCore(on_change=self._after_history_change)
+        self.core = ClipboardCore()
 
         # 主窗口
         self.root = tk.Tk()
@@ -2337,6 +2513,8 @@ class ClipboardApp:
             item = rest[0]
             if item:
                 self.core.add_item(item)
+        elif kind == "change":
+            self._on_history_change()
         elif kind == "hotkey":
             self.toggle()
         elif kind == "tray":

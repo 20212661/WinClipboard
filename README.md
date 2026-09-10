@@ -43,7 +43,12 @@
 3. 运行台每步执行完停下:网页步骤提示词已在剪贴板 → 切到网页粘贴 → 复制回答 → 回运行台点「📋 从剪贴板粘贴」→「✓ 确认,继续」
 4. 每一步的结果都可**编辑后再继续**(人在回路),随时可复制取走
 
-配置存储在 `config.json` 的 `ai_workflows` 键(本地 AI 服务在 `ai_services`,密钥仅存本机)。
+配置存储在 `config.json` 的 `ai_workflows` 键(本地 AI 服务在 `ai_services`)。
+
+> **密钥安全**:`ai_services[].api_key` 落盘时自动用 Windows DPAPI 加密(绑定当前
+> 用户,与私密区同一机制),文件里不会留明文;旧版明文密钥在启动时自动升级,升级
+> 过程也不会把明文残留在 `config.json.bak*` 备份里。想手工填密钥,直接在
+> `config.json` 里写明文即可,程序下次启动会自动加密。
 
 ## 🚀 启动方式
 
@@ -91,14 +96,17 @@ WinClipboard\
 ├── python.txt                指定 Python 解释器(一行 pythonw.exe 完整路径;可选)
 ├── 启动剪贴板.vbs            无窗口启动器(自动选择版本;桌面快捷方式指向它)
 ├── 启动剪贴板.bat            带控制台启动器(调试用,同样自动选择版本)
-├── _core_test.py             核心逻辑单元测试(python _core_test.py,无需 GUI)
+├── _core_test.py             核心逻辑单元测试(36 项,无需 GUI)
 ├── _ai_test.py               AI 工作流端到端测试(本地假 AI 服务器,无外部依赖)
+├── _integration_test.py      Qt 前端集成自检(真实 app/核心/面板,离屏渲染)
 ├── _ui_preview.py            UI 离屏渲染预览(python _ui_preview.py [light|dark],开发用)
+├── _gui_test.py              热键弹出实测(对已启动的进程注入 Ctrl+Shift+V,传入其 PID)
 └── README.md
 
 %APPDATA%\WinClipboard\      用户数据(自动生成)
 ├── icon.ico                 托盘/快捷方式图标
-├── config.json              配置(热键、自动粘贴、敏感识别开关、最大条数)
+├── config.json              配置(热键、自动粘贴、敏感识别开关、最大条数、AI 服务/工作流;
+│                            原子写入,损坏自动回退 .bak1~.bak3;API 密钥 DPAPI 加密)
 ├── history.json             历史记录(+ .bak1/.bak2/.bak3 滚动备份)
 ├── private.json             私密区(敏感内容,DPAPI 加密存储,绑定当前 Windows 用户)
 ├── app.log                  运行/崩溃日志(自动轮转)
@@ -114,11 +122,16 @@ WinClipboard\
   "auto_paste": true,     // 选中后是否自动模拟 Ctrl+V 粘贴
   "sensitive_guard": true,// 敏感内容自动识别并隔离(false 则关闭)
   "max_items": 100,       // 最多保留多少条(置顶条目不计入)
-  "theme": "auto"         // Qt 版界面主题: auto(跟随系统)/ light / dark,改后重启生效
+  "theme": "auto",        // Qt 版界面主题: auto(跟随系统)/ light / dark,改后重启生效
+  "ai_services": [],      // AI 服务: {"name","base_url","model","api_key"}(密钥自动加密)
+  "ai_workflows": []      // 工作流: {"name","steps":[{"kind":...,"prompt":...}]}
 }
 ```
 
-想换热键(比如 `Alt+V`):把 `hotkey_mod` 改成 `1`,`hotkey_key` 改成 `86`,保存后重启程序。
+缺失的键会自动用默认值补齐,所以手写的 `config.json` 只写要改的那几项也能用。
+写入采用原子替换 + 3 份滚动备份(`.bak1`~`.bak3`),文件损坏时启动会自动回退到最近
+可用的一份。想换热键(比如 `Alt+V`):把 `hotkey_mod` 改成 `1`,`hotkey_key` 改成 `86`,
+保存后重启程序。
 
 ## 🧰 依赖
 
@@ -168,6 +181,13 @@ A: 能。文件复制会以「📁 N 个文件」进历史,选中回车即可粘
 **Q: 历史文件损坏了怎么办?**
 A: 每次写入都会滚动备份最近 3 份(history.json.bak1~.bak3),
    主文件损坏时程序自动从最近的备份恢复;异常详情记录在 app.log。
+   config.json 同样是原子写入 + 3 份备份,损坏时也会自动回退。
+
+**Q: config.json 里的 API 密钥为什么是一串乱码?**
+A: 那是 DPAPI 密文,不是损坏。密钥用当前 Windows 用户账号加密,复制到别的机器或
+   换个用户都解不开(这时程序会把它置空并记一条日志,请重新填写)。
+   想手工换密钥,直接把明文写进 `api_key`,程序下次启动会自动加密。
+   注意:换用户后 `private.json`(私密区)同理不可读,这是有意为之的绑定。
 
 ---
 作者:自动生成 · 2026-06

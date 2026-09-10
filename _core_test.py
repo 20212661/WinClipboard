@@ -5,6 +5,7 @@
 """
 import os
 import sys
+import json as _json
 import queue
 import tempfile
 from types import SimpleNamespace
@@ -18,14 +19,15 @@ cm.APP_DIR = TMP
 cm.IMAGE_DIR = os.path.join(TMP, "images")
 cm.HISTORY_FILE = os.path.join(TMP, "history.json")
 cm.PRIVATE_FILE = os.path.join(TMP, "private.json")
+cm.CONFIG_FILE = os.path.join(TMP, "config.json")
 cm.LOG_FILE = os.path.join(TMP, "app.log")
 os.makedirs(cm.IMAGE_DIR, exist_ok=True)
 
 FAILS = []
 
 
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
+def check(name, cond, detail=""):
+    print(("PASS" if cond else "FAIL"), name, detail if not cond else "")
     if not cond:
         FAILS.append(name)
 
@@ -39,7 +41,6 @@ def make_core(history=None, private=None, cfg=None, max_items=100):
     core.history = history if history is not None else []
     core.private = private if private is not None else []
     core.signal_q = queue.Queue()
-    core.on_change = lambda: None
     core.worker = SimpleNamespace(cmd_q=queue.Queue())   # 粘贴命令桩
     core._set_clipboard = lambda rec: None               # 不碰系统剪贴板
     return core
@@ -106,7 +107,6 @@ cm.save_private(["甲", "b&c", "✓ 多行\n文本"])
 check("private 往返", cm.load_private() == ["甲", "b&c", "✓ 多行\n文本"])
 with open(cm.PRIVATE_FILE, "r", encoding="utf-8") as f:
     raw = f.read()
-import json as _json
 stored = _json.loads(raw)
 check("private 已加密", stored.get("dpapi") is True and "甲" not in raw and "b&c" not in raw)
 # 旧版明文格式兼容(返回内容,下次保存自动升级)
@@ -130,6 +130,61 @@ with open(cm.PRIVATE_FILE, "r", encoding="utf-8") as f:
 check("识别 API key", cm.is_sensitive("sk-" + "a" * 30))
 check("识别银行卡", cm.is_sensitive("6222 0210 0110 2581888"[:0] or "6222600260001072444"))
 check("不误判普通文本", not cm.is_sensitive("hello world 123"))
+
+# ---- config.json:原子写 + 密钥 DPAPI 加密 ----
+SECRET = "sk-proj-SUPERSECRET-0123456789abcdef"
+cm.save_config({"ai_services": [{"name": "GLM", "base_url": "http://x/v1",
+                                 "model": "m", "api_key": SECRET}],
+                "max_items": 42})
+with open(cm.CONFIG_FILE, "r", encoding="utf-8") as f:
+    raw_cfg = f.read()
+check("config 密钥不落明文", SECRET not in raw_cfg)
+stored = _json.loads(raw_cfg)
+check("config 密钥已标记 dpapi", stored["ai_services"][0]["api_key"].get("dpapi") is True)
+check("config 保留其它键", stored.get("max_items") == 42)
+check("config 往返可解密", cm.load_config()["ai_services"][0]["api_key"] == SECRET)
+
+# 旧版明文 config 自动升级(启动迁移)
+with open(cm.CONFIG_FILE, "w", encoding="utf-8") as f:
+    _json.dump({"ai_services": [{"name": "DeepSeek", "base_url": "http://y/v1",
+                                 "model": "m", "api_key": SECRET}]}, f)
+core = cm.ClipboardCore.__new__(cm.ClipboardCore)
+core.cfg, core._cfg_need_save = cm._load_config_raw()
+check("明文 config 标记待升级", core._cfg_need_save is True)
+core._migrate_config_secrets()
+with open(cm.CONFIG_FILE, "r", encoding="utf-8") as f:
+    migrated = f.read()
+check("明文 config 已升级加密", SECRET not in migrated
+      and _json.loads(migrated)["ai_services"][0]["api_key"].get("dpapi") is True)
+# 关键回归:迁移不得把明文残留在任何滚动备份里
+leaked = [f for f in os.listdir(TMP)
+          if f.startswith("config.json") and SECRET in open(os.path.join(TMP, f),
+                                                            encoding="utf-8").read()]
+check("备份无明文残留", not leaked, "泄漏于 %s" % leaked)
+check("二次启动不再回写", cm._load_config_raw()[1] is False)
+
+# 坏密文不丢配置、不炸(解密失败置空但不覆盖原文件)
+with open(cm.CONFIG_FILE, "w", encoding="utf-8") as f:
+    f.write('{"ai_services":[{"name":"X","base_url":"u","model":"m",'
+            '"api_key":{"dpapi":true,"data":"AAAAzw=="}}]}')
+cfg_bad, stale_bad = cm._load_config_raw()
+check("坏密文置空且不回写", cfg_bad["ai_services"][0]["api_key"] == "" and stale_bad is False)
+
+# config.json 损坏 → 从备份恢复
+cm.save_config({"ai_services": [], "max_items": 42})         # 本代
+cm.save_config({"ai_services": [], "max_items": 99})         # 新一代:42 那份轮转到 .bak1
+check("备份已轮转", _json.load(open(cm.CONFIG_FILE + ".bak1", encoding="utf-8"))["max_items"] == 42)
+with open(cm.CONFIG_FILE, "w", encoding="utf-8") as f:
+    f.write("{ 这不是 JSON")
+check("config 损坏回退备份", cm.load_config().get("max_items") == 42)
+
+# ---- 历史变化事件走队列(不再跨线程直调 UI) ----
+core = make_core()
+core.add_item(("text", "notify"))
+kinds = []
+while not core.signal_q.empty():
+    kinds.append(core.signal_q.get_nowait()[0])
+check("add_item 投递 change 信号", kinds == ["change"])
 
 print()
 print("RESULT:", "PASS" if not FAILS else "FAIL %d 项: %s" % (len(FAILS), ", ".join(FAILS)))

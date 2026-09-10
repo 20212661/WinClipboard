@@ -2263,8 +2263,9 @@ class WinClipboardApp(QObject):
     def signal_q(self):
         return self.core.signal_q
 
-    def _after_history_change(self):
-        """核心回调:剪贴捕获入史后,面板可见时合并刷新(防抖)。"""
+    def _on_history_change(self):
+        """核心投递的 "change" 信号(GUI 线程):剪贴捕获入史后,
+        面板可见时合并刷新(防抖),避免连续捕获反复重建列表。"""
         if getattr(self, "panel", None) is not None and self.panel.isVisible():
             self._view_timer.start()
 
@@ -2289,7 +2290,7 @@ class WinClipboardApp(QObject):
         self.icon = QIcon(cm.ICON_FILE) if os.path.exists(cm.ICON_FILE) else QIcon()
 
         # 共享核心(状态加载 + 历史迁移 + 后台线程启动)
-        self.core = cm.ClipboardCore(on_change=self._after_history_change)
+        self.core = cm.ClipboardCore()
 
         self.panel = PanelWindow(self)
         self.private_win = None
@@ -2529,6 +2530,8 @@ class WinClipboardApp(QObject):
             item = rest[0]
             if item:
                 self.core.add_item(item)
+        elif kind == "change":
+            self._on_history_change()
         elif kind == "hotkey":
             if self.panel.isVisible():
                 self.panel.hide_panel()
