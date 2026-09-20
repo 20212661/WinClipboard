@@ -6,9 +6,8 @@ REM
 REM Interpreter resolution order:
 REM   1. python.txt next to this script: one line, full path of pythonw.exe (explicit override)
 REM   2. .venv next to this script - the project's OWN environment (preferred)
-REM   3. hermes venv interpreter (LAST RESORT ONLY: running from it locks the
-REM      hermes agent venv and blocks Hermes self-updates until this app closes)
-REM   4. pythonw.exe found on PATH
+REM   3. pythonw.exe found on PATH
+REM No hardcoded machine-specific fallbacks: keep this file portable.
 REM
 REM NOTE: keep this file pure ASCII to avoid codepage parsing issues on Chinese Windows.
 setlocal EnableDelayedExpansion
@@ -28,16 +27,7 @@ if "!PYW!"=="" (
     if not defined PYW if exist "%~dp0.venv\Scripts\python.exe" set "PYW=%~dp0.venv\Scripts\python.exe"
 )
 
-REM 3) hermes venv (last resort - see header note)
-if "!PYW!"=="" (
-    set "HPY=C:\Users\haoshangyang\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe"
-    if exist "!HPY!" (
-        set "PYW=!HPY:\python.exe=\pythonw.exe!"
-        if not exist "!PYW!" set "PYW=!HPY!"
-    )
-)
-
-REM 4) pythonw.exe on PATH
+REM 3) pythonw.exe on PATH
 if "!PYW!"=="" (
     where pythonw.exe >nul 2>&1
     if not errorlevel 1 (

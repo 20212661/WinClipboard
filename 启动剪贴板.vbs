@@ -5,9 +5,8 @@
 ' Interpreter resolution order:
 '   1. python.txt next to this script: one line, full path of pythonw.exe (explicit override)
 '   2. .venv next to this script - the project's OWN environment (preferred)
-'   3. hermes venv interpreter (LAST RESORT ONLY: running from it locks the
-'      hermes agent venv and blocks Hermes self-updates until this app closes)
-'   4. pythonw.exe found on PATH
+'   3. pythonw.exe found on PATH
+' No hardcoded machine-specific fallbacks: this file must stay portable.
 '
 ' NOTE: keep this file PURE ASCII! VBScript reads .vbs as ANSI/GBK on Chinese
 ' Windows; UTF-8 Chinese text next to a quote can swallow the closing quote
@@ -57,21 +56,7 @@ If pyw = "" Then
   Next
 End If
 
-' 3) hermes venv (last resort - see header note)
-If pyw = "" Then
-  Dim hermesCandidates
-  hermesCandidates = Array( _
-    "C:\Users\haoshangyang\AppData\Local\hermes\hermes-agent\venv\Scripts\pythonw.exe", _
-    "C:\Users\haoshangyang\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe")
-  For Each c In hermesCandidates
-    If fso.FileExists(c) Then
-      pyw = c
-      Exit For
-    End If
-  Next
-End If
-
-' 4) pythonw on PATH
+' 3) pythonw on PATH
 If pyw = "" Then
   On Error Resume Next
   Dim eo
