@@ -1,0 +1,6 @@
+# WinClipboard 运行依赖(源码运行)
+# 打包成 EXE 见 打包构建.bat / winclipboard.spec
+PySide6>=6.7
+PySide6-Fluent-Widgets>=1.7
+pywin32>=306
+Pillow>=10.0
