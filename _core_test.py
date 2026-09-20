@@ -543,6 +543,42 @@ check("快捷粘贴默认热键(Alt+`)",
 check("hotkey_label OEM 键名", cm.hotkey_label(cm.MOD_ALT, 0xC0) == "Alt+`")
 check("hotkey_label OEM 负号", cm.hotkey_label(cm.MOD_CONTROL, 0xBD) == "Ctrl+-")
 
+# ---- 捕获管线(pipeline.py):阶段化决策 + 可追踪性 ----
+import pipeline as _pp
+_s4 = _pp.Snapshot.from_item(("text", "x", {"html": "<b>"}, "Abc.EXE"))
+check("Snapshot 4 元协议(src 归一小写)", _s4.src == "abc.exe" and _s4.rich == {"html": "<b>"})
+_s2 = _pp.Snapshot.from_item(("files", ["a", "b"]))
+check("Snapshot 2 元协议兼容", _s2.kind == "files" and _s2.src == "")
+check("fingerprint 三类",
+      _pp.fingerprint(_pp.Snapshot.from_item(("text", "t", {}, ""))) == "t"
+      and _pp.fingerprint(_pp.Snapshot.from_item(("image", {"path": "p", "hash": "h"})))
+      == ("img", "h")
+      and _pp.fingerprint(_s2) == ("files", ("a", "b")))
+core = make_core()
+core.add_item(("text", "password: secret123", {}, ""))
+_tr = core.last_capture_trace
+check("trace 敏感路径含原因",
+      any(s == "sensitive" and "密码" in d for s, d in _tr.stages), str(_tr))
+check("敏感文本不入史入私密区", len(core.history) == 0 and len(core.private) == 1)
+core2 = make_core(cfg={"sensitive_guard": False})
+core2.add_item(("text", "password: secret123", {}, ""))
+check("guard 关时入史", len(core2.history) == 1 and len(core2.private) == 0)
+check("trace 标注 guard 已关闭",
+      any("guard 已关闭" in d for s, d in core2.last_capture_trace.stages))
+core3 = make_core()
+core3.add_item(("text", "dup-me", {}, ""))
+core3.add_item(("text", "dup-me", {"html": "<i>x</i>"}))
+check("重复提升保留新富文本", core3.history[0].get("html") == "<i>x</i>"
+      and len(core3.history) == 1)
+check("trace 重复提升", any(s == "dedup" and "提升" in d
+                            for s, d in core3.last_capture_trace.stages))
+core3.toggle_pin_at(0)
+core3.add_item(("text", "dup-me", {}, ""))
+check("置顶重复跳过", len(core3.history) == 1
+      and any("置顶" in d for s, d in core3.last_capture_trace.stages))
+check("trace 可读化含各阶段", "snapshot:" in str(core3.last_capture_trace)
+      and "fingerprint:" in str(core3.last_capture_trace))
+
 print()
 print("RESULT:", "PASS" if not FAILS else "FAIL %d 项: %s" % (len(FAILS), ", ".join(FAILS)))
 sys.exit(1 if FAILS else 0)

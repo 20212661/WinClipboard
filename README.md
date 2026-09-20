@@ -135,6 +135,9 @@ WinClipboard\
 ├── winclipboard_qt.py        界面 + 应用层(FluentWindow 单窗口;需 PySide6 + PySide6-Fluent-Widgets)
 ├── clipboard_manager.py      纯后端 ClipboardCore(热键/托盘/剪贴板监听/敏感隔离/
 │                             DPAPI 加密/持久化/AI 调用;不含界面)
+├── pipeline.py               捕获管线纯阶段(Snapshot 规范化 / 敏感探测 / 去重决策 /
+│                             轻量分类);每次捕获产出 core.last_capture_trace
+│                             阶段轨迹,「这条为什么没进私密区」直接看 trace
 ├── pinboard\                 图钉画布子包(manager 门面 / window·view·items 交互 /
 │                             model·storage 数据与资产 / layout 排列算法 / loader 后台解码)
 ├── quickpaste.py             快捷粘贴浮层(Alt+`,Win+V 式:搜索 + 键盘粘贴 / 失焦收起 /
@@ -147,7 +150,7 @@ WinClipboard\
 ├── 安装.bat                  安装器入口(自动带上当前版本号)
 ├── 启动剪贴板.vbs            无窗口启动器(python.txt → .venv → PATH,无硬编码路径)
 ├── 启动剪贴板.bat            带控制台启动器(调试用,同样自动选择解释器)
-├── _core_test.py             核心逻辑单元测试(142 项,无需 GUI;含内容识别管线/Diff/撤销栈/热键标签/按应用排除/自动清理/历史加密/富文本/筛选/导入导出/版本比较/快捷粘贴后端)
+├── _core_test.py             核心逻辑单元测试(153 项,无需 GUI;含内容识别管线/Diff/撤销栈/热键标签/按应用排除/自动清理/历史加密/富文本/筛选/导入导出/版本比较/快捷粘贴后端/捕获管线 trace)
 ├── _ai_test.py               AI 工作流端到端测试(38 项;本地假 AI 服务器,无外部依赖)
 ├── _pinboard_test.py         图钉画布单元+集成自检(72 项;序列化/资产/布局/持久化/迁移/LRU)
 ├── _integration_test.py      Qt 前端集成自检(224 项;真实 app/核心/面板,离屏渲染,

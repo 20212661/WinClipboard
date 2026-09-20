@@ -30,6 +30,7 @@ import hashlib
 import subprocess
 import threading
 import traceback
+import pipeline                      # 捕获管线(纯阶段;cm → pipeline 单向)
 from concurrent.futures import ThreadPoolExecutor
 from collections import namedtuple
 from ctypes import wintypes
@@ -722,23 +723,29 @@ def _idcard_ok(s):
     return m[sum(int(s[i]) * w[i] for i in range(17)) % 11] == s[17]
 
 
-def is_sensitive(text):
-    """识别疑似敏感内容:密码上下文、银行卡(Luhn)、身份证(校验位)、API 密钥、JWT。"""
+def _sensitive_reason(text):
+    """is_sensitive 的带原因版本(管线 trace / 排障用):返回命中类别或 None。
+    正则与判定顺序与 is_sensitive 完全一致。"""
     t = text.strip()
     if not t:
-        return False
+        return None
     if _RE_KEYVAL.search(text):
-        return True
+        return "密码键值对"
     if _RE_KEYS.search(t):
-        return True
+        return "API 密钥格式"
     if _RE_JWT.match(t):
-        return True
+        return "JWT"
     m = _RE_CARD.match(t)
     if m and _luhn_ok(m.group(1)):
-        return True
+        return "银行卡号(Luhn 通过)"
     if _RE_IDCARD.match(t) and _idcard_ok(t):
-        return True
-    return False
+        return "身份证号(校验位通过)"
+    return None
+
+
+def is_sensitive(text):
+    """识别疑似敏感内容:密码上下文、银行卡(Luhn)、身份证(校验位)、API 密钥、JWT。"""
+    return _sensitive_reason(text) is not None
 
 
 # ============================================================
@@ -1688,51 +1695,24 @@ class ClipboardCore:
             self._dirty = False
 
     def add_item(self, item):
-        kind, content = item[0], item[1]
-        # 尾随元素按类型分流:dict = 富文本格式(html/rtf),str = 来源应用 exe 名
-        # (捕获链路 ("text", t, rich, src);旧调用/测试注入可为二元或三元)
-        rich, src = {}, ""
-        for extra in item[2:]:
-            if isinstance(extra, dict):
-                rich = {k: v for k, v in extra.items()
-                        if k in ("html", "rtf") and v}
-            elif extra:
-                src = str(extra).lower()
-        ts = time.time()
-        if kind == "text":
-            # 敏感内容自动隔离:进私密区,不写入普通历史
-            if self.cfg.get("sensitive_guard", True) and is_sensitive(content):
-                self._add_private(content)
-                return
-            rec = {"type": "text", "content": content, "pinned": False, "ts": ts}
-            key = content
-        elif kind == "files":
-            paths = tuple(content)
-            rec = {"type": "files", "content": list(paths), "pinned": False, "ts": ts}
-            key = ("files", paths)
-        else:
-            rec = {"type": "image", "content": content["path"], "pinned": False,
-                   "w": content.get("w", 0), "h": content.get("h", 0),
-                   "hash": content.get("hash", ""), "ts": ts}
-            key = ("img", content.get("hash", ""))
-        if src:
-            rec["src"] = src
-        rec.update(rich)               # 富文本格式随条目存储(回写时多格式并放)
-
-        # 去重:已存在则移除旧的,放到最前(置顶的不动)
-        for i, h in enumerate(self.history):
-            if h["type"] == "text":
-                k = h["content"]
-            elif h["type"] == "files":
-                k = ("files", tuple(h.get("content", [])))
-            else:
-                k = ("img", h.get("hash") or file_sha1(h["content"]))
-            if k == key:
-                if h.get("pinned"):
-                    return
-                self.history.pop(i)
-                break
-        self.history.insert(0, rec)
+        """捕获入口 = 管线编排器:纯决策都在 pipeline.run_capture,
+        本方法只执行副作用(写私密区 / 提升置顶 / 入库 + 落盘 + 通知)。
+        每次捕获的阶段轨迹挂 self.last_capture_trace(排障用,见 pipeline.py)。"""
+        snap = pipeline.Snapshot.from_item(item)
+        outcome, record, trace = pipeline.run_capture(
+            snap, self.cfg, self.history,
+            sensitive_probe=_sensitive_reason,
+            badge_probe=content_badge,
+            sha1_fallback=file_sha1)
+        self.last_capture_trace = trace
+        if outcome.kind == pipeline.SENSITIVE:
+            self._add_private(snap.content)
+            return
+        if outcome.kind == pipeline.PINNED_SKIP:
+            return
+        if outcome.kind == pipeline.DUPLICATE and outcome.index is not None:
+            self.history.pop(outcome.index)
+        self.history.insert(0, record)
         self._evict()
         self._mark_dirty()
         self._notify_change()
