@@ -153,6 +153,12 @@ a.set_category("all")
 # 空分类往返:全空分类会把所有卡片赶进闲置池并 hide,切回后必须重新显形
 # (set_view 曾丢掉收回卡的 show(),「链接/文件」→「全部」列表变隐形,此断言防回归)
 vis = lambda: sum(1 for c in a.panel._cards if not c.isHidden())
+# 启动捕获会带上环境剪贴板的当前内容,若恰为链接则「链接」分类不空;
+# 环境捕获项与本断言无关,先移除保证防回归路径(全空分类)必然走到
+for _i in range(len(a.history) - 1, -1, -1):
+    _h = a.history[_i]
+    if _h["type"] == "text" and cm.url_info(_h["content"]):
+        a.history.pop(_i)
 a.set_category("link")
 check("空分类视图为空", not a._view, str(a._view))
 a.set_category("all")
@@ -171,6 +177,9 @@ check("置顶生效", any(h.get("pinned") for h in a.history))
 a.selected = 0
 a.delete_selected()
 check("删除生效", not any(h.get("pinned") for h in a.history))
+_n_b4_undo = len(a.history)
+a.undo_delete()
+check("删除可撤销(UI 级)", len(a.history) == _n_b4_undo + 1)
 
 # AI 服务页(OpenCode 风格供应商卡片)/ 工作流运行台真实构造
 from PySide6.QtWidgets import QPushButton  # noqa: E402
@@ -579,6 +588,41 @@ check("私密条目带 private 标记", _vw.rec.get("private") is True)
 if _vw is not None:
     _vw.close()
 pump(0.2)
+
+# ---- 来源 / 时间筛选下拉(数据来自条目 src/ts) ----
+a.on_search("")
+pump(0.4)
+_np_rec = next((h for h in a.history if h.get("src") == "notepad.exe"), None)
+check("存在带来源条目(前置)", _np_rec is not None)
+if _np_rec is not None:
+    _i = a.panel.cmb_src.findData("notepad.exe")
+    a.panel.cmb_src.setCurrentIndex(_i)
+    pump(0.4)
+    check("来源下拉筛选", a.src_filter == "notepad.exe" and a._view
+          and all(a.history[i].get("src") == "notepad.exe" for i in a._view),
+          str(len(a._view)))
+    a.panel.cmb_time.setCurrentIndex(2)     # 近 24 小时
+    pump(0.4)
+    check("时间下拉叠加生效", a.time_filter == "24h"
+          and all(a.history[i]["ts"] >= time.time() - 86400 for i in a._view))
+    a.panel.reset_filters()
+    pump(0.4)
+    check("重置筛选恢复全量", a.src_filter == "" and a.time_filter == "all"
+          and len(a._view) == len(a.history))
+
+# ---- 段选批量删除(Shift+点击 → Delete,整批可撤销) ----
+if len(a._view) >= 3:
+    a.select_card(a.panel.card_at(0))
+    a.range_select_from(a.panel.card_at(2))
+    check("段选命中三连", len(a._multi_recs) == 3)
+    _n_b4 = len(a.history)
+    a.delete_selection_or_multi()
+    pump(0.3)
+    check("批量删除生效", len(a.history) == _n_b4 - 3
+          and len(a._multi_recs) == 0)
+    a.undo_delete()
+    pump(0.3)
+    check("批量删除可撤销", len(a.history) == _n_b4)
 
 # ---- 图片查看器:独立窗口 + 缩放/1:1/适应(小图不放大) ----
 img_rec = next((h for h in a.history if h.get("type") == "image"), None)

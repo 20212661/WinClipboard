@@ -103,6 +103,60 @@ core.add_item(("text", "gone"))
 core.clear_unpinned()
 check("清空保留置顶", [h["content"] for h in core.history] == ["keep"])
 
+# ---- 可撤销删除(批次撤销栈) ----
+core = make_core()
+for t in ("a", "b", "c"):
+    core.add_item(("text", t))                  # history = [c, b, a]
+core.toggle_pin_at(0)                           # c 置顶
+removed = core.soft_clear_unpinned()
+check("软清空置顶保留", [h["content"] for h in core.history] == ["c"]
+      and [h["content"] for h in removed] == ["b", "a"])
+core.undo_delete()
+check("撤销恢复整批原序", [h["content"] for h in core.history] == ["b", "a", "c"])
+core.soft_delete_at(0)
+check("软删除出列", [h["content"] for h in core.history] == ["a", "c"])
+core.undo_delete()
+check("撤销单条回最前", [h["content"] for h in core.history] == ["b", "a", "c"])
+check("空撤销栈返回空", core.undo_delete() == [])
+from pathlib import Path as _P
+_img = _P(cm.HISTORY_FILE).parent / "undo_keep.png"
+_img.write_bytes(b"\x89PNG\r\n\x1a\n")         # 占位文件,验证软删除不删盘
+core.history.insert(0, {"type": "image", "content": str(_img), "w": 1, "h": 1, "ts": 9})
+core.soft_delete_at(0)
+check("软删除保留图片文件", _img.exists())
+core.undo_delete()
+check("图片条目撤销回归", core.history[0]["content"] == str(_img) and _img.exists())
+_img.unlink()
+
+# ---- 来源 / 时间筛选(filter_view 扩展)----
+core = make_core()
+core.history[:] = [
+    {"type": "text", "content": "a", "ts": 100, "src": "notepad.exe"},
+    {"type": "text", "content": "b", "ts": _time.time(), "src": "chrome.exe"},
+    {"type": "text", "content": "c", "ts": _time.time() - 90000, "src": ""},
+]
+check("按来源筛选", core.filter_view("all", src="notepad.exe") == [0]
+      and core.filter_view("all", src="chrome.exe") == [1]
+      and core.filter_view("all") == [0, 1, 2])
+_cut = core.time_scope_cutoff("24h")
+check("时间档位过滤", _cut > 0
+      and core.filter_view("all", since=_cut) == [1]
+      and core.time_scope_cutoff("all") == 0.0)
+check("今天档只留新鲜", core.filter_view(
+    "all", since=core.time_scope_cutoff("today")) == [1])
+check("source_apps 随历史序(新在前)",
+      core.source_apps() == ["notepad.exe", "chrome.exe"])
+
+# ---- 批量软删(段选 Delete 的核心路径)----
+core = make_core()
+core.history[:] = [{"type": "text", "content": c, "ts": i}
+                   for i, c in enumerate("abcde")]
+_n = core.batch_soft_delete([core.history[0], core.history[2],
+                             {"type": "text", "content": "不在历史"}])
+check("批量软删按身份", _n == 2 and len(core.history) == 3
+      and [h["content"] for h in core.history] == ["b", "d", "e"])
+check("批量删除整批撤销", len(core.undo_delete()) == 2
+      and len(core.history) == 5)
 # ---- 私密区持久化往返 + DPAPI 加密 ----
 cm.save_private(["甲", "b&c", "✓ 多行\n文本"])
 check("private 往返", cm.load_private() == ["甲", "b&c", "✓ 多行\n文本"])
