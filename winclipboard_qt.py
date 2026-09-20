@@ -4029,21 +4029,26 @@ class UiHealthMonitor:
     """UI 事件循环健康监控(Mica 假死自愈)。
 
     个别远程会话(网易UU远程等未置 RDP 标志的工具)上 Mica 会让 Qt 事件
-    循环假死——窗口在、定时器与消息全部不跑。启动后 HEARTBEAT_MS 内事件
-    循环必须打卡(证明派发器活着),否则无 Mica 自重启:仅本次会话、不改
-    配置(本地桌面下次照常启用),WCLB_NO_MICA 环境变量防重启循环。
+    循环假死——窗口在、定时器与消息全部不跑。布防后事件循环在 GRACE_S
+    内打卡一次即视为健康(打卡是循环定时器,启动高峰忙过头也能随后补打,
+    只有派发器真死了才会整窗超时);超时才无 Mica 自重启:仅本次会话、
+    不改配置(本地桌面下次照常启用),WCLB_NO_MICA 环境变量防重启循环。
+
+    历史坑:早期版本是一次性 2500ms 心跳 + 6s 判决,启动预热变重后心跳
+    被排队到判决之后,健康实例每次冷启动都被误杀再无 Mica 重启一遍。
 
     触发时把判决时长 / 远程会话 / Mica 状态写入日志——这个 workaround
     到底多久救一次场有据可查,不会变成「不敢删但不知道有没有用」的遗物。
     """
 
-    HEARTBEAT_MS = 2500          # 事件循环须在此前打卡
-    VERDICT_S = 6.0              # 看门狗判决时限(须大于打卡时限)
+    HEARTBEAT_MS = 2500          # 心跳循环定时器周期
+    GRACE_S = 30.0               # 宽限判决时限:整窗无任何心跳才判死
 
     def __init__(self, app):
         self.app = app
         self.beat = None          # None=未打卡;打卡时刻(monotonic)
         self._armed = False
+        self._beat_timer = None
 
     def arm(self):
         """布防(初始化尾部调用一次,幂等);仅 Mica 生效且未设禁用环境变量时。"""
@@ -4054,20 +4059,24 @@ class UiHealthMonitor:
                 or os.environ.get("WCLB_NO_MICA"):
             return
         t0 = time.monotonic()
-        QTimer.singleShot(self.HEARTBEAT_MS, self._heartbeat)
+        self._beat_timer = QTimer(self.app)
+        self._beat_timer.setInterval(self.HEARTBEAT_MS)
+        self._beat_timer.timeout.connect(self._heartbeat)
+        self._beat_timer.start()
         threading.Thread(target=self._watch, args=(t0,), daemon=True).start()
 
     def _heartbeat(self):
         self.beat = time.monotonic()
 
     def _watch(self, t0):
-        time.sleep(self.VERDICT_S)
-        if self.beat is not None:
-            return
-        cm.log("UI 健康监控:事件循环 %.1fs 无心跳,疑似 Mica 致假死,无 Mica 自重启"
-               "(elapsed=%.1fs remote_session=%s mica=%s)"
-               % (self.VERDICT_S, time.monotonic() - t0,
-                  cm.is_remote_session(),
+        deadline = t0 + self.GRACE_S
+        while time.monotonic() < deadline:
+            if self.beat is not None:
+                return                    # 事件循环活着(哪怕打卡晚到)
+            time.sleep(0.5)
+        cm.log("UI 健康监控:事件循环 %.0fs 无心跳,疑似 Mica 致假死,无 Mica 自重启"
+               "(remote_session=%s mica=%s)"
+               % (self.GRACE_S, cm.is_remote_session(),
                   bool(getattr(self.app, "_mica_active", False))))
         try:
             subprocess.Popen(
