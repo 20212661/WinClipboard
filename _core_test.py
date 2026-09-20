@@ -579,6 +579,75 @@ check("置顶重复跳过", len(core3.history) == 1
 check("trace 可读化含各阶段", "snapshot:" in str(core3.last_capture_trace)
       and "fingerprint:" in str(core3.last_capture_trace))
 
+# ---- SQLite 存储(store.py):往返 / FTS+中文 LIKE / 参数化查询 / 写透 / 重启重载 ----
+import store as _st
+_sdir = tempfile.mkdtemp(prefix="wclb_store_")
+_sdb = os.path.join(_sdir, "clipboard.db")
+st = _st.ClipboardStore(_sdb)
+st.insert({"type": "text", "content": "hello sqlite world", "pinned": True,
+           "ts": 1.0, "src": "a.exe", "html": "<b>x</b>"})
+st.insert({"type": "text", "content": "你好剪贴板数据库", "pinned": False,
+           "ts": 2.0})
+st.insert({"type": "files", "content": ["C:/t/a.txt", "C:/t/b.txt"],
+           "pinned": False, "ts": 3.0})
+loaded = st.load_all()
+check("库往返:seq 降序(最近在前)",
+      [r["content"] for r in loaded] ==
+      [["C:/t/a.txt", "C:/t/b.txt"], "你好剪贴板数据库", "hello sqlite world"])
+_r0 = loaded[2]
+check("库往返:字段保真(src/rich/pinned/ts)",
+      _r0.get("src") == "a.exe" and _r0.get("html") == "<b>x</b>"
+      and _r0["pinned"] is True and _r0["ts"] == 1.0)
+check("FTS5 英文命中", len(st.search("sqlite")) == 1)
+check("中文 LIKE 回退命中", len(st.search("剪贴板")) == 1)
+check("搜索无命中", st.search("zzznotexist") == [])
+check("query 类型过滤", len(st.query(content_type="text")) == 2)
+check("query 来源过滤", len(st.query(source_app="a.exe")) == 1)
+check("query 时间过滤", len(st.query(since=2.5)) == 1)
+check("query 置顶过滤", len(st.query(pinned=True)) == 1)
+check("query 分页 limit/offset",
+      len(st.query(content_type="text", limit=1, offset=1)) == 1
+      and len(st.query(content_type="text", limit=1, offset=5)) == 0)
+st.update_pinned(loaded[0]["_db"], True)
+check("置顶写库", st.query(pinned=True)[0] == loaded[0]["_db"])
+st.delete(loaded[0]["_db"])
+check("删行生效", st.count() == 2)
+
+# 迁移:history.json(最近在前)→ 库(最旧先插)
+_sdb2 = os.path.join(_sdir, "migrate.db")
+st2 = _st.ClipboardStore(_sdb2)
+legacy = [{"type": "text", "content": "旧-%d" % i, "pinned": i == 0,
+           "ts": 100.0 + i} for i in range(5)]     # 旧-4 最新
+check("迁移条数", st2.migrate_from_list(legacy) == 5)   # 列表本身最旧在前
+check("迁移后顺序", [r["content"] for r in st2.load_all()] ==
+      ["旧-4", "旧-3", "旧-2", "旧-1", "旧-0"])
+
+# 全核心写透:启用库的 make_core,增/去重/删/撤销/置顶后重启重载一致
+core = make_core()
+core.store = _st.ClipboardStore(os.path.join(_sdir, "core.db"))
+core.add_item(("text", "alpha", {}, "notepad.exe"))
+core.add_item(("text", "beta", {}, ""))
+core.add_item(("text", "alpha", {}, ""))            # 去重提升(旧行删除+新行插入)
+check("库模式去重行数", core.store.count() == 2)
+core.toggle_pin_at(1)
+core.soft_delete_at(0)
+check("软删即删行", core.store.count() == 1)
+core.undo_delete()
+check("撤销即回写", core.store.count() == 2)
+_reopen = _st.ClipboardStore(os.path.join(_sdir, "core.db"))
+_check_rows = [(r["type"], r["content"], bool(r.get("pinned")))
+               for r in _reopen.load_all()]
+check("重启重载与内存一致(内容/顺序/置顶)",
+      _check_rows == [("text", "alpha", False), ("text", "beta", True)],
+      str(_check_rows))
+_b64t = "QmFzZTY0IGRlbW8gY29udGVudCBzdHJpbmcgdGhhdCBpcyBsb25nIGVub3VnaA=="
+core.add_item(("text", _b64t, {}, ""))
+with __import__("sqlite3").connect(os.path.join(_sdir, "core.db")) as _cx:
+    _sub = _cx.execute("SELECT content_subtype FROM clipboard_items "
+                       "WHERE text_content = ?", (_b64t,)).fetchone()
+check("子类型列写入(Base64)", _sub and _sub[0] == "Base64", str(_sub))
+st.close(); st2.close(); _reopen.close(); core.store.close()
+
 print()
 print("RESULT:", "PASS" if not FAILS else "FAIL %d 项: %s" % (len(FAILS), ", ".join(FAILS)))
 sys.exit(1 if FAILS else 0)

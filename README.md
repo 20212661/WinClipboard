@@ -138,6 +138,8 @@ WinClipboard\
 ├── pipeline.py               捕获管线纯阶段(Snapshot 规范化 / 敏感探测 / 去重决策 /
 │                             轻量分类);每次捕获产出 core.last_capture_trace
 │                             阶段轨迹,「这条为什么没进私密区」直接看 trace
+├── store.py                  SQLite 历史仓库(clipboard.db,WAL + FTS5;
+│                             参数化组合查询/分页/中文 LIKE 回退,全 SQL 参数绑定)
 ├── pinboard\                 图钉画布子包(manager 门面 / window·view·items 交互 /
 │                             model·storage 数据与资产 / layout 排列算法 / loader 后台解码)
 ├── quickpaste.py             快捷粘贴浮层(Alt+`,Win+V 式:搜索 + 键盘粘贴 / 失焦收起 /
@@ -150,14 +152,14 @@ WinClipboard\
 ├── 安装.bat                  安装器入口(自动带上当前版本号)
 ├── 启动剪贴板.vbs            无窗口启动器(python.txt → .venv → PATH,无硬编码路径)
 ├── 启动剪贴板.bat            带控制台启动器(调试用,同样自动选择解释器)
-├── _core_test.py             核心逻辑单元测试(153 项,无需 GUI;含内容识别管线/Diff/撤销栈/热键标签/按应用排除/自动清理/历史加密/富文本/筛选/导入导出/版本比较/快捷粘贴后端/捕获管线 trace)
+├── _core_test.py             核心逻辑单元测试(172 项,无需 GUI;含内容识别管线/Diff/撤销栈/热键标签/按应用排除/自动清理/历史加密/富文本/筛选/导入导出/版本比较/快捷粘贴后端/捕获管线 trace/SQLite 存储)
 ├── _ai_test.py               AI 工作流端到端测试(38 项;本地假 AI 服务器,无外部依赖)
 ├── _pinboard_test.py         图钉画布单元+集成自检(72 项;序列化/资产/布局/持久化/迁移/LRU)
-├── _integration_test.py      Qt 前端集成自检(224 项;真实 app/核心/面板,离屏渲染,
+├── _integration_test.py      Qt 前端集成自检(225 项;真实 app/核心/面板,离屏渲染,
 │                             含 URL/JWT/Base64 Inspector、Diff、动作注册表、卡片徽章、
 │                             删除撤销、私密遮罩、热键录制、暂停监听、按应用排除、
 │                             存储清理、富文本剪贴板往返、来源/时间筛选、批量删除、
-│                             导入导出、更新检查、快捷粘贴浮层)
+│                             导入导出、更新检查、快捷粘贴浮层、加密⇄库模式切换)
 ├── _ui_preview.py            UI 离屏渲染预览(python _ui_preview.py [light|dark],开发用)
 ├── _inspector_preview.py     Inspector 视图离屏渲染(URL/JWT/Base64 截图,开发用)
 ├── _gui_test.py              热键弹出实测(对已启动的进程注入 Ctrl+Shift+V,传入其 PID)
@@ -167,10 +169,14 @@ WinClipboard\
 ├── icon.ico                 托盘/快捷方式图标
 ├── config.json              配置(热键、自动粘贴、敏感识别开关、最大条数、AI 服务/工作流;
 │                            原子写入,损坏自动回退 .bak1~.bak3;API 密钥 DPAPI 加密)
-├── history.json             历史记录(+ .bak1/.bak2/.bak3 滚动备份)
+├── clipboard.db             历史事实存储(SQLite + WAL + FTS5;增删改逐操作写透,
+│                            首次启动自动把 history.json 单事务迁入并保留
+│                            history.json.migrated 原件,回滚 = 改回原名)
+├── history.json             历史加密模式(encrypt_history=true)下的加密存储;
+│                            默认库模式下不存在。加密⇄库模式在设置页即时双向切换
 ├── private.json             私密区(敏感内容,DPAPI 加密存储,绑定当前 Windows 用户)
 ├── app.log                  运行/崩溃日志(自动轮转)
-├── images\                  图片剪贴缓存
+├── images\                  图片剪贴缓存(按像素哈希内容寻址,即库模式的数据块存储)
 └── pins\                    图钉画布独立资产(board.json 状态 + images\ 按 SHA256
                              去重的图片副本;删除历史/清缓存不影响已钉图片)
 ```

@@ -36,6 +36,7 @@ TMP = tempfile.mkdtemp(prefix="wclb_integ_")
 cm.APP_DIR = TMP
 cm.IMAGE_DIR = os.path.join(TMP, "images")
 cm.HISTORY_FILE = os.path.join(TMP, "history.json")
+cm.DB_FILE = os.path.join(TMP, "clipboard.db")   # 库路径同样必须进沙箱(模块级常量)
 cm.PRIVATE_FILE = os.path.join(TMP, "private.json")
 cm.CONFIG_FILE = os.path.join(TMP, "config.json")
 cm.LOG_FILE = os.path.join(TMP, "app.log")
@@ -701,9 +702,12 @@ pump(0.2)
 _hfile = _Path(cm.HISTORY_FILE).read_text(encoding="utf-8")
 check("历史已转加密格式", '"dpapi": true' in _hfile, _hfile[:40])
 check("加密历史仍可加载", len(cm.load_history()) == len(a.history))
+check("加密模式下停用库写透", a.core.store is None)
 sp.c_enc.setChecked(False)
 pump(0.2)
-check("历史转回明文", "dpapi" not in _Path(cm.HISTORY_FILE).read_text(encoding="utf-8"))
+check("切回库模式(store 复活且 JSON 快照已清)",
+      a.core.store is not None and not _Path(cm.HISTORY_FILE).exists()
+      and a.core.store.count() == len(a.history))
 
 # ---- 富文本格式保留:HTML/RTF 随条目捕获与回写(真剪贴板;被占则跳过) ----
 import win32clipboard as _wcb
@@ -1166,7 +1170,7 @@ try:
     check("仅复制不触发自动粘贴", a.core.worker.cmd_q.empty())
     check("复制后窗口保留", a.win.isVisible())
     for rec in ({"type": "image", "content": "test.png"},
-                {"type": "files", "content": [cm.HISTORY_FILE]}):
+                {"type": "files", "content": [cm.CONFIG_FILE]}):   # 库模式下 history.json 可能不存在
         check("仅复制支持 " + rec["type"], a.core.copy_record(rec)
               and copied[-1]["type"] == rec["type"])
 finally:

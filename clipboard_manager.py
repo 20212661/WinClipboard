@@ -31,6 +31,7 @@ import subprocess
 import threading
 import traceback
 import pipeline                      # 捕获管线(纯阶段;cm → pipeline 单向)
+from store import ClipboardStore     # SQLite 历史存储(事实存储/写透)
 from concurrent.futures import ThreadPoolExecutor
 from collections import namedtuple
 from ctypes import wintypes
@@ -66,6 +67,7 @@ IMAGE_DIR = os.path.join(APP_DIR, "images")
 ICON_FILE = os.path.join(APP_DIR, "icon.ico")
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 HISTORY_FILE = os.path.join(APP_DIR, "history.json")
+DB_FILE = os.path.join(APP_DIR, "clipboard.db")   # SQLite 事实存储(默认模式)
 PRIVATE_FILE = os.path.join(APP_DIR, "private.json")   # 敏感内容隔离区
 LOG_FILE = os.path.join(APP_DIR, "app.log")            # 崩溃/运行日志
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -1313,11 +1315,44 @@ class ClipboardCore:
     - 托盘/热键/监听线程(worker)由本类创建并启动。
     """
 
+    store = None        # SQLite 仓库(类级默认:__new__ 直造的核心/测试为 None→JSON 路径)
+
     def __init__(self):
         self.cfg, _cfg_stale = _load_config_raw()
         self._cfg_need_save = _cfg_stale
         self.max_items = int(self.cfg.get("max_items", 100))
-        self.history = load_history()
+        # SQLite 事实存储(默认模式):启动加载 + 逐操作写透。
+        # encrypt_history 开启时库不做写透(库文件无法整体 DPAPI 加密,
+        # 不静默降级)——但若数据已在库里,仍从库只读加载并导出加密
+        # history.json,杜绝「开加密 → 重启 → 历史消失」的丢失路径。
+        self.store = None
+        _want_db = not self.cfg.get("encrypt_history")
+        _preload = None
+        try:
+            _preload = ClipboardStore(DB_FILE)
+        except Exception:
+            _preload = None
+            log("SQLite 存储打开失败,本次会话走 JSON 持久化:\n%s"
+                % traceback.format_exc())
+        if _preload is not None and _preload.count() > 0:
+            self.history = _preload.load_all()
+            json_world = False
+            if _want_db:
+                self.store = _preload
+            else:
+                _preload.close()
+                save_history(self.history, encrypt=True)
+                log("加密模式开启而数据在 clipboard.db(%d 条):"
+                    "已导出为加密 history.json;关闭加密即回到库模式"
+                    % len(self.history))
+        else:
+            if _preload is not None:
+                if _want_db:
+                    self.store = _preload
+                else:
+                    _preload.close()
+            self.history = load_history()
+            json_world = True
         self.private = load_private()   # 敏感内容隔离区(不进普通面板)
         self.signal_q = queue.Queue()
         # 事件唤醒回调(前端注入):queue 只管数据,回调负责把"该排空了"
@@ -1338,11 +1373,28 @@ class ClipboardCore:
         self._search_cache = {}       # id(rec) → casefold 检索串(条目内容不可变)
         self.on_dirty = None            # 前端回调(启动防抖定时器)
         self._ignore_clip_until = 0.0   # 抑制自写入剪贴板事件的截止时间(单调钟)
-        # 历史迁移:补齐哈希、合并重复图片条目(孤儿文件清理延迟到启动后,
-        # 见 cleanup_orphan_images;条目迁移仍须在后台线程启动前完成)
-        self._migrate_images()
-        # 自动清理(天数/容量策略,置顶豁免):在首笔落盘前做,裁剪结果直接持久化
-        self.apply_cleanup()
+        if json_world:
+            # 历史迁移:补齐哈希、合并重复图片条目(孤儿文件清理延迟到启动后,
+            # 见 cleanup_orphan_images;条目迁移仍须在后台线程启动前完成)
+            self._migrate_images()
+            # 自动清理(天数/容量策略,置顶豁免):在首笔落盘前做,裁剪结果直接持久化
+            self.apply_cleanup()
+            # 修正与裁剪先在 JSON 世界完成,再单事务迁入空库;原文件改名
+            # .migrated 保留(回滚 = 改回原名即可)
+            if self.store is not None:
+                if self.history:
+                    self.store.migrate_from_list(list(reversed(self.history)))
+                    try:
+                        os.replace(HISTORY_FILE, HISTORY_FILE + ".migrated")
+                    except Exception:
+                        pass
+                    log("history.json → clipboard.db 迁移完成(%d 条;"
+                        "原文件保留为 history.json.migrated)"
+                        % len(self.history))
+                self.history = self.store.load_all()   # 统一带 _db
+        else:
+            # 库模式:图片修正已在首次迁移前做过;启动清理走库写透
+            self.apply_cleanup()
         # 旧版明文私密区/密钥自动升级为 DPAPI 加密
         self._migrate_private()
         self._migrate_config_secrets()
@@ -1351,6 +1403,12 @@ class ClipboardCore:
         self.worker.start()
 
     # ---- 事件投递(任意线程可调) ----
+    def _store_del(self, recs):
+        """批量删除条目对应的库行(软删除/淘汰/清理共用)。"""
+        if self.store is not None:
+            self.store.delete_many(
+                [r.get("_db") for r in recs if r.get("_db") is not None])
+
     def _post(self, event):
         """向后端事件队列投递一条:queue 负责数据,on_event 负责唤醒。
 
@@ -1560,14 +1618,17 @@ class ClipboardCore:
         if days > 0:
             cutoff = time.time() - days * 86400
             keep = []
+            gone = []
             for h in self.history:
                 if not h.get("pinned") and float(h.get("ts", 0) or 0) < cutoff:
                     freed += self._free_record_file(h)
+                    gone.append(h)
                     n += 1
                 else:
                     keep.append(h)
             if n:
                 self.history[:] = keep
+                self._store_del(gone)
         cap = float(self.cfg.get("disk_cap_mb", 0) or 0)
         if cap > 0:
             cap_bytes = cap * 1024 * 1024
@@ -1590,6 +1651,7 @@ class ClipboardCore:
                 n += 1
                 try:
                     self.history.remove(h)
+                    self._store_del([h])
                 except ValueError:
                     pass
         if n:
@@ -1687,6 +1749,10 @@ class ClipboardCore:
         """
         if not getattr(self, "_dirty", False):
             return
+        if self.store is not None:
+            # 库模式:逐操作写透已落盘(WAL),无需全量序列化
+            self._dirty = False
+            return
         gen = getattr(self, "_gen", 0)
         with PerfSpan("history_save"):
             save_history(self.history,
@@ -1711,7 +1777,14 @@ class ClipboardCore:
         if outcome.kind == pipeline.PINNED_SKIP:
             return
         if outcome.kind == pipeline.DUPLICATE and outcome.index is not None:
-            self.history.pop(outcome.index)
+            old = self.history.pop(outcome.index)
+            self._store_del([old])
+        if self.store is not None:
+            if record["type"] == "text":
+                badge = content_badge(record["content"])
+                if badge:
+                    record["_subtype"] = badge      # 子类型缓存(仅库模式写入)
+            self.store.insert(record)
         self.history.insert(0, record)
         self._evict()
         self._mark_dirty()
@@ -1732,6 +1805,7 @@ class ClipboardCore:
             return
         removed = 0
         to_del = []
+        evicted = []
         for i in range(len(self.history) - 1, -1, -1):
             if removed >= excess:
                 break
@@ -1742,9 +1816,11 @@ class ClipboardCore:
                     except Exception:
                         pass
                 to_del.append(i)
+                evicted.append(self.history[i])
                 removed += 1
         for i in sorted(to_del, reverse=True):
             self.history.pop(i)
+        self._store_del(evicted)
 
     def _add_private(self, content):
         """敏感内容写入私密区(去重、上限 100 条);投递 private 信号供前端
@@ -1861,6 +1937,8 @@ class ClipboardCore:
         try:
             self.history.remove(rec)
             self.history.insert(0, rec)
+            if self.store is not None:
+                self.store.upsert_promote(rec)    # 最近使用 → seq 提升到最前
             self._mark_dirty()
         except Exception:
             pass
@@ -1918,7 +1996,10 @@ class ClipboardCore:
 
     # ---- 条目状态操作 ----
     def toggle_pin_at(self, hi):
-        self.history[hi]["pinned"] = not self.history[hi].get("pinned", False)
+        rec = self.history[hi]
+        rec["pinned"] = not rec.get("pinned", False)
+        if self.store is not None and rec.get("_db") is not None:
+            self.store.update_pinned(rec["_db"], rec["pinned"])
         self._mark_dirty()
 
     def delete_at(self, hi):
@@ -1928,18 +2009,22 @@ class ClipboardCore:
                 os.remove(rec["content"])
             except Exception:
                 pass
+        self._store_del([rec])
         self._mark_dirty()
         return rec
 
     def clear_unpinned(self):
         """清空未置顶条目(连同其图片文件);置顶保留。"""
+        removed = []
         for h in self.history:
             if not h.get("pinned") and h["type"] == "image":
                 try:
                     os.remove(h["content"])
                 except Exception:
                     pass
+        removed = [h for h in self.history if not h.get("pinned")]
         self.history[:] = [h for h in self.history if h.get("pinned")]
+        self._store_del(removed)
         self._mark_dirty()
 
     # ---- 可撤销删除(批次撤销栈) ----
@@ -1960,6 +2045,7 @@ class ClipboardCore:
     def soft_delete_at(self, hi):
         """可撤销的单条删除(不删图片文件)。"""
         rec = self.history.pop(hi)
+        self._store_del([rec])
         self._trash_push([rec])
         return rec
 
@@ -1971,6 +2057,7 @@ class ClipboardCore:
             return 0
         keep = [h for h in self.history if id(h) not in ids]
         self.history[:] = keep
+        self._store_del(removed)
         self._trash_push(removed)
         return len(removed)
 
@@ -2064,6 +2151,7 @@ class ClipboardCore:
         """可撤销的清空(置顶保留,不删图片文件);返回被移除的条目。"""
         removed = [h for h in self.history if not h.get("pinned")]
         self.history[:] = [h for h in self.history if h.get("pinned")]
+        self._store_del(removed)
         self._trash_push(removed)
         return removed
 
@@ -2075,12 +2163,56 @@ class ClipboardCore:
         live = {id(h) for h in self.history}
         back = [r for r in recs if id(r) not in live]   # 防重复恢复
         self.history[0:0] = back
+        if self.store is not None:
+            for r in back:
+                self.store.upsert_promote(r)     # 已有行:提升 seq 到最前
         self._mark_dirty()
         return back
 
     def save_all(self):
         self.flush_history()
         save_private(self.private)
+
+    def set_history_encryption(self, on):
+        """设置页「历史加密」开关的即时双向切换。
+
+        开启:当前历史立即写为加密 history.json,停用库写透(库文件保留,
+              关闭加密时无损切回);
+        关闭:启用库;库为空则把当前历史单事务迁入,并把逐条 _db 回填到
+              现有记录对象(UI 引用的记录身份不变),随后删除明文 JSON
+              快照避免双源。"""
+        on = bool(on)
+        self.cfg["encrypt_history"] = on
+        if on:
+            save_history(self.history, encrypt=True)
+            if self.store is not None:
+                try:
+                    self.store.close()
+                except Exception:
+                    pass
+                self.store = None
+            return
+        if self.store is None:
+            try:
+                st = ClipboardStore(DB_FILE)
+                # 加密期间历史可能已变化:整库重建,以当前内存历史为准
+                st.reset()
+                st.migrate_from_list(list(reversed(self.history)))
+                with st._lock:
+                    ids = [r["id"] for r in st.db.execute(
+                        "SELECT id FROM clipboard_items "
+                        "ORDER BY seq DESC").fetchall()]
+                for rec, dbid in zip(self.history, ids):
+                    rec["_db"] = dbid
+                self.store = st
+                try:
+                    os.remove(HISTORY_FILE)
+                except Exception:
+                    pass
+            except Exception:
+                self.store = None
+                log("切回库模式失败,继续 JSON 持久化:\n%s"
+                    % traceback.format_exc())
 
     # ---- 开机自启 ----
     def is_autostart(self):

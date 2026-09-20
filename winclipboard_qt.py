@@ -1711,14 +1711,13 @@ class SettingsPage(QWidget):
         c_enc.setChecked(bool(cfg.get("encrypt_history")))
 
         def on_enc(on):
-            cfg["encrypt_history"] = bool(on)
+            # 即时双向切换:开 → 全量加密 JSON + 停库写透;
+            # 关 → 启用库(空库则迁入当前历史)。见 core.set_history_encryption
+            app.core.set_history_encryption(bool(on))
             cm.save_config(cfg)
-            # 立即按新格式落盘一次(格式转换需强制写:置脏再冲刷)
-            app.core._mark_dirty()
-            app.core.flush_history()
             InfoBar.success("历史加密已" + ("开启" if on else "关闭"),
-                            "文件已转换为" + ("加密" if on else "明文") + "格式",
-                            parent=self, position=InfoBarPosition.TOP_RIGHT)
+                            "存储已转换为" + ("加密 JSON" if on else "SQLite 库")
+                            + "格式", parent=self, position=InfoBarPosition.TOP_RIGHT)
         c_enc.checkedChanged.connect(on_enc)
         self.c_enc = c_enc
         if not cm.dpapi_available():       # DPAPI 缺位时不开空头支票(与私密区同原则)
