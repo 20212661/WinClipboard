@@ -642,6 +642,9 @@ try:
 finally:
     wq.RoundMenu.exec = _orig_exec
 check("右键菜单构建不崩", bool(built))
+check("动作注册表驱动菜单", len(wq.CLIP_ACTIONS) >= 10
+      and any(isinstance(x, wq.WorkflowSlot) for x in wq.CLIP_ACTIONS)
+      and all(len(x) == 4 for x in wq.INSPECTOR_ACTIONS))
 if built:
     texts = [x.text() for x in built[0]._actions]
     check("菜单含 粘贴/独立窗口查看/删除",

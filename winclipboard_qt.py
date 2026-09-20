@@ -24,7 +24,7 @@ import clipboard_manager as cm   # 后端复用
 import perf_probe
 from perf_probe import PerfSpan, since, stamp   # 关键路径性能埋点
 from pinboard import PinBoardManager   # 图钉画布(置顶多图板)子包
-from urllib.parse import unquote as _unquote, quote as _quote
+from urllib.parse import unquote as _unquote, quote as _quote, urlsplit
 
 from PySide6.QtCore import (Qt, QTimer, QRectF, QRect, QSize, QEvent, QPropertyAnimation,
                             QEasingCurve, QObject, QPoint, QThread, Signal,
@@ -3204,41 +3204,15 @@ class ViewerWindow(QWidget):
         m.deleteLater()
 
     def _inspector_actions(self):
-        """URL/JWT/Base64 的内容专属动作(「更多」菜单;返回 [(标题, 回调)])。"""
-        out = []
+        """URL/JWT/Base64 的内容专属动作:INSPECTOR_ACTIONS 注册表按
+        subtype 过滤(返回 [(标题, 回调)])。"""
         if self._lang_index != 0 or self._content is None:
-            return out
-        cp = self.app.core.copy_text
-
-        def _copy(title, getter):
-            out.append((title, lambda g=getter: cp(g())))
-
-        if self._content.subtype == "web_url" and self._url_inf:
-            inf = self._url_inf
-            url = self._raw.strip()
-            out.append(("在浏览器打开", lambda: cm.open_url(url)))
-            _copy("复制主机名", lambda: inf["host"])
-            _copy("复制路径", lambda: inf["path"])
-            if inf["query"]:
-                from urllib.parse import urlsplit as _us
-                _copy("复制参数串", lambda: _us(url).query)
-            _copy("URL 解码并复制", lambda: _unquote(url))
-            _copy("URL 编码并复制", lambda: _quote(url, safe=":/?&=#%+"))
-        elif self._content.subtype == "jwt" and self._jwt_inf:
-            inf = self._jwt_inf
-            _copy("复制 Header (JSON)",
-                  lambda: json.dumps(inf["header"], ensure_ascii=False, indent=2))
-            _copy("复制 Payload (JSON)",
-                  lambda: json.dumps(inf["payload"], ensure_ascii=False, indent=2))
-            _copy("复制解码全文 (Header.Payload)",
-                  lambda: "%s.%s" % (json.dumps(inf["header"], ensure_ascii=False),
-                                     json.dumps(inf["payload"], ensure_ascii=False)))
-        elif self._content.subtype == "base64" and self._b64:
-            kind, raw = self._b64
-            if kind == "image":
-                out.append(("解码图另存为…", self._save_b64_image))
-            else:
-                _copy("复制解码文本", lambda: raw.decode("utf-8", "replace"))
+            return []
+        sub = self._content.subtype
+        out = []
+        for st, title, run, guard in INSPECTOR_ACTIONS:
+            if st == sub and (guard is None or guard(self)):
+                out.append((title, lambda r=run: r(self)))
         return out
 
     def _save_b64_image(self):
@@ -5124,6 +5098,87 @@ class WorkflowRunner(QWidget):
 
 
 # ============================================================
+# 动作注册表(Action Registry):卡片右键菜单与查看器专属动作的数据源。
+# 新增内容动作 = 在这里登记一条,不再往 card_menu/_inspector_actions
+# 里堆 if/elif;supported 谓词决定该条目何时出现。
+# ============================================================
+class ClipAction:
+    """卡片动作:supported(rec) 谓词 + run(rec, host) 执行;title 可为
+    str 或 callable(rec, host)→str(如「固定/取消固定」随状态变)。"""
+    __slots__ = ("title", "run", "supported")
+
+    def __init__(self, title, run, supported=None):
+        self.title = title
+        self.run = run
+        self.supported = supported or (lambda rec: True)
+
+
+class WorkflowSlot:
+    """占位:卡片菜单构建到此处时插入「工作流」子菜单(条目来自用户
+    配置,非固定动作,故不进注册表本体)。"""
+
+
+CLIP_ACTIONS = [
+    ClipAction("粘贴", lambda r, h: h.paste_selected()),
+    ClipAction("在独立窗口查看",
+               lambda r, h: h.open_image_viewer(r) if r["type"] == "image"
+               else h.open_viewer(r)),
+    ClipAction("在浏览器打开", lambda r, h: h.open_link(r),
+               supported=lambda r: r["type"] == "text"
+               and cm.url_info(r["content"] or "")),
+    ClipAction("打开文件", lambda r, h: h.open_files(r),
+               supported=lambda r: r["type"] == "files"),
+    ClipAction("在资源管理器中显示", lambda r, h: h.reveal_first(r),
+               supported=lambda r: r["type"] == "files"),
+    ClipAction("📌 置顶到屏幕", lambda r, h: h.pin_image(r),
+               supported=lambda r: r["type"] == "image"),
+    ClipAction(lambda r, h: "图片处理…" if not cm.find_sharex()
+               else "图片处理(ShareX)…",
+               lambda r, h: h.edit_image(r) if cm.find_sharex()
+               else h.open_editor(r),
+               supported=lambda r: r["type"] == "image"),
+    ClipAction("内置编辑器…", lambda r, h: h.open_editor(r),
+               supported=lambda r: r["type"] == "image" and cm.find_sharex()),
+    WorkflowSlot(),
+    ClipAction(lambda r, h: "取消固定" if r.get("pinned") else "固定",
+               lambda r, h: h.toggle_pin()),
+    ClipAction("删除", lambda r, h: h.delete_selected()),
+]
+
+
+# 查看器内容专属动作:(subtype, 标题, run(viewer), 额外门槛(viewer)→bool|None)
+INSPECTOR_ACTIONS = [
+    ("web_url", "在浏览器打开", lambda v: cm.open_url(v._raw.strip()), None),
+    ("web_url", "复制主机名",
+     lambda v: v.app.core.copy_text(v._url_inf["host"]), None),
+    ("web_url", "复制路径",
+     lambda v: v.app.core.copy_text(v._url_inf["path"]), None),
+    ("web_url", "复制参数串",
+     lambda v: v.app.core.copy_text(urlsplit(v._raw.strip()).query),
+     lambda v: bool(v._url_inf["query"])),
+    ("web_url", "URL 解码并复制",
+     lambda v: v.app.core.copy_text(_unquote(v._raw.strip())), None),
+    ("web_url", "URL 编码并复制",
+     lambda v: v.app.core.copy_text(_quote(v._raw.strip(), safe=":/?&=#%+")), None),
+    ("jwt", "复制 Header (JSON)",
+     lambda v: v.app.core.copy_text(
+         json.dumps(v._jwt_inf["header"], ensure_ascii=False, indent=2)), None),
+    ("jwt", "复制 Payload (JSON)",
+     lambda v: v.app.core.copy_text(
+         json.dumps(v._jwt_inf["payload"], ensure_ascii=False, indent=2)), None),
+    ("jwt", "复制解码全文 (Header.Payload)",
+     lambda v: v.app.core.copy_text(
+         "%s.%s" % (json.dumps(v._jwt_inf["header"], ensure_ascii=False),
+                    json.dumps(v._jwt_inf["payload"], ensure_ascii=False))), None),
+    ("base64", "解码图另存为…", lambda v: v._save_b64_image(),
+     lambda v: v._b64 and v._b64[0] == "image"),
+    ("base64", "复制解码文本",
+     lambda v: v.app.core.copy_text(v._b64[1].decode("utf-8", "replace")),
+     lambda v: v._b64 and v._b64[0] == "text"),
+]
+
+
+# ============================================================
 # 应用主体(后端逻辑不变)
 # ============================================================
 class _EventBridge(QObject):
@@ -5326,6 +5381,11 @@ class WinClipboardApp(QObject):
             self.card_menu(card, card.mapToGlobal(card.rect().topRight()))
 
     def card_menu(self, card, gpos):
+        """右键菜单:条目全部来自 CLIP_ACTIONS 注册表(supported 谓词过滤),
+        工作流子菜单在 WorkflowSlot 占位处按配置插入。"""
+        rec = card.rec
+        self.select_card(card)
+
         def act(menu, text):
             # qfluentwidgets RoundMenu.addAction 只接受 QAction;传 str 会把原始
             # 字符串塞进内部 _actions,首个条目渲染时 'str' object has no
@@ -5335,49 +5395,33 @@ class WinClipboardApp(QObject):
             return a
 
         menu = RoundMenu(parent=self.panel)
-        a1 = act(menu, "粘贴")
-        a1.triggered.connect(self.paste_selected)
-        rec = card.rec
-        av = act(menu, "在独立窗口查看")
-        av.triggered.connect(lambda _=False, r=rec: self.open_image_viewer(r)
-                              if r["type"] == "image" else self.open_viewer(r))
-        if rec["type"] == "text" and cm.url_info(rec["content"]):
-            alink = act(menu, "在浏览器打开")
-            alink.triggered.connect(lambda: self.open_link(rec))
-        if rec["type"] == "files":
-            aof = act(menu, "打开文件")
-            aof.triggered.connect(lambda: self.open_files(rec))
-            arv = act(menu, "在资源管理器中显示")
-            arv.triggered.connect(lambda: self.reveal_first(rec))
-        if rec["type"] == "image":
-            apin = act(menu, "📌 置顶到屏幕")
-            apin.triggered.connect(lambda _=False, r=rec: self.pin_image(r))
-            if cm.find_sharex():
-                ash = act(menu, "图片处理(ShareX)…")
-                ash.triggered.connect(lambda: self.edit_image(rec))
-                a2 = act(menu, "内置编辑器…")
-            else:
-                a2 = act(menu, "图片处理…")
-            a2.triggered.connect(lambda: self.open_editor(rec))
-        if rec["type"] == "text":
-            wfs = self.cfg.get("ai_workflows") or []
-            if wfs:
-                sub = RoundMenu("工作流", self.panel)
-                for wf in wfs:
-                    a = act(sub, wf.get("name", "未命名"))
-                    a.triggered.connect(lambda _=False, w=wf: self.run_workflow(w, rec))
-                sub.addSeparator()
-                am = act(sub, "管理工作流…")
-                am.triggered.connect(self.show_ai_hub)
-                menu.addMenu(sub)
-            else:
-                aai = act(menu, "工作流(先配置)…")
-                aai.triggered.connect(self.show_ai_hub)
-        a3 = act(menu, "取消固定" if rec.get("pinned") else "固定")
-        a3.triggered.connect(self.toggle_pin)
-        menu.addSeparator()
-        a4 = act(menu, "删除")
-        a4.triggered.connect(self.delete_selected)
+        for entry in CLIP_ACTIONS:
+            if isinstance(entry, WorkflowSlot):
+                if rec["type"] != "text":
+                    continue
+                wfs = self.cfg.get("ai_workflows") or []
+                if wfs:
+                    sub = RoundMenu("工作流", self.panel)
+                    for wf in wfs:
+                        a = act(sub, wf.get("name", "未命名"))
+                        a.triggered.connect(
+                            lambda _=False, w=wf: self.run_workflow(w, rec))
+                    sub.addSeparator()
+                    am = act(sub, "管理工作流…")
+                    am.triggered.connect(self.show_ai_hub)
+                    menu.addMenu(sub)
+                else:
+                    a = act(menu, "工作流(先配置)…")
+                    a.triggered.connect(self.show_ai_hub)
+                continue
+            if not entry.supported(rec):
+                continue
+            title = entry.title(rec, self) if callable(entry.title) else entry.title
+            if title == "删除":
+                menu.addSeparator()
+            a = act(menu, title)
+            a.triggered.connect(
+                lambda _=False, r=rec, f=entry.run: f(r, self))
         menu.exec(gpos)
 
     def toggle_pin(self):
