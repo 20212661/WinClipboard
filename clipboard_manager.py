@@ -701,6 +701,60 @@ _RE_KEYS = re.compile(
 _RE_JWT = re.compile(r"^eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$")
 
 
+# ---- 可迁移加密备份(密码 → KDF → AES-256-GCM 认证加密)----
+# 与 DPAPI(本机/当前用户绑定)互不相关:该容器可跨机器恢复,
+# 前提是持有密码。cryptography 库缺失时功能禁用并如实提示。
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    _AES_OK = True
+except Exception:
+    _AES_OK = False
+
+_BAK_MAGIC = b"WCLBBAK1"
+_BAK_KDF_ITER = 200000
+
+
+def portable_backup_bytes(payload, password):
+    """载荷 → 加密备份字节流(WCLBBAK1 容器)。
+    PBKDF2-HMAC-SHA256(20 万次)派生密钥,AES-256-GCM 认证加密
+    (密文自带认证标签,密码错误/文件被改都会解密失败)。"""
+    if not _AES_OK:
+        raise RuntimeError("未安装 cryptography 库,无法生成加密备份")
+    salt = os.urandom(16)
+    nonce = os.urandom(12)
+    key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                              salt, _BAK_KDF_ITER)
+    ct = AESGCM(key).encrypt(
+        nonce, json.dumps(payload, ensure_ascii=False).encode("utf-8"), None)
+    head = json.dumps({"v": 1, "kdf": "pbkdf2-sha256",
+                       "iter": _BAK_KDF_ITER,
+                       "salt": base64.b64encode(salt).decode("ascii"),
+                       "nonce": base64.b64encode(nonce).decode("ascii"),
+                       "cipher": "aes-256-gcm"}).encode("utf-8")
+    return _BAK_MAGIC + len(head).to_bytes(4, "little") + head + ct
+
+
+def portable_backup_parse(raw, password):
+    """加密备份字节流 → 载荷 dict。magic 不符抛 ValueError;
+    密码错误或数据被篡改,GCM 认证失败同样抛 ValueError(统一文案)。"""
+    if not _AES_OK:
+        raise RuntimeError("未安装 cryptography 库,无法读取加密备份")
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) < 16 \
+            or bytes(raw[:8]) != _BAK_MAGIC:
+        raise ValueError("不是有效的 WinClipboard 加密备份文件")
+    hlen = int.from_bytes(bytes(raw[8:12]), "little")
+    head = json.loads(bytes(raw[12:12 + hlen]).decode("utf-8"))
+    key = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"),
+        base64.b64decode(head["salt"]), int(head["iter"]))
+    try:
+        plain = AESGCM(key).decrypt(
+            base64.b64decode(head["nonce"]), bytes(raw[12 + hlen:]), None)
+    except Exception:
+        raise ValueError("密码错误或备份文件已损坏")
+    return json.loads(plain.decode("utf-8"))
+
+
 def _luhn_ok(s):
     digits = [int(c) for c in s if c.isdigit()]
     if not 13 <= len(digits) <= 19:
@@ -1026,6 +1080,29 @@ def send_ctrl_v():
     user32.SendInput(4, ctypes.byref(arr), ctypes.sizeof(INPUT))
 
 
+# ---- 粘贴事务(Paste Transaction)----
+# 目标:防止「用户按 Enter 的瞬间窗口切换 → 密码/API Key 被贴到错误窗口」。
+# 前台窗口与剪贴板序列号在发送前轮询校验,任一不符立即取消。
+user32.GetClipboardSequenceNumber.argtypes = []
+user32.GetClipboardSequenceNumber.restype = wintypes.DWORD
+
+
+def _get_foreground():
+    """当前前台窗口句柄(int;失败 0)。测试可替换。"""
+    try:
+        return int(user32.GetForegroundWindow())
+    except Exception:
+        return 0
+
+
+def _get_clip_seq():
+    """系统剪贴板序列号(每次写板自增;0 表示不可用)。"""
+    try:
+        return int(user32.GetClipboardSequenceNumber())
+    except Exception:
+        return 0
+
+
 # ============================================================
 # 托盘 / 后台线程(独立 Win32 消息循环)
 # ============================================================
@@ -1224,11 +1301,32 @@ class TrayWorker(threading.Thread):
     # ---- 命令处理 ----
     def _do_cmd(self, cmd):
         if cmd[0] == "paste":
-            time.sleep(0.07)
-            try:
-                send_ctrl_v()
-            except Exception:
-                pass
+            # 粘贴事务:expected = 意图目标窗口(唤出我们窗口之前的那个),
+            # want_seq = 写板完成后的剪贴板序列号。二者在宽限期内校验,
+            # 不符立即取消(防止内容被贴进切换后的错误窗口)。
+            expected = int(cmd[1]) if len(cmd) > 1 and cmd[1] else 0
+            want_seq = int(cmd[2]) if len(cmd) > 2 and cmd[2] else 0
+            if not expected:
+                time.sleep(0.07)          # 旧调用/测试:无目标校验
+                try:
+                    send_ctrl_v()
+                except Exception:
+                    pass
+                return
+            deadline = time.monotonic() + 0.45
+            while time.monotonic() < deadline:
+                time.sleep(0.04)
+                if want_seq and _get_clip_seq() != want_seq:
+                    self.app._post(("paste_abort",
+                                    "剪贴板内容在粘贴前被其他程序修改"))
+                    return
+                if _get_foreground() == expected:
+                    try:
+                        send_ctrl_v()
+                    except Exception:
+                        pass
+                    return
+            self.app._post(("paste_abort", "目标窗口已切换,已取消粘贴"))
         elif cmd[0] == "hotkey":
             # 设置页热键录制:重注册即冲突检测,失败回滚旧组合并如实上报
             mod, key = int(cmd[1]), int(cmd[2])
@@ -1983,9 +2081,10 @@ class ClipboardCore:
         self._ignore_clip_until = time.monotonic() + 0.5
         return self._set_clipboard(rec)
 
-    def paste_record(self, rec, force=False):
+    def paste_record(self, rec, force=False, target_hwnd=None):
         """写回剪贴板 + 自动粘贴排队 + 置顶到最近。文件全部丢失时返回 False。
-        force=True 无条件派发回贴(快捷粘贴浮层:用户按 Enter 的意图就是粘贴)。"""
+        force=True 无条件派发回贴(快捷粘贴浮层:用户按 Enter 的意图就是粘贴)。
+        target_hwnd = 意图目标窗口(粘贴事务校验用,None = 旧语义不校验)。"""
         if rec["type"] == "files":
             existing = [p for p in rec["content"] if os.path.exists(p)]
             if not existing:
@@ -1995,7 +2094,8 @@ class ClipboardCore:
         self._ignore_clip_until = time.monotonic() + 0.5
         self._set_clipboard(rec)
         if force or self.cfg.get("auto_paste", False):
-            self.worker.cmd_q.put(("paste",))
+            self.worker.cmd_q.put(
+                ("paste", int(target_hwnd or 0), _get_clip_seq()))
         try:
             self.history.remove(rec)
             self.history.insert(0, rec)
@@ -2006,14 +2106,15 @@ class ClipboardCore:
             pass
         return True
 
-    def paste_text(self, content, force=False):
+    def paste_text(self, content, force=False, target_hwnd=None):
         """文本写回剪贴板;force=True 无条件派发回贴(用户点了明确的
         「复制并粘贴」类按钮),否则跟随 auto_paste 开关(默认关:模拟
         Ctrl+V 会把内容打进当前聚焦窗口,不应是复制动作的默认副作用)。"""
         self._ignore_clip_until = time.monotonic() + 0.5
         self._set_clipboard({"type": "text", "content": content})
         if force or self.cfg.get("auto_paste", False):
-            self.worker.cmd_q.put(("paste",))
+            self.worker.cmd_q.put(
+                ("paste", int(target_hwnd or 0), _get_clip_seq()))
 
     def copy_text(self, content):
         """仅写剪贴板(不排回贴队列):查看器分段复制等小动作用,
@@ -2209,6 +2310,33 @@ class ClipboardCore:
             else:
                 skipped += 1
         return added, skipped
+
+    def export_portable_payload(self, include_images=False,
+                                include_private=False):
+        """可迁移备份载荷:普通导出条目 + 可选私密区(默认不含)。
+        私密内容只在**加密容器**里才允许导出(见 portable_backup_bytes)。"""
+        payload = self.export_payload(include_images=include_images)
+        payload["private"] = list(self.private) if include_private else []
+        return payload
+
+    def import_portable_payload(self, payload):
+        """导入加密备份载荷:历史走 import_payload(自动去重),
+        私密条目合并入私密区(去重)。返回 (新增, 跳过, 私密新增)。"""
+        priv = payload.get("private")
+        payload = dict(payload)
+        payload.pop("private", None)
+        added, skipped = self.import_payload(payload)
+        n_priv = 0
+        if isinstance(priv, list):
+            for s in priv:
+                if isinstance(s, str) and s and s not in self.private:
+                    self.private.append(s)
+                    n_priv += 1
+            if n_priv:
+                save_private(self.private)
+        return added, skipped, n_priv
+
+    # ---- 可迁移加密备份(AES-256-GCM + PBKDF2,与 DPAPI 无关)----
 
     def soft_clear_unpinned(self):
         """可撤销的清空(置顶保留,不删图片文件);返回被移除的条目。"""

@@ -702,6 +702,91 @@ with _sq3.connect(_v1) as _cx1:
 check("v1 升级后 FTS 重建可查", _fts_v1 == 1)
 stv.close()
 
+# ---- 粘贴事务(Paste Transaction):目标窗口/剪贴板序列校验,不符即取消 ----
+_evt = []
+_wk = cm.TrayWorker.__new__(cm.TrayWorker)
+_wk.app = SimpleNamespace(_post=lambda e: _evt.append(e))
+_sent = []
+_o_send, _o_fg, _o_seq, _o_time = (cm.send_ctrl_v, cm._get_foreground,
+                                   cm._get_clip_seq, cm.time)
+import time as _tmod
+
+
+class _NoSleepTime:
+    @staticmethod
+    def sleep(s):
+        pass
+
+    @staticmethod
+    def monotonic():
+        return _tmod.monotonic()
+
+
+try:
+    cm.send_ctrl_v = lambda: _sent.append(1)
+    cm.time = _NoSleepTime
+    # 场景 1:目标窗口在宽限期内就位 → 发送
+    cm._get_foreground = lambda: 4242
+    cm._get_clip_seq = lambda: 7
+    _wk._do_cmd(("paste", 4242, 7))
+    check("事务:目标就位即发送", _sent == [1] and not _evt, str(_evt))
+    # 场景 2:前台始终是别的窗口 → 取消 + 回告
+    _sent.clear(); _evt.clear()
+    cm._get_foreground = lambda: 9999
+    _wk._do_cmd(("paste", 4242, 7))
+    check("事务:窗口切换即取消", not _sent and _evt
+          and _evt[0][0] == "paste_abort" and "切换" in _evt[0][1], str(_evt))
+    # 场景 3:剪贴板在发送前被其他程序改写 → 取消
+    _sent.clear(); _evt.clear()
+    _seq_state = {"n": 7}
+    cm._get_clip_seq = lambda: (_seq_state.update(n=9), 9)[1]
+    cm._get_foreground = lambda: 4242
+    _wk._do_cmd(("paste", 4242, 7))
+    check("事务:剪贴板被改即取消", not _sent and _evt
+          and "其他程序修改" in _evt[0][1], str(_evt))
+    # 场景 4:旧式调用(无目标)→ 保持旧行为直接发送
+    _sent.clear(); _evt.clear()
+    _wk._do_cmd(("paste", 0, 0))
+    check("事务:无目标旧语义直发", _sent == [1] and not _evt)
+finally:
+    cm.send_ctrl_v, cm._get_foreground, cm._get_clip_seq, cm.time = \
+        _o_send, _o_fg, _o_seq, _o_time
+
+# ---- 可迁移加密备份(AES-256-GCM + PBKDF2)----
+check("cryptography 可用", cm._AES_OK)
+_payload = {"app": "WinClipboard", "items": [
+    {"type": "text", "content": "可迁移条目 α", "ts": 1.5, "pinned": False}],
+    "private": ["备用私密内容-1"]}
+_blob = cm.portable_backup_bytes(_payload, "test-pass-1234")
+check("备份容器 magic", _blob[:8] == b"WCLBBAK1")
+_rt = cm.portable_backup_parse(_blob, "test-pass-1234")
+check("备份往返一致", _rt == _payload)
+try:
+    cm.portable_backup_parse(_blob, "wrong-pass-9999")
+    check("错误密码被拒", False)
+except ValueError as e:
+    check("错误密码被拒", "密码错误" in str(e))
+try:
+    cm.portable_backup_parse(b"JUNKJUNK" + _blob[8:], "test-pass-1234")
+    check("容器校验拒损坏数据", False)
+except ValueError:
+    check("容器校验拒损坏数据", True)
+_bk = make_core()
+_bk.add_item(("text", "backup-item-1", {}, "a.exe"))
+_bk.private.append("私条目-原")
+_pf = _bk.export_portable_payload(include_images=False, include_private=False)
+check("加密备份默认不含私密区", _pf["private"] == [])
+_pf2 = _bk.export_portable_payload(include_private=True)
+check("显式包含私密区", "私条目-原" in _pf2["private"])
+_bk2 = make_core()
+_a9, _s9, _p9 = _bk2.import_portable_payload(_pf2)
+check("加密备份导入(历史+私密合并)",
+      _a9 == 1 and "私条目-原" in _bk2.private and _p9 == 1)
+_bk3 = make_core()
+_a10, _s10, _p10 = _bk2.import_portable_payload(_pf2)   # 同一核心重复导入
+check("重复导入去重(历史与私密)",
+      _a10 == 0 and _p10 == 0 and _bk2.private.count("私条目-原") == 1)
+
 print()
 print("RESULT:", "PASS" if not FAILS else "FAIL %d 项: %s" % (len(FAILS), ", ".join(FAILS)))
 sys.exit(1 if FAILS else 0)

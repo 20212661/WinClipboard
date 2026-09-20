@@ -53,6 +53,7 @@ from qfluentwidgets import (FluentIcon as FIF, setTheme, setThemeColor, Theme,
                             ToggleButton, Slider, RadioButton, SpinBox, LineEdit,
                             TextEdit, ComboBox, EditableComboBox,
                             RoundMenu, MessageBox, MessageBoxBase, InfoBar,
+                            PasswordLineEdit,
                             CheckBox,
                             InfoBarPosition, BodyLabel, StrongBodyLabel,
                             CaptionLabel, TitleLabel,
@@ -1213,6 +1214,11 @@ class MainWindow(FluentWindow):
             self.app._hotkey_ts = None      # 收起路径不参与首帧统计
             self.hide()
         else:
+            # 粘贴事务目标:显示前的前台窗口 = 用户此刻的工作现场;
+            # 之后回车粘贴将以它为校验目标(窗口切换则取消,见 _do_cmd)
+            fg = cm._get_foreground()
+            if fg and fg != int(self.winId()):
+                self.app._paste_target = fg
             self.showWindow()
 
     def show_fast(self):
@@ -1268,7 +1274,9 @@ class PrivatePage(QWidget):
 
         if cm.dpapi_available():
             hint = CaptionLabel("以下内容经敏感识别后隔离保存,不出现在历史面板;"
-                                "使用 Windows DPAPI 加密,仅当前用户可解密。"
+                                "使用 Windows DPAPI 绑定当前 Windows 用户加密。"
+                                "该机制主要保护静态磁盘数据(文件被拷走也读不出),"
+                                "不能抵御已获得当前用户权限的恶意程序。"
                                 "列表默认遮罩,点「显示明文」解锁,30 秒后自动遮回。")
         else:
             hint = CaptionLabel("⚠ 当前环境 DPAPI 不可用,私密区仅 Base64 编码存储(未加密),"
@@ -1351,7 +1359,9 @@ class PrivatePage(QWidget):
         if not 0 <= i < len(self.app.private):
             return
         # 按钮就是「复制并粘贴」:用户显式要求回贴,不受 auto_paste 默认关影响
-        self.app.core.paste_text(self.app.private[i], force=True)
+        self.app.core.paste_text(self.app.private[i], force=True,
+                                 target_hwnd=getattr(self.app, "_paste_target",
+                                                     None))
 
     def do_view(self):
         """私密条目 → 独立查看器(JWT 自动落解码视图;rec 带 private 标记,
@@ -1706,8 +1716,9 @@ class SettingsPage(QWidget):
 
         c_enc = SwitchSettingCard(
             FIF.CERTIFICATE, "历史加密存储",
-            "history.json 用 Windows DPAPI 加密(绑定当前用户,复制文件到别的"
-            "电脑读不出);关闭则明文存储,便于备份与迁移", parent=group3)
+            "history.json 用 Windows DPAPI 绑定当前用户加密(复制文件到别的"
+            "电脑读不出);主要保护静态磁盘数据,不抵御已获得当前用户权限的"
+            "恶意程序;关闭则明文存储,便于备份与迁移", parent=group3)
         c_enc.setChecked(bool(cfg.get("encrypt_history")))
 
         def on_enc(on):
@@ -1732,16 +1743,24 @@ class SettingsPage(QWidget):
         # ---- 备份与迁移 ----
         group4 = SettingCardGroup("备份与迁移", self)
         c_exp = PushSettingCard(
-            "导出…", FIF.SAVE_AS, "导出历史",
-            "全部条目导出为 JSON(可选内嵌图片),用于备份或迁移到别的电脑",
+            "导出…", FIF.SAVE_AS, "导出历史(明文 JSON)",
+            "全部条目导出为 JSON(可选内嵌图片);不含私密区;文件本身不加密",
             parent=group4)
         c_exp.clicked.connect(self._export_history)
+        c_pexp = PushSettingCard(
+            "加密备份…", FIF.CERTIFICATE, "加密备份(可迁移)",
+            "密码 + AES-256-GCM 认证加密,换电脑凭密码即可恢复;"
+            "私密区可选包含(默认不含,且只存在于加密容器内)",
+            parent=group4)
+        c_pexp.clicked.connect(self._export_portable)
         c_imp = PushSettingCard(
-            "导入…", FIF.DOWNLOAD, "导入历史",
-            "从导出文件合并条目(自动去重;内嵌图片自动落盘;原时间/置顶还原)",
+            "导入…", FIF.DOWNLOAD, "导入历史 / 恢复备份",
+            "JSON 与加密备份(.wcbak)自动识别,合并去重、图片落盘重建、"
+            "原时间/置顶还原",
             parent=group4)
         c_imp.clicked.connect(self._import_history)
         group4.addSettingCard(c_exp)
+        group4.addSettingCard(c_pexp)
         group4.addSettingCard(c_imp)
         lay.addWidget(group4)
 
@@ -1965,24 +1984,122 @@ class SettingsPage(QWidget):
                         "%d 条 → %s" % (len(payload["items"]), path),
                         parent=self, position=InfoBarPosition.TOP_RIGHT)
 
-    def _import_history(self):
-        """导入历史:合并去重,图片落盘重建,时间/置顶还原。"""
-        path, _ = QFileDialog.getOpenFileName(self, "导入历史", "",
-                                              "JSON (*.json);;所有文件 (*.*)")
+    def _export_portable(self):
+        """可迁移加密备份:密码 → PBKDF2 → AES-256-GCM,跨电脑可恢复。
+        私密区默认不包含(勾选后只存在于加密容器内)。"""
+        if not cm._AES_OK:
+            InfoBar.error("功能不可用",
+                          "未安装 cryptography 库(pip install cryptography)",
+                          parent=self, position=InfoBarPosition.TOP_RIGHT,
+                          duration=5000)
+            return
+        dlg = MessageBoxBase(self)
+        dlg.viewLayout.addWidget(StrongBodyLabel("导出加密备份(可迁移)"))
+        sub = CaptionLabel("密码经 PBKDF2 派生密钥,AES-256-GCM 认证加密;"
+                           "拿到任何电脑上用同一密码即可恢复。密码丢失无法找回。")
+        sub.setWordWrap(True)
+        sub.setStyleSheet("color: %s;" % TER)
+        dlg.viewLayout.addWidget(sub)
+        pw1 = PasswordLineEdit()
+        pw1.setPlaceholderText("设置备份密码")
+        pw2 = PasswordLineEdit()
+        pw2.setPlaceholderText("再输入一次")
+        chk_img = CheckBox("内嵌图片(base64,文件明显变大)")
+        chk_priv = CheckBox("包含私密区(仅存在于加密容器内)")
+        for w in (pw1, pw2, chk_img, chk_priv):
+            dlg.viewLayout.addWidget(w)
+        dlg.yesButton.setText("选择保存位置…")
+        dlg.cancelButton.setText("取消")
+        dlg.widget.setFixedWidth(420)
+
+        def _valid():
+            ok = (len(pw1.text()) >= 4 and pw1.text() == pw2.text())
+            if not ok and dlg.yesButton.isEnabled():
+                InfoBar.warning("密码无效", "至少 4 位,且两次输入一致",
+                                parent=self, position=InfoBarPosition.TOP_RIGHT)
+            return ok
+
+        dlg.yesButton.setEnabled(True)
+        if not dlg.exec() or not _valid():
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出加密备份",
+            os.path.join(os.path.expanduser("~"), "Desktop",
+                         "clipboard-backup-%s.wcbak"
+                         % time.strftime("%Y%m%d")),
+            "WinClipboard 加密备份 (*.wcbak)")
         if not path:
             return
         try:
-            payload = json.loads(Path(path).read_text(encoding="utf-8"))
-            added, skipped = self.app.core.import_payload(payload)
+            payload = self.app.core.export_portable_payload(
+                bool(chk_img.isChecked()), bool(chk_priv.isChecked()))
+            Path(path).write_bytes(
+                cm.portable_backup_bytes(payload, pw1.text()))
+        except Exception:
+            cm.log("导出加密备份失败:\n%s" % traceback.format_exc())
+            InfoBar.error("导出失败", "详情见日志(%s)" % cm.LOG_FILE, parent=self,
+                          position=InfoBarPosition.TOP_RIGHT)
+            return
+        InfoBar.success("加密备份完成",
+                        "%d 条(+%d 私密)→ %s"
+                        % (len(payload["items"]), len(payload["private"]), path),
+                        parent=self, position=InfoBarPosition.TOP_RIGHT)
+
+    def _import_history(self):
+        """导入历史:合并去重,图片落盘重建,时间/置顶还原。
+        加密备份(.wcbak)自动识别并要求输入密码。"""
+        path, _ = QFileDialog.getOpenFileName(self, "导入历史/备份", "",
+                                              "WinClipboard 备份 (*.wcbak *.json);;"
+                                              "所有文件 (*.*)")
+        if not path:
+            return
+        try:
+            raw = Path(path).read_bytes()
+            if raw[:8] == b"WCLBBAK1":
+                payload = self._ask_portable_password(raw)
+                if payload is None:
+                    return
+                added, skipped, n_priv = \
+                    self.app.core.import_portable_payload(payload)
+            else:
+                payload = json.loads(raw.decode("utf-8"))
+                added, skipped = self.app.core.import_payload(payload)
+                n_priv = 0
         except Exception as exc:
             cm.log("导入历史失败:\n%s" % traceback.format_exc())
             InfoBar.error("导入失败", str(exc)[:160], parent=self,
                           position=InfoBarPosition.TOP_RIGHT)
             return
         self.app.refresh_view()
-        InfoBar.success("导入完成", "新增 %d 条,跳过 %d 条(重复或文件已不存在)"
-                        % (added, skipped), parent=self,
+        msg = "新增 %d 条,跳过 %d 条(重复或文件已不存在)" % (added, skipped)
+        if n_priv:
+            msg += ";私密区新增 %d 条" % n_priv
+        InfoBar.success("导入完成", msg, parent=self,
                         position=InfoBarPosition.TOP_RIGHT)
+
+    def _ask_portable_password(self, raw):
+        """解密对话框:密码错误可重试,取消返回 None。"""
+        for _ in range(3):
+            dlg = MessageBoxBase(self)
+            dlg.viewLayout.addWidget(StrongBodyLabel("输入备份密码"))
+            sub = CaptionLabel("该备份使用 AES-256-GCM 认证加密,"
+                               "密码错误会明确提示。")
+            sub.setStyleSheet("color: %s;" % TER)
+            dlg.viewLayout.addWidget(sub)
+            pw = PasswordLineEdit()
+            pw.setPlaceholderText("备份密码")
+            dlg.viewLayout.addWidget(pw)
+            dlg.yesButton.setText("解密")
+            dlg.cancelButton.setText("取消")
+            dlg.widget.setFixedWidth(400)
+            if not dlg.exec():
+                return None
+            try:
+                return cm.portable_backup_parse(raw, pw.text())
+            except ValueError as e:
+                InfoBar.error("解密失败", str(e)[:120], parent=self,
+                              position=InfoBarPosition.TOP_RIGHT, duration=4000)
+        return None
 
     def _edit_exclusions(self):
         ExcludeAppsDialog(self, self.app).exec()
@@ -6278,10 +6395,13 @@ class WinClipboardApp(QObject):
         self.paste_rec(rec)
 
     def paste_rec(self, rec):
-        if not self.core.paste_record(rec):
+        # 先收起主窗(焦点回到目标窗口),再排队粘贴;
+        # 目标窗口取唤出主窗前的现场(粘贴事务校验,切换即取消)
+        self.win.hide()
+        if not self.core.paste_record(
+                rec, target_hwnd=getattr(self, "_paste_target", None)):
             MessageBox("WinClipboard", "文件已不存在,无法粘贴。", self.win).exec()
             return
-        self.win.hide()                        # 粘贴完成即收起,回到此前的工作现场
 
     # ---- 卡片动作 / 菜单 ----
     def card_action(self, act, card):
@@ -6794,6 +6914,10 @@ class WinClipboardApp(QObject):
                 pass
         elif kind == "qp_hotkey_change":    # 设置页录制快捷粘贴热键的结果
             self._on_qp_hotkey_change(bool(rest[0]), rest[1], rest[2])
+        elif kind == "paste_abort":         # 粘贴事务取消(窗口切换/剪贴板被改)
+            InfoBar.warning("已取消自动粘贴", str(rest[0]) if rest else "",
+                            parent=self.win, position=InfoBarPosition.TOP_RIGHT,
+                            duration=4000)
         elif kind == "ctt_hotkey":          # Ctrl+Alt+T:切换鼠标穿透
             self.pinboard.toggle_click_through(None)
         elif kind == "ctt_hotkey_state":    # 穿透退出热键注册结果(失败则禁穿透)

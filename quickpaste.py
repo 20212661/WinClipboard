@@ -403,10 +403,12 @@ class QuickPasteWindow(QWidget):
             return
         if plain:
             rec = plain_rec(rec)
-        # 先收起并还原焦点,再写剪贴板排队回贴(worker 内置 70ms 稳定延迟)
+        target = self._prev_hwnd or getattr(self.app, "_paste_target", None)
+        # 先收起并还原焦点,再写剪贴板排队回贴;目标窗口传入粘贴事务,
+        # 发送前校验前台与剪贴板序列号,切换即取消(worker 内置宽限循环)
         self.close_restore()
         try:
-            self.app.core.paste_record(rec, force=True)
+            self.app.core.paste_record(rec, force=True, target_hwnd=target)
         except Exception:
             cm.log("快捷粘贴失败:\n%s" % __import__("traceback").format_exc())
 

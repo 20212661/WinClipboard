@@ -25,6 +25,9 @@ a = Analysis(
         # 本项目模块(被字符串/延迟路径引用时兜底)
         "perf_probe",
         "pinboard",
+        # 可迁移加密备份(AES-256-GCM),延迟导入兜底
+        "cryptography",
+        "cryptography.hazmat.primitives.ciphers.aead",
     ],
     hookspath=[],
     hooksconfig={},
