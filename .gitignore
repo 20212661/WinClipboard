@@ -8,3 +8,5 @@ python.txt.bak
 _zcodework/
 mimosa_rules.bin
 _mimosa_rules.bin
+build/
+dist/
