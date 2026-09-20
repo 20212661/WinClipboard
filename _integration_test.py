@@ -724,6 +724,8 @@ a.core._post(("clip", ("text", "def ping():\n    return 'pong'\n")))
 a.core._post(("clip", ("text", '{"k":1}')))
 a.win.show()
 pump(0.5)
+a.refresh_view()          # 确定性重建:防抖在重负载下可能晚于 pump 窗口
+pump(0.2)
 check("预览面板随窗口可见", a.panel.preview.isVisible())
 cards = {c.rec["content"]: c for c in a._card_widgets if c.rec["type"] == "text"}
 code_card = cards.get("def ping():\n    return 'pong'\n")
