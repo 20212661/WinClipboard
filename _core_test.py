@@ -44,6 +44,8 @@ def make_core(history=None, private=None, cfg=None, max_items=100):
     core.signal_q = queue.Queue()
     core.worker = SimpleNamespace(cmd_q=queue.Queue())   # 粘贴命令桩
     core._set_clipboard = lambda rec: None               # 不碰系统剪贴板
+    core.monitor_paused = False                          # 捕获门(暂停/排除)测试前置
+    core._exclude_set = set()
     return core
 
 
@@ -82,13 +84,20 @@ core.add_item(("text", "new"))                    # 超量时淘汰非置顶的 
 check("置顶豁免淘汰", [h["content"] for h in core.history] == ["new", "n5", "n3"]
       and core.history[-1]["pinned"] is True)
 
-# ---- paste_record:重排 / 文件丢失 ----
-core = make_core()
+# ---- paste_record:重排 / 文件丢失 / auto_paste 默认关 ----
+core = make_core(cfg={"auto_paste": True})
 core.add_item(("text", "x1"))
 core.add_item(("text", "x2"))
 rec = core.history[1]
 check("paste_record", core.paste_record(rec) is True and core.history[0] is rec)
-check("paste 排队", core.worker.cmd_q.get_nowait()[0] == "paste")
+check("paste 排队(auto_paste 开)", core.worker.cmd_q.get_nowait()[0] == "paste")
+core.cfg["auto_paste"] = False
+core.paste_record(rec)
+check("auto_paste 关不排队", core.worker.cmd_q.empty())
+core2 = make_core()                     # 默认配置(未显式开 auto_paste)
+core2.add_item(("text", "d1"))
+core2.paste_record(core2.history[0])
+check("默认配置不自动粘贴", core2.worker.cmd_q.empty())
 check("丢失文件拒绝", core.paste_record(
     {"type": "files", "content": ["Z:/不存在/1.txt"]}) is False)
 
@@ -127,6 +136,108 @@ check("软删除保留图片文件", _img.exists())
 core.undo_delete()
 check("图片条目撤销回归", core.history[0]["content"] == str(_img) and _img.exists())
 _img.unlink()
+
+# ---- 热键可读标签(设置页卡片 / 托盘提示 / 录制对话框共用) ----
+check("hotkey_label 默认组合", cm.hotkey_label(6, 0x56) == "Ctrl+Shift+V")
+check("hotkey_label 全修饰+F5",
+      cm.hotkey_label(15, 0x74) == "Alt+Ctrl+Shift+Win+F5")
+check("hotkey_label 录制中间态", cm.hotkey_label(2, None) == "Ctrl+…")
+check("hotkey_label 空格/未映射键",
+      cm.hotkey_label(1, 0x20) == "Alt+空格"
+      and "VK" in cm.hotkey_label(1, 0xC0))
+
+# ---- 按应用排除(捕获门同一隐私线)----
+core = make_core()
+core.set_exclude_apps(["KeePass.exe", " keepass.exe ",
+                       r"C:\x\1Password.exe", "", "notepad.exe"])
+check("排除名单归一化(文件名/小写/去重)",
+      core.cfg["exclude_apps"] == ["keepass.exe", "1password.exe", "notepad.exe"],
+      str(core.cfg["exclude_apps"]))
+check("命中排除不捕获(大小写无关)",
+      core.should_capture("keepass.exe") is False
+      and core.should_capture("KeePass.EXE") is False)
+check("未命中可捕获", core.should_capture("chrome.exe") is True)
+check("空来源不参与名单匹配", core.should_capture("") is True)
+core.monitor_paused = True
+check("暂停优先于名单", core.should_capture("chrome.exe") is False)
+core.monitor_paused = False
+check("配置往返带名单", cm.load_config().get("exclude_apps")
+      == ["keepass.exe", "1password.exe", "notepad.exe"])
+core.set_exclude_apps([])
+check("清空名单恢复捕获", core.should_capture("keepass.exe") is True)
+
+# 来源应用随捕获入史(第三元素透传)
+core.add_item(("text", "带来源", "Notepad.exe"))
+check("来源应用入史(小写)", core.history[0].get("src") == "notepad.exe")
+core.add_item(("text", "无来源"))
+check("无来源不留字段", "src" not in core.history[0])
+core.add_item(("text", "来源去重仍按内容", "chrome.exe"))
+core.add_item(("text", "来源去重仍按内容", "notepad.exe"))
+check("来源不影响内容去重", len([h for h in core.history
+                              if h["content"] == "来源去重仍按内容"]) == 1)
+
+# ---- 自动清理(cleanup_days / disk_cap_mb,置顶豁免)----
+import time as _time
+core = make_core(cfg={"cleanup_days": 7})
+_now = _time.time()
+core.history[:] = [
+    {"type": "text", "content": "新", "ts": _now - 100},
+    {"type": "text", "content": "旧", "ts": _now - 30 * 86400},
+    {"type": "text", "content": "旧但置顶", "pinned": True, "ts": _now - 30 * 86400},
+]
+n, freed = core.apply_cleanup()
+check("按天数清理+置顶豁免", n == 1
+      and [h["content"] for h in core.history] == ["新", "旧但置顶"], str(n))
+
+core = make_core()                          # 两档默认关闭 → no-op
+core.history[:] = [{"type": "text", "content": "旧", "ts": 1}]
+check("清理策略默认关闭", core.apply_cleanup() == (0, 0)
+      and len(core.history) == 1)
+
+core = make_core(cfg={"disk_cap_mb": 0.0001})
+_fa = _P(cm.HISTORY_FILE).parent / "cap_a.png"
+_fb = _P(cm.HISTORY_FILE).parent / "cap_b.png"
+_fc = _P(cm.HISTORY_FILE).parent / "cap_c.png"
+_fa.write_bytes(b"a" * 100)
+_fb.write_bytes(b"b" * 100)
+_fc.write_bytes(b"c" * 100)
+core.history[:] = [
+    {"type": "image", "content": str(_fa), "ts": 1},                 # 最旧 → 删
+    {"type": "image", "content": str(_fb), "pinned": True, "ts": 2},  # 置顶 → 留
+    {"type": "image", "content": str(_fc), "ts": 3},                  # 仍超限 → 删
+    {"type": "text", "content": "文本不参与", "ts": 4},
+]
+n, freed = core.apply_cleanup()
+check("容量上限:最旧先删+置顶豁免+图片文件删除",
+      [h["content"] for h in core.history] == [str(_fb), "文本不参与"]
+      and n == 2 and not _fa.exists() and not _fc.exists() and _fb.exists()
+      and freed >= 200, "n=%s freed=%s" % (n, freed))
+_fb.unlink()
+
+# ---- 历史加密(history.json 可选 DPAPI)----
+_hist = [{"type": "text", "content": "机密内容一二三", "ts": 5}]
+cm.save_history(_hist, encrypt=True)
+_raw_h = _P(cm.HISTORY_FILE).read_text(encoding="utf-8")
+check("加密历史文件不含明文", "机密内容一二三" not in _raw_h
+      and '"dpapi": true' in _raw_h, _raw_h[:60])
+check("加密历史可读回", cm.load_history() == _hist)
+cm.save_history(_hist)                      # 关闭加密 → 明文回写
+check("明文历史往返(兼容旧格式)",
+      "机密内容一二三" in _P(cm.HISTORY_FILE).read_text(encoding="utf-8")
+      and cm.load_history() == _hist)
+
+# ---- 富文本格式随条目(html/rtf + src 同批)----
+core = make_core()
+core.add_item(("text", "带格式",
+               {"html": "<b>x</b>", "rtf": "{\\\\rtf1}", "junk": "被过滤"},
+               "word.exe"))
+_r = core.history[0]
+check("富文本字段入史+未知键过滤", _r.get("html") == "<b>x</b>"
+      and _r.get("rtf") == "{\\\\rtf1}" and "junk" not in _r
+      and _r.get("src") == "word.exe")
+core.add_item(("text", "纯文本", "notepad.exe"))
+check("无富文本不受影响", "html" not in core.history[0]
+      and core.history[0].get("src") == "notepad.exe")
 
 # ---- 来源 / 时间筛选(filter_view 扩展)----
 core = make_core()
@@ -198,6 +309,18 @@ _p2 = _P(cm.IMAGE_DIR) / os.path.basename(core4.history[0]["content"])
 check("内嵌图片导入落盘", _a4 == 1 and _p2.exists())
 _px.unlink()
 _p2.unlink()
+
+# ---- 版本比较(更新检查用)----
+check("version_tuple 基本与容错", cm.version_tuple("1.2.10") == (1, 2, 10)
+      and cm.version_tuple("v1.2") == (1, 2, 0)
+      and cm.version_tuple("1.2.3-beta") == (1, 2, 3)
+      and cm.version_tuple("") == (0, 0, 0)
+      and cm.version_tuple(None) == (0, 0, 0))
+check("version_tuple 排序语义", cm.version_tuple("1.0.10") > cm.version_tuple("1.0.9")
+      and cm.version_tuple("2.0") > cm.version_tuple("1.99.99")
+      and cm.version_tuple("1.0.0") == cm.version_tuple("1.0"))
+check("APP_VERSION 可解析且非零", cm.version_tuple(cm.APP_VERSION) >= (1, 0, 0))
+
 # ---- 私密区持久化往返 + DPAPI 加密 ----
 cm.save_private(["甲", "b&c", "✓ 多行\n文本"])
 check("private 往返", cm.load_private() == ["甲", "b&c", "✓ 多行\n文本"])

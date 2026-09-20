@@ -587,7 +587,117 @@ check("私密区查看直达 JWT 解码视图", _vw is not None and _vw._mode ==
 check("私密条目带 private 标记", _vw.rec.get("private") is True)
 if _vw is not None:
     _vw.close()
+
+# ---- 暂停监听(临时隐私模式):剪贴板事件不入史 ----
+a.toggle_monitor_pause(True)
+check("暂停监听状态生效", a.core.monitor_paused is True
+      and a.win.settings_page.c_pause.isChecked())
+_n_pause = len(a.history)
+for _ in range(2):
+    a.core.worker.on_clip(0, 0, 0, 0)   # 直接模拟 WM_CLIPBOARDUPDATE(门控在 on_clip)
+pump(0.4)
+check("暂停期间剪贴板事件不入史", len(a.history) == _n_pause,
+      "%d -> %d" % (_n_pause, len(a.history)))
+a.core._post(("tray", "pause"))
 pump(0.2)
+check("托盘开关恢复监听", a.core.monitor_paused is False
+      and not a.win.settings_page.c_pause.isChecked())
+
+# ---- 按应用排除:设置卡 + 管理对话框 + 捕获门控 ----
+check("排除卡初始标签", sp.lbl_excl.text() == "未排除任何应用"
+      or sp.lbl_excl.text().startswith("已排除"),
+      sp.lbl_excl.text())
+_dx = wq.ExcludeAppsDialog(sp, a)
+_dx.cmb.setText("KeePass.exe")
+_dx._add_current()
+_dx._add_current()                        # 重复添加 → 去重
+check("排除对话框添加归一化+去重", _dx.lst.count() == 1
+      and _dx.lst.item(0).text() == "keepass.exe", str([_dx.lst.item(i).text()
+                                                        for i in range(_dx.lst.count())]))
+_dx.validate()                            # 保存 → core.set_exclude_apps
+check("排除名单生效并落盘", a.core.should_capture("keepass.exe") is False
+      and cm.load_config().get("exclude_apps") == ["keepass.exe"])
+sp._refresh_excl_label()
+check("排除卡计数刷新", sp.lbl_excl.text() == "已排除 1 个应用")
+_n_ex = len(a.history)
+_fg_saved = cm.foreground_app_exe
+cm.foreground_app_exe = lambda: "keepass.exe"
+a.core.worker.on_clip(0, 0, 0, 0)         # 命中名单 → 门控拦截,不触剪贴板
+pump(0.4)
+check("排除应用复制不入史", len(a.history) == _n_ex,
+      "%d -> %d" % (_n_ex, len(a.history)))
+check("其他应用不受影响(门放行)", a.core.should_capture("chrome.exe") is True)
+cm.foreground_app_exe = _fg_saved
+_dx2 = wq.ExcludeAppsDialog(sp, a)
+_dx2.lst.item(0).setSelected(True)
+_dx2._remove_selected()
+_dx2.validate()
+check("对话框移除后恢复捕获", a.core.should_capture("keepass.exe") is True
+      and cm.load_config().get("exclude_apps") == [])
+
+# 来源应用入史 + 卡片 meta 行显示
+a.core._post(("clip", ("text", "来源标记条目", "notepad.exe")))
+pump(0.5)
+_src_rec = next((h for h in a.history if h.get("content") == "来源标记条目"), None)
+check("来源应用随捕获入史", _src_rec is not None
+      and _src_rec.get("src") == "notepad.exe")
+a.on_search("")
+pump(0.4)
+_src_card = next((c for c in a._card_widgets
+                  if c.rec.get("content") == "来源标记条目"), None)
+check("卡片 meta 行显示来源", _src_card is not None
+      and "notepad.exe" in _src_card.meta_lbl.text(),
+      _src_card.meta_lbl.text() if _src_card else "no card")
+
+# ---- 存储与清理:设置组交互(下拉/开关 → 配置/文件格式) ----
+sp.combo_days.setCurrentIndex(1)            # 7 天
+check("清理天数下拉生效", a.cfg.get("cleanup_days") == 7
+      and json.load(open(cm.CONFIG_FILE, encoding="utf-8")).get("cleanup_days") == 7)
+sp.combo_disk.setCurrentIndex(1)            # 200 MB
+check("图片上限下拉生效", a.cfg.get("disk_cap_mb") == 200)
+sp.combo_days.setCurrentIndex(0)
+sp.combo_disk.setCurrentIndex(0)
+check("清理策略可关回", a.cfg.get("cleanup_days") == 0 and a.cfg.get("disk_cap_mb") == 0)
+
+sp.c_enc.setChecked(True)
+pump(0.2)
+_hfile = _Path(cm.HISTORY_FILE).read_text(encoding="utf-8")
+check("历史已转加密格式", '"dpapi": true' in _hfile, _hfile[:40])
+check("加密历史仍可加载", len(cm.load_history()) == len(a.history))
+sp.c_enc.setChecked(False)
+pump(0.2)
+check("历史转回明文", "dpapi" not in _Path(cm.HISTORY_FILE).read_text(encoding="utf-8"))
+
+# ---- 富文本格式保留:HTML/RTF 随条目捕获与回写(真剪贴板;被占则跳过) ----
+import win32clipboard as _wcb
+try:
+    _cfh = _wcb.RegisterClipboardFormat("HTML Format")
+    _cfr = _wcb.RegisterClipboardFormat("Rich Text Format")
+    _wcb.OpenClipboard()
+    _wcb.EmptyClipboard()
+    _wcb.SetClipboardData(_wcb.CF_UNICODETEXT, "富文本保留测试")
+    _html_payload = ("Version:0.9\r\nStartHTML:0000000105\r\nEndHTML:0000000190"
+                     "\r\n<html><body><b>加粗</b></body></html>")
+    _wcb.SetClipboardData(_cfh, _html_payload.encode("utf-8"))
+    _wcb.SetClipboardData(_cfr, b"{\\rtf1\\ansi rich}")
+    _wcb.CloseClipboard()
+    _item = a.core.read_clipboard_now()
+    # html 按 latin-1 字节保真存储(保 HTML Format 头偏移),比对用同样形态
+    _html_l1 = _html_payload.encode("utf-8").decode("latin-1")
+    check("富文本捕获(html+rtf 随文本)", _item[0] == "text"
+          and _item[1] == "富文本保留测试"
+          and isinstance(_item[2], dict) and _item[2].get("html") == _html_l1
+          and "rtf1" in _item[2].get("rtf", ""), str(_item)[:60])
+    ok = a.core._set_clipboard({"type": "text", "content": "富文本保留测试",
+                                "html": _item[2]["html"], "rtf": _item[2]["rtf"]})
+    _wcb.OpenClipboard()
+    check("回写并放 HTML 格式", ok
+          and _wcb.IsClipboardFormatAvailable(_cfh))
+    check("回写并放 RTF 格式", _wcb.IsClipboardFormatAvailable(_cfr))
+    check("回写保留纯文本", _wcb.IsClipboardFormatAvailable(_wcb.CF_UNICODETEXT))
+    _wcb.CloseClipboard()
+except Exception as _e:
+    print("SKIP 富文本剪贴板往返(系统剪贴板被占用): %r" % _e)
 
 # ---- 来源 / 时间筛选下拉(数据来自条目 src/ts) ----
 a.on_search("")
