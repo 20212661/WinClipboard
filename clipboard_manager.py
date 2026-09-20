@@ -56,7 +56,7 @@ except ImportError:
 # 路径 / 常量
 # ============================================================
 APP_NAME = "WinClipboard"
-APP_VERSION = "1.0.0"          # 产品化首个发布版本(关于/导出载荷/更新检查共用)
+APP_VERSION = "1.0.0-rc1"  # 产品化首个发布候选(关于/导出载荷/更新检查共用)
 REPO_URL = "https://github.com/haoshangyang/WinClipboard"
 RELEASE_API = "https://api.github.com/repos/haoshangyang/WinClipboard/releases/latest"
 _APPDATA = os.environ.get("APPDATA", os.path.expanduser("~"))
