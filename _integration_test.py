@@ -624,6 +624,38 @@ if len(a._view) >= 3:
     pump(0.3)
     check("批量删除可撤销", len(a.history) == _n_b4)
 
+# ---- 导出 / 导入(拦截文件对话框与导出选项弹窗) ----
+_EXP = os.path.join(tempfile.gettempdir(), "wclb_integ_export.json")
+_o_gsf = wq.QFileDialog.getSaveFileName
+_o_gof = wq.QFileDialog.getOpenFileName
+_o_mbe = wq.MessageBoxBase.exec
+wq.QFileDialog.getSaveFileName = staticmethod(lambda *args, **kw: (_EXP, ""))
+wq.QFileDialog.getOpenFileName = staticmethod(lambda *args, **kw: (_EXP, ""))
+wq.MessageBoxBase.exec = lambda self: True
+try:
+    sp._export_history()
+    check("导出文件已写", _Path(_EXP).exists())
+    _pl_e = json.loads(_Path(_EXP).read_text(encoding="utf-8"))
+    _exp_expect = [h for h in a.history
+                   if h["type"] == "text"
+                   or (h["type"] == "files"
+                       and any(os.path.exists(p) for p in h.get("content", [])))]
+    check("导出载荷条目数一致", _pl_e.get("app") == "WinClipboard"
+          and len(_pl_e["items"]) == len(_exp_expect),
+          "%d vs %d" % (len(_pl_e["items"]), len(_exp_expect)))
+    _n_imp_b4 = len(a.history)
+    sp._import_history()
+    pump(0.3)
+    check("重复导入零新增(去重)", len(a.history) == _n_imp_b4)
+finally:
+    wq.QFileDialog.getSaveFileName = _o_gsf
+    wq.QFileDialog.getOpenFileName = _o_gof
+    wq.MessageBoxBase.exec = _o_mbe
+    try:
+        os.remove(_EXP)
+    except OSError:
+        pass
+
 # ---- 图片查看器:独立窗口 + 缩放/1:1/适应(小图不放大) ----
 img_rec = next((h for h in a.history if h.get("type") == "image"), None)
 check("存在图片条目(前置)", img_rec is not None)

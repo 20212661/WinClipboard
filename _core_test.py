@@ -157,6 +157,47 @@ check("批量软删按身份", _n == 2 and len(core.history) == 3
       and [h["content"] for h in core.history] == ["b", "d", "e"])
 check("批量删除整批撤销", len(core.undo_delete()) == 2
       and len(core.history) == 5)
+
+# ---- 导出 / 导入 ----
+core = make_core()
+core.history[:] = [
+    {"type": "text", "content": "导出条目", "ts": 123.0, "src": "a.exe",
+     "pinned": True, "html": "<i>x</i>"},
+    {"type": "files", "content": ["Z:/不存在.txt"], "ts": 5},   # 文件丢失 → 跳过
+]
+_pl = core.export_payload()
+check("导出载荷(丢文件条目剔除)", len(_pl["items"]) == 1
+      and _pl["items"][0]["content"] == "导出条目"
+      and _pl["items"][0]["html"] == "<i>x</i>")
+core2 = make_core()
+_a2, _s2 = core2.import_payload(_pl)
+check("导入还原字段", _a2 == 1 and _s2 == 0
+      and core2.history[0]["ts"] == 123.0
+      and core2.history[0]["pinned"] is True
+      and core2.history[0].get("src") == "a.exe")
+_a3, _s3 = core2.import_payload(_pl)
+check("重复导入去重", _a3 == 0 and _s3 == 1)
+_ok = False
+try:
+    core2.import_payload({"no": 1})
+except ValueError:
+    _ok = True
+check("非法载荷报错", _ok)
+
+from PIL import Image as _PILImage
+_px = _P(cm.HISTORY_FILE).parent / "exp_img.png"
+_PILImage.new("RGB", (8, 6), (9, 9, 9)).save(_px)
+core3 = make_core()
+core3.history[:] = [{"type": "image", "content": str(_px), "w": 8, "h": 6,
+                     "hash": "h9", "ts": 9}]
+check("图片默认不导出", core3.export_payload()["items"] == [])
+_pl4 = core3.export_payload(include_images=True)
+core4 = make_core()
+_a4, _ = core4.import_payload(_pl4)
+_p2 = _P(cm.IMAGE_DIR) / os.path.basename(core4.history[0]["content"])
+check("内嵌图片导入落盘", _a4 == 1 and _p2.exists())
+_px.unlink()
+_p2.unlink()
 # ---- 私密区持久化往返 + DPAPI 加密 ----
 cm.save_private(["甲", "b&c", "✓ 多行\n文本"])
 check("private 往返", cm.load_private() == ["甲", "b&c", "✓ 多行\n文本"])
