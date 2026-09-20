@@ -24,6 +24,7 @@ import clipboard_manager as cm   # 后端复用
 import perf_probe
 from perf_probe import PerfSpan, since, stamp   # 关键路径性能埋点
 from pinboard import PinBoardManager   # 图钉画布(置顶多图板)子包
+from urllib.parse import unquote as _unquote, quote as _quote
 
 from PySide6.QtCore import (Qt, QTimer, QRectF, QRect, QSize, QEvent, QPropertyAnimation,
                             QEasingCurve, QObject, QPoint, QThread, Signal,
@@ -2628,7 +2629,10 @@ class ViewerWindow(QWidget):
         else:
             self._kind = "text"
             self._raw = str(rec.get("content") or "")
-        self._auto_lang = cm.detect_lang(self._raw) if self._kind == "text" else "text"
+        # 内容识别管线:category/subtype/confidence(URL/JWT/Base64 等智能
+        # 视图的数据源;手动改语言后智能视图让位 → 见 _mode_table)
+        self._content = cm.detect_content(self._raw) if self._kind == "text" else None
+        self._auto_lang = self._content.lang if self._content is not None else "text"
         self._lang_index = 0                    # VIEW_LANGS 下标(0 = 自动识别)
         self._base_pt = 10                      # 100% 时的字号(磅)
         self._meta_suffix = ""
@@ -2644,11 +2648,18 @@ class ViewerWindow(QWidget):
             self._csv_delim = cm.csv_sniff(self._raw)
             self._csv_rows = cm.parse_csv_rows(
                 self._raw, self._csv_delim or ",") if self._csv_delim else []
+            _sub = self._content.subtype if self._content is not None else ""
+            self._url_inf = cm.url_inspect(self._raw) if _sub == "web_url" else None
+            self._jwt_inf = cm.jwt_inspect(self._raw) if _sub == "jwt" else None
+            self._b64 = cm.b64_decode_auto(self._raw) if _sub == "base64" else None
         else:
             self._json_err = None
             self._xml_fmt = None
             self._csv_delim = None
             self._csv_rows = []
+            self._url_inf = None
+            self._jwt_inf = None
+            self._b64 = None
 
         self.setWindowTitle("查看 · WinClipboard")
         self.setWindowIcon(app.icon)
@@ -2749,11 +2760,26 @@ class ViewerWindow(QWidget):
         self.table.setBorderVisible(True)
         self.table.setEditTriggers(TableWidget.NoEditTriggers)   # 只读
         self.table.setWordWrap(False)
+        # 字段/值 信息页(URL/JWT 共用):右键或双击复制值
+        self.info = TreeWidget(self.card)
+        self.info.setColumnCount(2)
+        self.info.setHeaderLabels(["字段", "值"])
+        self.info.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.info.header().setStretchLastSection(True)
+        self.info.setBorderVisible(True)
+        self.info.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.info.customContextMenuRequested.connect(self._info_menu)
+        self.info.itemDoubleClicked.connect(
+            lambda it, _col: self.app.core.copy_text(str(it.data(1, Qt.UserRole) or "")))
+        # Base64 解码图片页
+        self.img_view = QLabel(self.card)
+        self.img_view.setAlignment(Qt.AlignCenter)
         for pw in (self.editor_raw, self.editor, self.tree,
-                   self.md_view, self.table):
+                   self.md_view, self.table, self.info, self.img_view):
             self.stack.addWidget(pw)
         SmoothScrollDelegate(self.tree, useAni=True)
         SmoothScrollDelegate(self.table, useAni=True)
+        SmoothScrollDelegate(self.info, useAni=True)
         cv.addWidget(self.stack)
         body.addWidget(self.card)
         root.addLayout(body, 1)
@@ -2859,6 +2885,15 @@ class ViewerWindow(QWidget):
         """当前语言/内容 → (默认模式, [(key,label),…]);单视图返回空表。"""
         if self._kind != "text":
             return "raw", []
+        # 智能视图(仅自动识别时;手动改语言 = 用户要按语言看,智能视图让位)
+        if self._lang_index == 0 and self._content is not None:
+            sub = self._content.subtype
+            if sub == "web_url" and self._url_inf:
+                return "url", [("raw", "原文"), ("url", "URL")]
+            if sub == "jwt" and self._jwt_inf:
+                return "jwt", [("raw", "原文"), ("jwt", "JWT")]
+            if sub == "base64" and self._b64:
+                return "b64", [("raw", "原文"), ("b64", "解码")]
         lang = self._resolved_lang()
         if lang == "json":
             if self._json_err is None:
@@ -2923,6 +2958,22 @@ class ViewerWindow(QWidget):
         elif mode == "table":
             self.stack.setCurrentWidget(self.table)
             self._build_table()
+        elif mode in ("url", "jwt"):
+            self.stack.setCurrentWidget(self.info)
+            self._build_url_info() if mode == "url" else self._build_jwt_info()
+        elif mode == "b64":
+            kind, raw = self._b64 or (None, None)
+            if kind == "image":
+                self.stack.setCurrentWidget(self.img_view)
+                self._show_b64_image(raw)
+            else:
+                # 解码文本落到染色编辑器(不染色:解码后语言未知)
+                self.stack.setCurrentWidget(self.editor)
+                text = raw.decode("utf-8", "replace")
+                if text != self._ed_text:
+                    self.editor.setPlainText(text)
+                    self._ed_text = text
+                    self._ed_hl_state = None
         self._refresh_meta()
         self._refresh_pos()
 
@@ -3053,6 +3104,157 @@ class ViewerWindow(QWidget):
         self.table.setUpdatesEnabled(True)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
+    # ---- URL / JWT / Base64 Inspector ----
+    def _info_add(self, field, value, parent=None, full=None):
+        """加一行「字段/值」;超长值显示截断,完整值存 UserRole 供复制。"""
+        shown = value if value is not None else ""
+        if len(shown) > 160:
+            shown = shown[:160] + "…"
+        it = QTreeWidgetItem([field, shown])
+        it.setData(1, Qt.UserRole, value if full is None else full)
+        it.setToolTip(1, shown)
+        if parent is None:
+            self.info.addTopLevelItem(it)
+        else:
+            parent.addChild(it)
+        return it
+
+    def _build_url_info(self):
+        inf = self._url_inf or {}
+        self.info.clear()
+        self._info_add("Scheme", inf.get("scheme") or "")
+        self._info_add("主机", inf.get("host") or "")
+        if inf.get("port"):
+            self._info_add("端口", str(inf["port"]))
+        self._info_add("路径", inf.get("path") or "/")
+        q = inf.get("query") or []
+        if q:
+            g = self._info_add("Query 参数", "%d 项" % len(q))
+            for k, v in q:
+                self._info_add(k or "(空)", v, g)
+        if inf.get("fragment"):
+            self._info_add("Fragment", inf["fragment"])
+
+    def _build_jwt_info(self):
+        inf = self._jwt_inf or {}
+        self.info.clear()
+        head, pay = inf.get("header") or {}, inf.get("payload") or {}
+        self._info_add("算法 (alg)", str(head.get("alg", "?")))
+        warn = self._info_add("签名", "未验证")
+        warn.setForeground(1, QColor("#cf9a00"))
+        warn.setToolTip(1, "仅解码展示:没有密钥,无法判定令牌真伪")
+        g = self._info_add("Header", "%d 个字段" % len(head))
+        for k, v in head.items():
+            self._info_add(str(k), v if isinstance(v, str)
+                           else json.dumps(v, ensure_ascii=False), g)
+        g = self._info_add("Payload", "%d 个字段" % len(pay))
+        for k, v in pay.items():
+            if isinstance(v, str):
+                vs = v
+            else:
+                vs = json.dumps(v, ensure_ascii=False)
+            self._info_add(str(k), vs, g)
+        for label, key in (("签发时间 (iat)", "iat"), ("生效时间 (nbf)", "nbf"),
+                           ("过期时间 (exp)", "exp")):
+            ts = inf.get(key)
+            if ts:
+                self._info_add(label, time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(ts)))
+        exp = inf.get("exp")
+        if exp:
+            left = exp - time.time()
+            if left <= 0:
+                it = self._info_add("状态", "已过期")
+                it.setForeground(1, QColor("#e8493f"))
+            else:
+                hrs = left // 3600
+                self._info_add("状态", "约 %s 后过期" % (
+                    "%.1f 小时" % hrs if hrs >= 1 else "%d 分钟" % max(1, left // 60)))
+        else:
+            self._info_add("状态", "无 exp 字段(视为不过期)")
+
+    def _show_b64_image(self, raw):
+        img = QImage.fromData(raw)
+        if img.isNull():
+            self.img_view.setText("(解码出图像魔数,但无法解析像素)")
+            self.img_view.setPixmap(QPixmap())
+            return
+        pm = QPixmap.fromImage(img)
+        if pm.width() > 1600 or pm.height() > 1200:
+            pm = pm.scaled(1600, 1200, Qt.KeepAspectRatio,
+                           Qt.SmoothTransformation)
+        self.img_view.setPixmap(pm)
+        self.img_view.setToolTip("原始尺寸 %d × %d" % (img.width(), img.height()))
+
+    def _info_menu(self, pos):
+        it = self.info.itemAt(pos)
+        if it is None:
+            return
+        val = str(it.data(1, Qt.UserRole) or "")
+        field = it.text(0)
+        m = RoundMenu(parent=self.info)
+        a1 = QAction("复制「%s」" % field, m)
+        a1.triggered.connect(lambda _=False, v=val: self.app.core.copy_text(v))
+        m.addAction(a1)
+        if val and len(val) > 160:
+            a2 = QAction("复制完整值(%d 字符)" % len(val), m)
+            a2.triggered.connect(lambda _=False, v=val: self.app.core.copy_text(v))
+            m.addAction(a2)
+        m.exec(self.info.viewport().mapToGlobal(pos))
+        m.deleteLater()
+
+    def _inspector_actions(self):
+        """URL/JWT/Base64 的内容专属动作(「更多」菜单;返回 [(标题, 回调)])。"""
+        out = []
+        if self._lang_index != 0 or self._content is None:
+            return out
+        cp = self.app.core.copy_text
+
+        def _copy(title, getter):
+            out.append((title, lambda g=getter: cp(g())))
+
+        if self._content.subtype == "web_url" and self._url_inf:
+            inf = self._url_inf
+            url = self._raw.strip()
+            out.append(("在浏览器打开", lambda: cm.open_url(url)))
+            _copy("复制主机名", lambda: inf["host"])
+            _copy("复制路径", lambda: inf["path"])
+            if inf["query"]:
+                from urllib.parse import urlsplit as _us
+                _copy("复制参数串", lambda: _us(url).query)
+            _copy("URL 解码并复制", lambda: _unquote(url))
+            _copy("URL 编码并复制", lambda: _quote(url, safe=":/?&=#%+"))
+        elif self._content.subtype == "jwt" and self._jwt_inf:
+            inf = self._jwt_inf
+            _copy("复制 Header (JSON)",
+                  lambda: json.dumps(inf["header"], ensure_ascii=False, indent=2))
+            _copy("复制 Payload (JSON)",
+                  lambda: json.dumps(inf["payload"], ensure_ascii=False, indent=2))
+            _copy("复制解码全文 (Header.Payload)",
+                  lambda: "%s.%s" % (json.dumps(inf["header"], ensure_ascii=False),
+                                     json.dumps(inf["payload"], ensure_ascii=False)))
+        elif self._content.subtype == "base64" and self._b64:
+            kind, raw = self._b64
+            if kind == "image":
+                out.append(("解码图另存为…", self._save_b64_image))
+            else:
+                _copy("复制解码文本", lambda: raw.decode("utf-8", "replace"))
+        return out
+
+    def _save_b64_image(self):
+        kind, raw = self._b64 or (None, None)
+        if not raw:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "解码图另存为", "clipboard_decoded.png", "PNG 图片 (*.png)")
+        if not path:
+            return
+        try:
+            Path(path).write_bytes(raw)
+        except Exception:
+            MessageBox("WinClipboard", "保存失败。", self).exec()
+
+
     # ---- 显示与渲染 ----
     def showEvent(self, e):
         super().showEvent(e)
@@ -3079,6 +3281,9 @@ class ViewerWindow(QWidget):
     def _set_lang_index(self, i):
         if i != self._lang_index:
             self._lang_index = i
+            # 语言/自动档切换必然换模式表:直接跳默认视图(URL/JWT 等
+            # 智能视图的 lang 恒为 text,靠 _render 的语言变化检测捕捉不到)
+            self._mode = self._mode_table()[0]
             self._render()
 
     def _set_lang_key(self, key):
@@ -3110,6 +3315,18 @@ class ViewerWindow(QWidget):
                     if nrow > self._TABLE_ROW_CAP else str(nrow)
                 ncol = max(len(r) for r in self._csv_rows)
                 base = "已识别:CSV 表格 · %s 行 × %d 列 · %s" % (shown, ncol, size)
+            elif self._lang_index == 0 and self._content is not None and \
+                    self._content.subtype == "web_url" and self._url_inf:
+                base = "已识别:URL · %s · %d 行 · %s" % (
+                    self._url_inf["host"], self._raw.count("\n") + 1, size)
+            elif self._lang_index == 0 and self._content is not None and \
+                    self._content.subtype == "jwt" and self._jwt_inf:
+                base = "已识别:JWT · 仅解码,签名未验证 · %s" % size
+            elif self._lang_index == 0 and self._content is not None and \
+                    self._content.subtype == "base64" and self._b64:
+                base = "已识别:Base64 · 解码为%s(%s) · %s" % (
+                    "图片" if self._b64[0] == "image" else "文本",
+                    cm._fmt_size(len(self._b64[1])), size)
             else:
                 base = "已识别:%s · %d 行 · %s" % (
                     self._lang_name(), self._raw.count("\n") + 1, size)
@@ -3139,6 +3356,10 @@ class ViewerWindow(QWidget):
                 max(len(r) for r in self._csv_rows))
         elif cur is self.md_view:
             info = "预览"
+        elif cur is self.info:
+            info = "%d 行" % self.info.topLevelItemCount()
+        elif cur is self.img_view:
+            info = "图像"
         else:
             info = self._editor_pos_info()
         self.lbl_pos.setText("%s · %s" % (prefix, info))
@@ -3220,6 +3441,13 @@ class ViewerWindow(QWidget):
             if self._act_hl.isVisible():
                 m.addSeparator()
                 m.addAction(self._act_hl)
+            insp = self._inspector_actions()
+            if insp:
+                m.addSeparator()
+                for title, cb in insp:
+                    a = QAction(title, m)
+                    a.triggered.connect(lambda _=False, f=cb: f())
+                    m.addAction(a)
         else:
             m.addAction(self._act_reveal)
         m.exec(self.btn_more.mapToGlobal(
@@ -3302,7 +3530,7 @@ class ViewerWindow(QWidget):
     def _apply_zoom(self, pct):
         pt = max(6, round(self._base_pt * pct / 100))
         for w in (self.editor, self.editor_raw, self.md_view,
-                  self.tree, self.table):
+                  self.tree, self.table, self.info):
             f = w.font()
             f.setPointSize(pt)
             w.setFont(f)

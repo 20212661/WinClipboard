@@ -401,7 +401,88 @@ fv = a.open_viewer({"type": "files", "content": ["C:/a.txt", "C:/b/c.png"]})
 pump(0.2)
 check("文件条目可查看",
       fv._active_edit().toPlainText() == "C:/a.txt\nC:/b/c.png")
-for w in (vw, jv, bjv, mv, cvv, xv, fv):
+
+# ---- Content Intelligence:URL / JWT / Base64 Inspector ----
+import base64 as _ib64
+import time as _itime
+
+
+def _b64u(s):
+    return _ib64.urlsafe_b64encode(s.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def info_rows(v):
+    return {v.info.topLevelItem(i).text(0): v.info.topLevelItem(i).text(1)
+            for i in range(v.info.topLevelItemCount())}
+
+
+uv = a.open_viewer({"type": "text",
+                    "content": "https://example.com/api/users?page=2&size=20#frag"})
+pump(0.2)
+check("URL 查看器默认结构视图", uv._mode == "url"
+      and uv.stack.currentWidget() is uv.info)
+rows = info_rows(uv)
+check("URL 字段拆解", rows.get("Scheme") == "https"
+      and rows.get("主机") == "example.com" and rows.get("路径") == "/api/users"
+      and rows.get("Fragment") == "frag", str(rows))
+qi = next((uv.info.topLevelItem(i) for i in range(uv.info.topLevelItemCount())
+           if uv.info.topLevelItem(i).text(0) == "Query 参数"), None)
+check("URL 参数子行", qi is not None and qi.childCount() == 2
+      and qi.child(0).text(0) == "page" and qi.child(0).text(1) == "2")
+check("URL 元信息", "URL · example.com" in uv.lbl_meta.text(), uv.lbl_meta.text())
+_ua = [t for t, _ in uv._inspector_actions()]
+check("URL 专属动作", "在浏览器打开" in _ua and "复制主机名" in _ua
+      and "URL 解码并复制" in _ua, str(_ua))
+uv._set_lang_key("text")
+pump(0.2)
+check("手动语言覆盖关闭智能视图", uv._mode == "raw"
+      and uv._mode_table()[1] == [])
+uv._set_lang_key("auto")
+pump(0.2)
+check("回自动恢复智能视图", uv._mode == "url")
+
+_jwt_txt = (_b64u('{"alg":"HS256","typ":"JWT"}') + "." +
+            _b64u('{"sub":"u123","name":"张三","exp":%d}'
+                  % int(_itime.time() + 3600)) + "." +
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c")
+jw = a.open_viewer({"type": "text", "content": _jwt_txt})
+pump(0.2)
+check("JWT 查看器默认 JWT 视图", jw._mode == "jwt"
+      and jw.stack.currentWidget() is jw.info)
+rows = info_rows(jw)
+check("JWT 算法与未验签提示", rows.get("算法 (alg)") == "HS256"
+      and rows.get("签名") == "未验证", str(rows))
+check("JWT 过期状态", "后过期" in rows.get("状态", ""), str(rows))
+check("JWT 元信息明示未验签", "仅解码,签名未验证" in jw.lbl_meta.text(),
+      jw.lbl_meta.text())
+_ja = [t for t, _ in jw._inspector_actions()]
+check("JWT 专属动作", "复制 Payload (JSON)" in _ja, str(_ja))
+jw._set_view("raw")
+pump(0.2)
+check("JWT 原文视图", jw._active_edit().toPlainText() == _jwt_txt)
+
+_b64_txt = _ib64.b64encode("这段文本以 Base64 编码,长度足够触发嗅探护栏的四十字符下限。".encode("utf-8")).decode("ascii")
+bv = a.open_viewer({"type": "text", "content": _b64_txt})
+pump(0.2)
+check("Base64 默认解码视图", bv._mode == "b64"
+      and bv.stack.currentWidget() is bv.editor
+      and "这段文本以 Base64 编码" in bv.editor.toPlainText())
+check("Base64 元信息", "解码为文本" in bv.lbl_meta.text(), bv.lbl_meta.text())
+_ba = [t for t, _ in bv._inspector_actions()]
+check("Base64 专属动作", "复制解码文本" in _ba, str(_ba))
+from io import BytesIO as _IBio
+_pil_img = Image.new("RGB", (24, 16), (200, 40, 40))
+_buf = _IBio()
+_pil_img.save(_buf, "PNG")
+iv2 = a.open_viewer({"type": "text",
+                     "content": _ib64.b64encode(_buf.getvalue()).decode("ascii")})
+pump(0.2)
+check("Base64 图片解码视图", iv2._mode == "b64"
+      and iv2.stack.currentWidget() is iv2.img_view
+      and not iv2.img_view.pixmap().isNull())
+check("Base64 图片元信息", "解码为图片" in iv2.lbl_meta.text(), iv2.lbl_meta.text())
+
+for w in (vw, jv, bjv, mv, cvv, xv, fv, uv, jw, bv, iv2):
     w.close()
 pump(0.2)
 check("查看器关闭后清理", len(a._viewers) == 0)

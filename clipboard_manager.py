@@ -1489,6 +1489,12 @@ class ClipboardCore:
         if self.cfg.get("auto_paste", True):
             self.worker.cmd_q.put(("paste",))
 
+    def copy_text(self, content):
+        """仅写剪贴板(不排回贴队列):查看器分段复制等小动作用,
+        不往用户此刻聚焦的窗口里塞 Ctrl+V。"""
+        self._ignore_clip_until = time.monotonic() + 0.5
+        self._set_clipboard({"type": "text", "content": content})
+
     def _set_clipboard(self, rec):
         for _ in range(12):
             try:
@@ -1669,6 +1675,56 @@ def url_info(text):
     except Exception:
         return None
     return (host, t)
+
+
+def url_inspect(text):
+    """URL 结构化拆解(Inspector 数据源):返回 dict 或 None。
+
+    {"scheme","host","port","path","query":[(k,v),…],"fragment"} —— query
+    保持出现顺序,值保持原文(不解码,复制出来与所见一致);解码动作由
+    查看器按需对整体做 unquote。"""
+    t = text.strip()
+    if "\n" in t or not _URL_RE.match(t):
+        return None
+    try:
+        p = urlsplit(t)
+        if not p.netloc:
+            return None
+        query = []
+        import urllib.parse as _up
+        for k, v in _up.parse_qsl(p.query, keep_blank_values=True):
+            query.append((k, v))
+        return {"scheme": p.scheme, "host": p.hostname or "",
+                "port": p.port, "path": p.path or "/",
+                "query": query, "fragment": p.fragment}
+    except Exception:
+        return None
+
+
+def jwt_inspect(text):
+    """JWT 深度拆解(Inspector 数据源):在 _sniff_jwt 之上补充时间字段的
+    本地化解析。返回 {"header","payload","sig_chars","iat","exp","nbf"} 或
+    None;iat/exp/nbf 为 int 时间戳(缺省 None)。不验签。"""
+    got = _sniff_jwt(text or "")
+    if got is None:
+        return None
+    head, pay = got
+    segs = text.strip().split(".")
+
+    def _ts(key):
+        v = pay.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        return int(v)
+
+    return {"header": head, "payload": pay, "sig_chars": len(segs[2]),
+            "iat": _ts("iat"), "exp": _ts("exp"), "nbf": _ts("nbf")}
+
+
+def b64_decode_auto(text):
+    """Base64 解码(Inspector 数据源):复用 _sniff_base64 的全部护栏。
+    返回 (kind, 解码字节) 或 None;kind ∈ text/image。"""
+    return _sniff_base64((text or "").strip())
 
 
 # ============================================================
