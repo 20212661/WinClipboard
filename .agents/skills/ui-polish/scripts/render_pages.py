@@ -20,6 +20,9 @@ import tempfile
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 离屏平台没有系统字体数据库,不指字体目录所有字符都渲染成占位框;
+# 本机 FreeType 数据库还枚举不到雅黑(msyh.ttc 读不出),回退链含 SimHei
+os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
 sys.path.insert(0, os.path.abspath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..")))
 
@@ -49,13 +52,13 @@ SUFFIX = next((a for a in sys.argv if a.startswith("_")), "")
 
 app = QApplication([])
 app.setQuitOnLastWindowClosed(False)
-app.setFont(QFont("Microsoft YaHei", 10))   # 离屏必设,否则中文豆腐块
 
 import winclipboard_qt as wq   # noqa: E402
 from qfluentwidgets import setTheme, Theme   # noqa: E402
 
 setTheme(Theme.DARK if MODE == "dark" else Theme.LIGHT)
 wq.init_palette(MODE == "dark")
+wq.apply_fonts(app)           # 中文回退字族(qfluentwidgets 字族表一并覆盖)
 
 
 # ---- 素材 ----
@@ -95,6 +98,7 @@ class FakeApp(QObject):
         super().__init__()
         self.icon = QIcon(IMG1)
         self._card_widgets = []
+        self._badge_cache = {}
         self.private = ["银行卡 6222 **** **** 3456"]
         self.history = HISTORY
         self.cfg = CFG
@@ -143,6 +147,9 @@ class FakeApp(QObject):
         pass
 
     def paste_text(self, text):
+        pass
+
+    def show_shortcut_help(self):
         pass
 
 

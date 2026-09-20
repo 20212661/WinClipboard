@@ -8,6 +8,8 @@ import tempfile
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 离屏平台字体库为空(不指目录所有字符渲染成占位框)
+os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import clipboard_manager as cm
@@ -27,6 +29,7 @@ from PySide6.QtCore import QObject
 app = QApplication([])
 app.setQuitOnLastWindowClosed(False)
 import winclipboard_qt as wq
+wq.apply_fonts(app)           # 中文回退字族
 
 
 class FakeApp(QObject):

@@ -14,6 +14,9 @@ import tempfile
 from pathlib import Path as _Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 离屏平台没有系统字体数据库(PySide6 不再内置字体),不指字体目录时
+# 所有字符(含英文)都渲染成占位框;指到 Windows 字体目录后才有真字形
+os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # ---- 隔离持久化路径(同 _core_test) ----
@@ -43,6 +46,7 @@ if MODE != "baseline":
     from qfluentwidgets import setTheme, Theme
     setTheme(Theme.DARK if MODE == "dark" else Theme.LIGHT)
     wq.init_palette(MODE == "dark")
+wq.apply_fonts(app)           # 中文回退字族(qfluentwidgets 字族表一并覆盖)
 
 
 # ---- 测试素材 ----
@@ -86,6 +90,7 @@ class FakeApp(QObject):
         super().__init__()
         self.icon = QIcon(IMG1)
         self._card_widgets = []
+        self._badge_cache = {}
         self.private = ["银行卡 6222 0210 0412 3456", "API Key sk-proj-9d8f7g6h5j4k3l2m1n0"]
         self.history = HISTORY
         self.core = self
