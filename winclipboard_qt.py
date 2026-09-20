@@ -525,6 +525,8 @@ class Card(CardWidget):
         self._set_text(self.sub_lbl, elided(sub, self.sub_lbl.font(), 640) if sub else "")
         self.sub_lbl.setVisible(bool(sub))
         self._set_text(self.meta_lbl, meta)
+        # 屏幕阅读器:卡片读出条目标题而非整段内容(私密凭据永不进卡片)
+        self.setAccessibleName("剪贴板条目 " + (title or "")[:60])
         self._pin_shown = None          # 重绑后置顶态必查一次
         self.update_pin()
 
@@ -661,6 +663,7 @@ class HistoryPage(QWidget):
         self.search = SearchLineEdit(self)
         self.search.setPlaceholderText("搜索内容、文件名或图片尺寸")
         self.search.setClearButtonEnabled(True)
+        self.search.setAccessibleName("搜索剪贴历史")
         self.search.textChanged.connect(self.app.on_search)
         self.search.returnPressed.connect(self.app.paste_selected)
         self.search.installEventFilter(self)
@@ -781,6 +784,7 @@ class HistoryPage(QWidget):
         self.pv_btn_copy.setFixedSize(24, 24)
         self.pv_btn_copy.setIconSize(QSize(13, 13))
         self.pv_btn_copy.setToolTip("复制完整内容")
+        self.pv_btn_copy.setAccessibleName("复制完整内容到剪贴板")
         self.pv_btn_copy.clicked.connect(self._copy_pv)
         ph.addWidget(self.pv_badge)
         ph.addSpacing(4)
@@ -880,6 +884,8 @@ class HistoryPage(QWidget):
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Escape:
             self.app.win.hide()
+        elif e.key() == Qt.Key_F1:                  # 应用内快捷键总览
+            self.app.show_shortcut_help()
         elif e.key() == Qt.Key_Down:
             self.app.move_sel(1)
         elif e.key() == Qt.Key_Up:
@@ -1730,9 +1736,12 @@ class SettingsPage(QWidget):
         c_theme = SettingCard(FIF.BRUSH, "界面主题",
                               "跟随系统或固定浅色/深色(更改后立即生效)", parent=group2)
         combo = ComboBox()
-        combo.addItems(["auto", "light", "dark"])
-        combo.setCurrentText(str(cfg.get("theme", "auto")))
+        for _tl, _tv in (("跟随系统", "auto"), ("浅色", "light"), ("深色", "dark")):
+            combo.addItem(_tl, userData=_tv)
+        combo.setCurrentIndex(max(0, combo.findData(str(cfg.get("theme", "auto")))))
         combo.setMinimumWidth(120)
+        combo.setAccessibleName("界面主题选择")
+        self.combo_theme = combo
 
         def on_theme(t):
             cfg["theme"] = t
@@ -1741,7 +1750,8 @@ class SettingsPage(QWidget):
                      Theme.LIGHT if t == "light" else Theme.AUTO)
             init_palette(isDarkTheme())
             cm.log("主题切换为 %s(部分页面元素需重开窗口刷新)" % t)
-        combo.currentTextChanged.connect(on_theme)
+        combo.currentIndexChanged.connect(
+            lambda i: on_theme(combo.itemData(i)))
         c_theme.hBoxLayout.addWidget(combo, 0, Qt.AlignRight)
         c_theme.hBoxLayout.addSpacing(16)
 
@@ -1831,6 +1841,12 @@ class SettingsPage(QWidget):
         group2.addSettingCard(c_mica)
         group2.addSettingCard(c_auto)
         group2.addSettingCard(c_key)
+        c_help = PushSettingCard(
+            "查看", FIF.HELP, "快捷键与操作",
+            "全局热键 / 列表 / 查看器 / 图片编辑的按键总览(主窗口按 F1 也可打开)",
+            parent=group2)
+        c_help.clicked.connect(app.show_shortcut_help)
+        group2.addSettingCard(c_help)
         lay.addWidget(group2)
 
         # ---- 关于与更新 ----
@@ -6086,6 +6102,20 @@ class WinClipboardApp(QObject):
         # 无 Mica 自重启(机制与触发日志见 UiHealthMonitor)
         self.health = UiHealthMonitor(self)
         self.health.arm()
+        # 首次启动欢迎(离屏/测试环境不弹;看过一次写入配置,不再打扰)
+        if not self.cfg.get("first_run_shown") \
+                and QGuiApplication.platformName() != "offscreen":
+            QTimer.singleShot(1500, self._show_welcome)
+        # 启动静默检查更新(每 7 天一次;发现新版才提示,不打扰)
+        try:
+            _last_chk = float(self.cfg.get("last_update_check", 0) or 0)
+        except (TypeError, ValueError):
+            _last_chk = 0.0
+        if QGuiApplication.platformName() != "offscreen" \
+                and time.time() - _last_chk > 7 * 86400:
+            self.cfg["last_update_check"] = time.time()
+            cm.save_config(self.cfg)
+            QTimer.singleShot(8000, lambda: self.check_update(silent=True))
 
     # ---- 剪贴板读取 / 历史维护:见 cm.ClipboardCore(共享后端) ----
 
@@ -6524,6 +6554,28 @@ class WinClipboardApp(QObject):
                    "数据目录:\n" % (cm.APP_VERSION, hk) + cm.APP_DIR,
                    self.panel).exec()
 
+    def shortcut_help_text(self):
+        """应用内快捷键总览(全局热键动态跟随当前配置)。"""
+        hk = cm.hotkey_label(self.cfg.get("hotkey_mod", cm.MOD_CONTROL | cm.MOD_SHIFT),
+                             self.cfg.get("hotkey_key", 0x56))
+        return ("全局\n"
+                "  %s   显示 / 隐藏主窗口(设置页可按键录制更改)\n"
+                "  Ctrl + Shift + P   剪贴板图片直钉到画布\n"
+                "  Ctrl + Alt + T   画布鼠标穿透切换\n"
+                "\n历史列表\n"
+                "  ↑ / ↓   移动选择      回车   粘贴选中条目\n"
+                "  Esc   收起主窗口      双击卡片   打开独立查看器\n"
+                "  Ctrl + 点击   选两条记录对比(第一条设基准,第二条开对比窗口)\n"
+                "\n内容查看器\n"
+                "  Ctrl + F   浮动查找      Ctrl + = / - / 0   字号缩放\n"
+                "\n图片编辑(查看器内编辑态)\n"
+                "  Ctrl + Z   撤销      Del   删除选中标注      Esc   放弃编辑\n"
+                "\n系统托盘\n"
+                "  左键   切换面板      右键   菜单(暂停监听 / 清空 / 退出)") % hk
+
+    def show_shortcut_help(self):
+        MessageBox("快捷键与操作", self.shortcut_help_text(), self.win).exec()
+
     def check_update(self, silent=False):
         """检查 GitHub 最新 Release(后台线程)。silent=True 为启动期静默检查:
         只有发现新版才提示,其余情况不打扰。"""
@@ -6558,6 +6610,25 @@ class WinClipboardApp(QObject):
                               position=InfoBarPosition.TOP_RIGHT, duration=5000)
         self._update_worker.done.connect(on_done)
         self._update_worker.start()
+
+    def _show_welcome(self):
+        """首次启动引导:看完即记入配置不再打扰(离屏/测试环境不弹)。"""
+        self.cfg["first_run_shown"] = True
+        cm.save_config(self.cfg)
+        hk = cm.hotkey_label(self.cfg.get("hotkey_mod", cm.MOD_CONTROL | cm.MOD_SHIFT),
+                             self.cfg.get("hotkey_key", 0x56))
+        box = MessageBox(
+            "欢迎使用 WinClipboard",
+            "程序已在本机后台运行(系统托盘 📋)。接下来:\n\n"
+            "1. 随便复制点什么 —— 文字 / 截图 / 文件都会自动进入历史\n"
+            "2. 按 %s 随时唤出或收起主窗口\n"
+            "3. 密码 / 银行卡等内容会自动进「私密区」,列表默认遮罩显示\n"
+            "4. 设置页可以:按键录制新热键、按应用排除、自动清理、加密历史\n\n"
+            "全部操作说明见「设置 → 快捷键与操作」。" % hk, self.win)
+        box.yesButton.setText("开始使用")
+        box.cancelButton.hide()
+        box.buttonLayout.insertStretch(0, 1)   # 按钮靠右,与库对话框一致
+        box.exec()
 
     def _warn_hotkey(self):
         if self._warned_hotkey:
