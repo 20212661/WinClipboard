@@ -1418,6 +1418,24 @@ class SettingsPage(QWidget):
         group2.addSettingCard(c_auto)
         group2.addSettingCard(c_key)
         lay.addWidget(group2)
+
+        # ---- 关于与更新 ----
+        group5 = SettingCardGroup("关于与更新", self)
+        c_ver = SettingCard(
+            FIF.INFO, "当前版本",
+            "版本 %s(检查 GitHub 上的新版本发布,发现新版可一键打开发布页)"
+            % cm.APP_VERSION, parent=group5)
+        b_upd = PushButton("检查更新", self)
+        b_upd.clicked.connect(lambda: app.check_update())
+        c_ver.hBoxLayout.addWidget(b_upd, 0, Qt.AlignRight)
+        c_ver.hBoxLayout.addSpacing(16)
+        c_repo = PushSettingCard(
+            "打开", FIF.LINK, "项目主页",
+            "%s — 源码 / 文档 / 问题反馈" % cm.REPO_URL, parent=group5)
+        c_repo.clicked.connect(lambda: cm.open_url(cm.REPO_URL))
+        group5.addSettingCard(c_ver)
+        group5.addSettingCard(c_repo)
+        lay.addWidget(group5)
         lay.addStretch(1)
 
 
@@ -4149,6 +4167,14 @@ class AIWorker(QThread):
         self.done.emit(self.step_idx, ok, text)
 
 
+class UpdateWorker(QThread):
+    """后台检查 GitHub 最新 Release(cm.fetch_latest_release 阻塞 8s 上限)。"""
+    done = Signal(str, str, str)     # 状态, 版本, 链接/原因
+
+    def run(self):
+        self.done.emit(*cm.fetch_latest_release())
+
+
 class ModelWorker(QThread):
     """后台拉取端点模型清单(GET /models,OpenAI 标准发现端点)。"""
     done = Signal(bool, object)     # ok, [模型 id] 或 错误文本
@@ -5861,11 +5887,47 @@ class WinClipboardApp(QObject):
 
     def about(self):
         MessageBox("关于 WinClipboard",
-                   "Windows 桌面剪贴板管理器\n\n"
-                   "热键: Ctrl+Shift+V 弹出/隐藏\n"
+                   "Windows 桌面剪贴板管理器  v%s\n\n"
+                   "热键: %s 弹出/隐藏\n"
                    "左键托盘图标: 切换面板\n"
                    "右键托盘图标: 菜单\n\n"
-                   "数据目录:\n" + cm.APP_DIR, self.panel).exec()
+                   "数据目录:\n" % (cm.APP_VERSION, hk) + cm.APP_DIR,
+                   self.panel).exec()
+
+    def check_update(self, silent=False):
+        """检查 GitHub 最新 Release(后台线程)。silent=True 为启动期静默检查:
+        只有发现新版才提示,其余情况不打扰。"""
+        try:
+            self._update_worker = UpdateWorker(self)
+        except Exception:
+            return
+
+        def on_done(st, ver, url):
+            self._update_worker = None
+            if st == "ok":
+                bar = InfoBar.warning("发现新版本", "最新 %s(当前 %s)"
+                                      % (ver, cm.APP_VERSION), parent=self.win,
+                                      position=InfoBarPosition.TOP_RIGHT,
+                                      duration=10000)
+                b = PushButton("打开发布页", bar)
+                b.clicked.connect(lambda: cm.open_url(url))
+                bar.addWidget(b)
+            elif silent:
+                return
+            elif st == "latest":
+                InfoBar.success("已是最新版本", "当前 %s" % cm.APP_VERSION,
+                                parent=self.win,
+                                position=InfoBarPosition.TOP_RIGHT)
+            elif st == "norelease":
+                InfoBar.info("暂无发布版本",
+                             "仓库还没有 Release;可在「打开发布页」查看项目主页",
+                             parent=self.win, position=InfoBarPosition.TOP_RIGHT,
+                             duration=5000)
+            else:
+                InfoBar.error("检查更新失败", str(url)[:120], parent=self.win,
+                              position=InfoBarPosition.TOP_RIGHT, duration=5000)
+        self._update_worker.done.connect(on_done)
+        self._update_worker.start()
 
     def _warn_hotkey(self):
         if self._warned_hotkey:

@@ -56,6 +56,9 @@ except ImportError:
 # 路径 / 常量
 # ============================================================
 APP_NAME = "WinClipboard"
+APP_VERSION = "1.0.0"          # 产品化首个发布版本(关于/导出载荷/更新检查共用)
+REPO_URL = "https://github.com/haoshangyang/WinClipboard"
+RELEASE_API = "https://api.github.com/repos/haoshangyang/WinClipboard/releases/latest"
 _APPDATA = os.environ.get("APPDATA", os.path.expanduser("~"))
 APP_DIR = os.path.join(_APPDATA, APP_NAME)
 IMAGE_DIR = os.path.join(APP_DIR, "images")
@@ -454,6 +457,55 @@ def save_private(priv):
             os.remove(tmp)
         except Exception:
             pass
+
+
+def version_tuple(v):
+    """版本串 → 可比较元组:"1.2.10"→(1,2,10)。容错 v 前缀、不完整版本
+    ("1.2"→(1,2,0))与非数字段(取前导数字,无则 0)。"""
+    parts = str(v or "").strip().lstrip("vV").split(".")
+    out = []
+    for p in parts[:4]:
+        d = ""
+        for ch in p:
+            if ch.isdigit():
+                d += ch
+            else:
+                break
+        out.append(int(d) if d else 0)
+    while len(out) < 3:
+        out.append(0)
+    return tuple(out)
+
+
+def fetch_latest_release():
+    """查 GitHub 最新 Release;返回 (状态, 版本, 链接)。
+
+    状态: "ok"=有新版 / "latest"=已是最新 / "norelease"=仓库尚无 Release /
+    "error"=网络失败(链接位放原因)。同步阻塞 8s 上限,调用方放后台线程。
+    只查不装:发现新版由前端打开发布页,下载安装交给用户。"""
+    import http.client
+    try:
+        conn = http.client.HTTPSConnection("api.github.com", timeout=8)
+        conn.request("GET", "/repos/haoshangyang/WinClipboard/releases/latest",
+                     headers={"User-Agent": "WinClipboard-Updater",
+                              "Accept": "application/vnd.github+json"})
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8", "replace")
+        conn.close()
+        if resp.status == 404:
+            return ("norelease", "", REPO_URL + "/releases")
+        if resp.status != 200:
+            return ("error", "", "HTTP %d" % resp.status)
+        info = json.loads(body)
+        tag = str(info.get("tag_name") or "").strip()
+        url = str(info.get("html_url") or "").strip() or REPO_URL + "/releases"
+        if not tag:
+            return ("norelease", "", url)
+        if version_tuple(tag) > version_tuple(APP_VERSION):
+            return ("ok", tag.lstrip("vV"), url)
+        return ("latest", tag.lstrip("vV"), url)
+    except Exception as e:
+        return ("error", "", repr(e)[:120])
 
 
 def single_instance():
