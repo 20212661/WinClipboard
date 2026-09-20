@@ -530,8 +530,11 @@ class Card(CardWidget):
             lbl.setText(txt)
 
     def _badge_of(self, rec):
-        """子类型徽章(JWT/Base64):带 id(rec) 缓存,同记录重复绑定零探测。"""
-        cache = self.app._badge_cache
+        """子类型徽章(JWT/Base64):带 id(rec) 缓存,同记录重复绑定零探测。
+        缓存挂在宿主 app 上并懒初始化——离屏渲染/测试的 FakeApp 可不携带。"""
+        cache = getattr(self.app, "_badge_cache", None)
+        if cache is None:
+            cache = self.app._badge_cache = {}
         key = id(rec)
         got = cache.get(key)
         if got is None:
