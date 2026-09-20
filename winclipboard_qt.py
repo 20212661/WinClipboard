@@ -594,6 +594,10 @@ class Card(CardWidget):
             self.app.select_card(self)
             self.app.compare_pick(self.rec)
             return
+        if e.button() == Qt.LeftButton and (e.modifiers() & Qt.ShiftModifier):
+            # Shift+点击 = 段选(当前选中到此处),Delete 一键批量删除(可撤销)
+            self.app.range_select_from(self)
+            return
         if e.button() == Qt.LeftButton:
             self.app.select_card(self)
         elif e.button() == Qt.RightButton:
@@ -879,8 +883,10 @@ class HistoryPage(QWidget):
             self.app.move_sel(1)
         elif e.key() == Qt.Key_Up:
             self.app.move_sel(-1)
-        elif e.key() in (Qt.Key_Return, Qt.Key_Enter):
+        elif e.key() == Qt.Key_Return or e.key() == Qt.Key_Enter:
             self.app.paste_selected()
+        elif e.key() == Qt.Key_Delete:
+            self.app.delete_selection_or_multi()
         else:
             super().keyPressEvent(e)
 
@@ -976,10 +982,34 @@ class HistoryPage(QWidget):
         for c in idle:
             c.hide()
 
+    def card_at(self, vi):
+        """视图索引 → 对应卡片控件。卡片列表顺序 = 置顶组+最近组(set_view),
+        与 _view 的历史序不一致,任何「按下标取卡」都必须经这里按记录身份解析。
+        (离屏预览的 FakeApp 无 _view:退回控件下标,纯装饰性选择不受影响)"""
+        view = getattr(self.app, "_view", None)
+        if view is None:
+            if vi is not None and 0 <= vi < len(self._cards):
+                return self._cards[vi]
+            return None
+        if vi is None or not (0 <= vi < len(view)):
+            return None
+        hi = view[vi]
+        if not (0 <= hi < len(self.app.history)):
+            return None
+        rec = self.app.history[hi]
+        return next((c for c in self._cards if c.rec is rec), None)
+
     def select_index(self, vi):
-        for i, c in enumerate(self.app._card_widgets):
-            c.set_selected(i == vi)
+        card = self.card_at(vi)
+        for c in self._cards:
+            c.set_selected(c is card)
         self.update_preview(vi)
+
+    def mark_multi(self, rec_ids):
+        """段选高亮(Shift+点击批量选择):按记录身份标亮整段,预览清空。"""
+        for c in self._cards:
+            c.set_selected(id(c.rec) in rec_ids)
+        self.update_preview(None)
 
     # ---- 预览面板(Ditto 式:随选中联动显示完整内容) ----
     def update_preview(self, vi=None):
@@ -1091,9 +1121,9 @@ class HistoryPage(QWidget):
         self._resize_to_content()
 
     def ensure_visible(self, vi):
-        if 0 <= vi < len(self.app._card_widgets):
-            self.scroll.ensureWidgetVisible(self.app._card_widgets[vi], 0, 20)
-
+        card = self.card_at(vi)     # 置顶组重排后控件下标≠视图下标,按记录找卡
+        if card is not None:
+            self.scroll.ensureWidgetVisible(card, 0, 20)
 
 # ============================================================
 # 私密区窗口
@@ -5674,6 +5704,7 @@ class WinClipboardApp(QObject):
         self.src_filter = ""            # 来源应用筛选(exe 名;空 = 全部)
         self.time_filter = "all"        # 时间筛选档位(all/today/24h/7d/30d)
         self.selected = None
+        self._multi_recs = set()        # Shift+点击的段选(记录身份;Delete 批量删)
         self._view = []
         self._card_widgets = []
         self._warned_hotkey = False
@@ -5754,6 +5785,7 @@ class WinClipboardApp(QObject):
     def refresh_view(self):
         t_all = stamp()
         self._view_dirty = False
+        self._multi_recs = set()        # 视图重建,段选失效
         with PerfSpan("history_filter"):
             view = self.core.filter_view(
                 self.category, self.query, src=self.src_filter,
@@ -5810,6 +5842,7 @@ class WinClipboardApp(QObject):
     def move_sel(self, delta):
         if not self._view:
             return
+        self._multi_recs = set()
         cur = self.selected if self.selected is not None else (0 if delta > 0 else -1)
         cur = max(0, min(len(self._view) - 1, cur + delta))
         self.selected = cur
@@ -5817,9 +5850,41 @@ class WinClipboardApp(QObject):
         self.panel.ensure_visible(cur)
 
     def select_card(self, card):
-        if card in self._card_widgets:
-            self.selected = self._card_widgets.index(card)
-            self.panel.select_index(self.selected)
+        """点击/键盘选中卡片:控件顺序(置顶组在前)≠视图顺序(历史序),
+        必须按记录身份映射回 _view 索引,否则预览/高亮/回车粘贴错条目。"""
+        self._multi_recs = set()
+        try:
+            hi = next(i for i, h in enumerate(self.history) if h is card.rec)
+            vi = self._view.index(hi)
+        except (StopIteration, ValueError):
+            return
+        self.selected = vi
+        self.panel.select_index(vi)
+
+    def range_select_from(self, card):
+        """Shift+点击:当前选中到该卡整段多选(Delete 批量删除,可整批撤销)。"""
+        try:
+            hi = next(i for i, h in enumerate(self.history) if h is card.rec)
+            end = self._view.index(hi)
+        except (StopIteration, ValueError):
+            return
+        start = self.selected if self.selected is not None else end
+        lo, hi2 = sorted((start, end))
+        # 存 id(rec) 而不是记录本身:dict 不可哈希,且身份比对免疫刷新重建
+        self._multi_recs = {id(self.history[self._view[i]])
+                            for i in range(lo, hi2 + 1)}
+        self.panel.mark_multi(self._multi_recs)
+
+    def delete_selection_or_multi(self):
+        """Delete 键:段选有效删整段,否则删当前条目;两者都可撤销。"""
+        recs = [r for r in self.history if id(r) in self._multi_recs]
+        if len(recs) > 1:
+            n = self.core.batch_soft_delete(recs)
+            self._multi_recs = set()
+            self.refresh_view()
+            self._offer_undo(n, "已删除 %d 条" % n)
+        else:
+            self.delete_selected()
 
     def paste_selected(self):
         if self.selected is None or self.selected >= len(self._view):
@@ -5860,6 +5925,10 @@ class WinClipboardApp(QObject):
             return a
 
         menu = RoundMenu(parent=self.panel)
+        if len(self._multi_recs) > 1:      # 段选激活时给批量动作置顶入口
+            a = act(menu, "删除所选 %d 条(可撤销)" % len(self._multi_recs))
+            a.triggered.connect(lambda _=False: self.delete_selection_or_multi())
+            menu.addSeparator()
         for entry in CLIP_ACTIONS:
             if isinstance(entry, WorkflowSlot):
                 if rec["type"] != "text":

@@ -1759,6 +1759,44 @@ class ClipboardCore:
         self.history[:] = [h for h in self.history if h.get("pinned")]
         self._mark_dirty()
 
+    # ---- 可撤销删除(批次撤销栈) ----
+    _TRASH_BATCHES = 20          # 最多记住 20 次删除操作
+
+    def _trash_push(self, recs):
+        """软删除入撤销栈:条目出列但图片文件保留原位(撤销后原样可显示);
+        未撤销的文件由下次启动的孤儿清理兜底删除。栈按「批次」存,
+        一次操作(单删/清空)= 一批,撤销一次恢复一批。"""
+        if not hasattr(self, "_trash"):
+            self._trash = []
+        if recs:
+            self._trash.append(list(recs))
+        while len(self._trash) > self._TRASH_BATCHES:
+            self._trash.pop(0)
+        self._mark_dirty()
+
+    def soft_delete_at(self, hi):
+        """可撤销的单条删除(不删图片文件)。"""
+        rec = self.history.pop(hi)
+        self._trash_push([rec])
+        return rec
+
+    def batch_soft_delete(self, recs):
+        """可撤销的批量删除(按记录身份匹配,文件保留);返回实际删除条数。"""
+        ids = {id(r) for r in recs}
+        removed = [h for h in self.history if id(h) in ids]
+        if not removed:
+            return 0
+        keep = [h for h in self.history if id(h) not in ids]
+        self.history[:] = keep
+        self._trash_push(removed)
+        return len(removed)
+
+    def soft_clear_unpinned(self):
+        """可撤销的清空(置顶保留,不删图片文件);返回被移除的条目。"""
+        removed = [h for h in self.history if not h.get("pinned")]
+        self.history[:] = [h for h in self.history if h.get("pinned")]
+        self._trash_push(removed)
+        return removed
     def save_all(self):
         self.flush_history()
         save_private(self.private)
