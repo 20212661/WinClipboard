@@ -762,6 +762,56 @@ def is_sensitive(text):
 
 
 # ============================================================
+# AI Privacy Gate(发送前敏感检测与遮盖)
+# 与 is_sensitive 同一套判定,但要求子串级命中(整条 ^$ 匹配在渲染后
+# 的长 prompt 里永远不触发),并给出逐段遮盖文本。
+# ============================================================
+_RE_JWT_SUB = re.compile(
+    r"\b(eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})")
+_RE_CARD_SUB = re.compile(r"(?<![\d-])(\d(?:[\d\s-]{11,24}\d))(?![\d-])")
+_RE_IDCARD_SUB = re.compile(r"(?<!\d)(\d{17}[\dXx])(?!\d)")
+
+
+def privacy_scan(text):
+    """AI 发送前隐私扫描:返回 (命中类别列表, 遮盖后文本)。
+
+    命中子串替换为 ▇▇▇[类别](AI 仍知道"此处有被遮盖的密钥",解释类
+    任务不受影响);重叠命中按起点先到先得,替换从后往前避免位移。
+    银行卡(Luhn)/身份证(校验位)与 is_sensitive 判定一致,通过才算命中。
+    无命中时原样返回 ([], text)。"""
+    t = str(text or "")
+    spans = []                                  # (start, end, label)
+    for m in _RE_KEYS.finditer(t):
+        spans.append((m.start(), m.end(), "API 密钥"))
+    for m in _RE_JWT_SUB.finditer(t):
+        spans.append((m.start(), m.end(), "JWT Token"))
+    for m in _RE_KEYVAL.finditer(t):
+        spans.append((m.start(), m.end(), "密码键值对"))
+    for m in _RE_CARD_SUB.finditer(t):
+        if _luhn_ok(m.group(1)):
+            spans.append((m.start(), m.end(), "银行卡号"))
+    for m in _RE_IDCARD_SUB.finditer(t):
+        if _idcard_ok(m.group(1)):
+            spans.append((m.start(), m.end(), "身份证号"))
+    if not spans:
+        return [], t
+    spans.sort(key=lambda s: (s[0], -(s[1] - s[0])))   # 同起点取最长
+    keep, last_end = [], -1
+    for s, e, lb in spans:
+        if s >= last_end:
+            keep.append((s, e, lb))
+            last_end = e
+    out = t
+    for s, e, lb in reversed(keep):
+        out = out[:s] + "▇▇▇[%s]" % lb + out[e:]
+    labels = []                               # 含被重叠吞并的类别(同样告知用户)
+    for _, _, lb in spans:
+        if lb not in labels:
+            labels.append(lb)
+    return labels, out
+
+
+# ============================================================
 # 图标
 # ============================================================
 def make_icon(path):

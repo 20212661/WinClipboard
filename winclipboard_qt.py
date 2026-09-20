@@ -4721,6 +4721,45 @@ class AIWorker(QThread):
         self.done.emit(self.step_idx, ok, text)
 
 
+class PrivacyGateDialog(MessageBoxBase):
+    """AI 发送前隐私门:提示词含敏感内容时三选一(人在回路)。
+
+    [自动遮盖后发送](主按钮) [本次原样发送] [取消]——关闭窗口/Esc 视为取消。
+    choice ∈ {"mask", "raw", "cancel"};遮盖文本由 cm.privacy_scan 产生。"""
+
+    def __init__(self, parent, hits, masked_preview, endpoint):
+        super().__init__(parent)
+        self.choice = "cancel"
+
+        title = StrongBodyLabel("⚠ 内容可能包含敏感信息")
+        title.setStyleSheet("color: #C4820A;")
+        self.viewLayout.addWidget(title)
+        body = BodyLabel("即将发送至 %s 的提示词中检测到:" % (endpoint or "AI 服务"))
+        body.setStyleSheet("color: %s;" % TEXT)
+        self.viewLayout.addWidget(body)
+        for lb in hits:
+            row = BodyLabel("•  %s" % lb)
+            row.setStyleSheet("color: #C4820A; padding-left: 12px;")
+            self.viewLayout.addWidget(row)
+        prev = CaptionLabel("遮盖预览:%s" % (masked_preview[:160] + ("…" if len(masked_preview) > 160 else "")))
+        prev.setWordWrap(True)
+        prev.setStyleSheet("color: %s;" % TER)
+        self.viewLayout.addWidget(prev)
+
+        self.btn_raw = PushButton("本次原样发送", self)
+        self.btn_raw.clicked.connect(lambda: self._pick("raw"))
+        self.buttonLayout.insertWidget(0, self.btn_raw)
+        self.buttonLayout.insertStretch(1)
+        self.yesButton.setText("自动遮盖后发送")
+        self.yesButton.clicked.connect(lambda: self._pick("mask"))
+        self.cancelButton.setText("取消")
+        self.widget.setFixedWidth(460)
+
+    def _pick(self, choice):
+        self.choice = choice
+        self.accept()
+
+
 class UpdateWorker(QThread):
     """后台检查 GitHub 最新 Release(cm.fetch_latest_release 阻塞 8s 上限)。"""
     done = Signal(str, str, str)     # 状态, 版本, 链接/原因
@@ -5868,11 +5907,31 @@ class WorkflowRunner(QWidget):
                               parent=self, position=InfoBarPosition.TOP_RIGHT, duration=-1)
                 return
             prompt = cm.render_prompt(step.get("prompt"), self.cur)
+            prompt = self._privacy_gate(prompt, svc)          # 敏感内容三选一门
+            if prompt is None:
+                self._auto = False
+                self._set_busy(False, "步骤 %d 已取消(隐私门拦截)" % (idx + 1))
+                return
             self._set_busy(True, "步骤 %d 正在调用 %s …" % (idx + 1, svc.get("name")))
             self._worker = AIWorker(svc, prompt, idx)
             self._worker.done.connect(self._on_done)
             self._worker.finished.connect(self._worker_finished)
             self._worker.start()
+
+    def _privacy_gate(self, prompt, svc):
+        """AI 发送前隐私门:命中敏感内容弹三选一(遮盖/原样/取消);
+        无命中原样放行。返回最终提示词,取消返回 None。"""
+        hits, masked = cm.privacy_scan(prompt)
+        if not hits:
+            return prompt
+        dlg = PrivacyGateDialog(self, hits, masked,
+                                str(svc.get("base_url") or ""))
+        dlg.exec()
+        if dlg.choice == "mask":
+            return masked
+        if dlg.choice == "raw":
+            return prompt
+        return None
 
     def _on_done(self, idx, ok, text):
         if self._dead:

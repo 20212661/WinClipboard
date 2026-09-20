@@ -774,6 +774,19 @@ core.undo_delete()
 check("撤销后文件仍可用", os.path.exists(_newp) and
       core.history[0]["content"] == _newp)
 
+# ---- Privacy Gate:privacy_scan 检测与遮盖 ----
+_k = "sk-" + "A" * 30                                  # 无效占位密钥样本
+_hits, _masked = cm.privacy_scan("解释 %s" % _k)
+check("privacy:API 密钥命中+遮盖", _hits == ["API 密钥"] and _k not in _masked
+      and "▇▇▇[API 密钥]" in _masked)
+_j = "eyJ" + "B" * 16 + "." + "C" * 16 + "." + "D" * 16
+_hits, _masked = cm.privacy_scan("token 是 %s 单独出现" % _j)
+check("privacy:JWT 命中", "JWT Token" in _hits and _j not in _masked)
+_hits, _masked = cm.privacy_scan("卡号 4111111111111111 查一下")
+check("privacy:Luhn 卡号命中", "银行卡号" in _hits and "4111111111111111" not in _masked)
+_hits, _masked = cm.privacy_scan("普通提示词,无敏感内容")
+check("privacy:干净放行", _hits == [] and _masked == "普通提示词,无敏感内容")
+
 print()
 print("RESULT:", "PASS" if not FAILS else "FAIL %d 项: %s" % (len(FAILS), ", ".join(FAILS)))
 sys.exit(1 if FAILS else 0)
