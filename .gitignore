@@ -4,3 +4,7 @@ __pycache__/
 *.tmp
 .venv/
 python.txt.bak
+.mimosa/
+_zcodework/
+mimosa_rules.bin
+_mimosa_rules.bin
