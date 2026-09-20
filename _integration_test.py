@@ -587,6 +587,43 @@ check("私密区查看直达 JWT 解码视图", _vw is not None and _vw._mode ==
 check("私密条目带 private 标记", _vw.rec.get("private") is True)
 if _vw is not None:
     _vw.close()
+    pump(0.2)
+
+# 私密列表默认遮罩 / 解锁 / 切走自动遮回
+_raw0 = a.private[0]
+check("私密列表默认遮罩", "•" in pp.lst.item(0).text()
+      and _raw0[:10] not in pp.lst.item(0).text(), pp.lst.item(0).text())
+pp.setVisible(True)                          # hide() 只在可见→隐藏时发 hideEvent
+app.processEvents()
+pp._set_revealed(True)
+check("解锁后显示明文前缀", pp.lst.item(0).text().startswith(_raw0[:10]))
+pp._mask_timer.stop()                      # 不等 30s 超时,直接验证切走路径
+pp.hide()
+check("切走页面自动遮回", "•" in pp.lst.item(0).text()
+      and _raw0[:10] not in pp.lst.item(0).text())
+
+# ---- 设置页:热键卡片 + 录制对话框捕获链路 ----
+sp = a.win.settings_page
+check("设置页热键卡片显示当前组合",
+      sp.lbl_hotkey.text() == cm.hotkey_label(
+          a.cfg.get("hotkey_mod", 6), a.cfg.get("hotkey_key", 0x56)),
+      sp.lbl_hotkey.text())
+from PySide6.QtGui import QKeyEvent as _QKE
+from PySide6.QtCore import QEvent as _QE, Qt as _Qt
+_applied = []
+_r = wq.HotkeyRecorderDialog(sp, sp.lbl_hotkey.text(),
+                             lambda m, k: _applied.append((m, k)))
+_r._on_key(_QKE(_QE.KeyPress, _Qt.Key_V, _Qt.ControlModifier | _Qt.ShiftModifier))
+check("录制捕获 Ctrl+Shift+V", _r.capture.text() == "Ctrl+Shift+V"
+      and _r.yesButton.isEnabled())
+_r._on_key(_QKE(_QE.KeyPress, _Qt.Key_F5, _Qt.ControlModifier))
+check("录制可覆盖改键", _r.capture.text() == "Ctrl+F5")
+_r._on_key(_QKE(_QE.KeyPress, _Qt.Key_X, _Qt.NoModifier))
+check("无修饰键被拒绝", not _r.yesButton.isEnabled()
+      and "修饰键" in _r.capture.text())
+_r._on_key(_QKE(_QE.KeyPress, _Qt.Key_X, _Qt.AltModifier))
+check("有效组合经应用回调", _r.validate() is True
+      and _applied == [(cm.MOD_ALT, 0x58)], str(_applied))
 
 # ---- 暂停监听(临时隐私模式):剪贴板事件不入史 ----
 a.toggle_monitor_pause(True)
@@ -734,6 +771,15 @@ if len(a._view) >= 3:
     pump(0.3)
     check("批量删除可撤销", len(a.history) == _n_b4)
 
+# ---- 快捷键帮助 + 主题选项中文化 + 无障碍名 ----
+check("帮助文本含动态热键与分区", "显示 / 隐藏主窗口" in a.shortcut_help_text()
+      and "历史列表" in a.shortcut_help_text() and "图片编辑" in a.shortcut_help_text())
+check("主题下拉中文化", [sp.combo_theme.itemText(i) for i in range(3)]
+      == ["跟随系统", "浅色", "深色"]
+      and sp.combo_theme.currentData() == str(a.cfg.get("theme", "auto")))
+check("关键控件有无障碍名", a.panel.search.accessibleName() == "搜索剪贴历史"
+      and a.panel.cmb_src.accessibleName() != "")
+
 # ---- 导出 / 导入(拦截文件对话框与导出选项弹窗) ----
 _EXP = os.path.join(tempfile.gettempdir(), "wclb_integ_export.json")
 _o_gsf = wq.QFileDialog.getSaveFileName
@@ -765,6 +811,21 @@ finally:
         os.remove(_EXP)
     except OSError:
         pass
+
+# ---- 关于与更新:版本卡入口 + 真实网络检查(失败即跳过) ----
+check("设置页含检查更新入口",
+      any(b.text() == "检查更新" for b in sp.findChildren(QPushButton)))
+check("导出载荷/关于带版本", cm.APP_VERSION
+      and "1" == cm.APP_VERSION.split(".")[0])
+_res_upd = cm.fetch_latest_release()
+if _res_upd[0] == "error":
+    print("SKIP 更新检查(网络不可达): %s" % _res_upd[2][:80])
+else:
+    check("更新检查返回合法状态",
+          _res_upd[0] in ("ok", "latest", "norelease")
+          and (_res_upd[0] != "ok"
+               or cm.version_tuple(_res_upd[1]) > cm.version_tuple(cm.APP_VERSION)),
+          str(_res_upd))
 
 # ---- 图片查看器:独立窗口 + 缩放/1:1/适应(小图不放大) ----
 img_rec = next((h for h in a.history if h.get("type") == "image"), None)
