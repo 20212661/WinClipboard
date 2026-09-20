@@ -202,9 +202,38 @@ def _fic(name, fallback_text):
     return (icon, None) if icon is not None else (None, fallback_text)
 
 
+# 统一字族链:拉丁 Segoe UI;中文依次回退。雅黑的 UI 变体优先(行高与
+# Fluent 组件匹配);SimHei/Noto Sans SC 兜底离屏 FreeType 数据库枚举不到
+# msyh.ttc(雅黑)的环境。顺序即优先级,勿把中文字体放最前(拉丁字形变丑)。
+FONT_FAMILIES = ["Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei",
+                 "SimHei", "Noto Sans SC", "PingFang SC"]
+
+
 def font(px, weight=QFont.Normal):
-    f = QFont("Segoe UI", px)
+    f = QFont()
+    f.setFamilies(FONT_FAMILIES)
+    f.setPointSize(px)
     f.setWeight(weight)
+    return f
+
+
+def apply_fonts(qapp=None):
+    """统一应用字族:拉丁用 Segoe UI,中文按序回退到机器上首个可用字体。
+
+    两处必须一起改:
+    - Qt 文本:QFont 单字族在缺字形的环境(离屏 FreeType 数据库读不出
+      msyh.ttc,枚举不到雅黑)整字变豆腐框,families 回退链才能兜住;
+    - qfluentwidgets 组件:内部 getFont 走自己的 fontFamilies 配置
+      (默认仅 YaHei/PingFang 回退),不同步覆盖则卡片/标签仍是豆腐框。
+    """
+    try:
+        from qfluentwidgets.common.font import setFontFamilies
+        setFontFamilies(list(FONT_FAMILIES))
+    except Exception:
+        cm.log("qfluentwidgets 字族覆盖失败(组件将用库默认字体)")
+    f = font(10)
+    if qapp is not None:
+        qapp.setFont(f)
     return f
 
 
@@ -6055,7 +6084,7 @@ def main():
 
     qapp = QApplication(sys.argv)
     qapp.setQuitOnLastWindowClosed(False)
-    qapp.setFont(QFont("Segoe UI", 10))
+    apply_fonts(qapp)          # 中文回退字族(见 FONT_FAMILIES 注释)
     # 主题交给 qfluentwidgets:config 的 light/dark 显式覆盖,auto 跟随系统;
     # theme_color 为强调色覆盖(config.json 「主题色」设置页写入)
     cfg0 = cm.load_config()
