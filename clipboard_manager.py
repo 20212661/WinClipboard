@@ -1797,6 +1797,18 @@ class ClipboardCore:
         self.history[:] = [h for h in self.history if h.get("pinned")]
         self._trash_push(removed)
         return removed
+
+    def undo_delete(self):
+        """撤销最近一批软删除:条目按原相对顺序回到列表最前。"""
+        if not getattr(self, "_trash", None):
+            return []
+        recs = self._trash.pop()
+        live = {id(h) for h in self.history}
+        back = [r for r in recs if id(r) not in live]   # 防重复恢复
+        self.history[0:0] = back
+        self._mark_dirty()
+        return back
+
     def save_all(self):
         self.flush_history()
         save_private(self.private)

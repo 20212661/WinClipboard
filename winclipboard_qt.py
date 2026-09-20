@@ -5967,8 +5967,26 @@ class WinClipboardApp(QObject):
     def delete_selected(self):
         if self.selected is None or self.selected >= len(self._view):
             return
-        self.core.delete_at(self._view[self.selected])
+        self.core.soft_delete_at(self._view[self.selected])
         self.refresh_view()
+        self._offer_undo(1, "已删除")
+
+    def undo_delete(self):
+        back = self.core.undo_delete()
+        if back:
+            self.refresh_view()
+            InfoBar.success("已撤销", "恢复了 %d 条记录" % len(back),
+                            parent=self.win, position=InfoBarPosition.TOP_RIGHT,
+                            duration=2500)
+
+    def _offer_undo(self, n, title):
+        """删除/清空后的撤销入口:InfoBar 挂「撤销」按钮,条目文件未删,可整批恢复。"""
+        bar = InfoBar.warning(title, "%d 条记录可在提示消失前撤销" % n,
+                              parent=self.win, position=InfoBarPosition.TOP_RIGHT,
+                              duration=6000)
+        btn = PushButton("撤销", bar)
+        btn.clicked.connect(self.undo_delete)
+        bar.addWidget(btn)
 
     def open_editor(self, rec, on_result=None):
         """图片编辑入口(内置):查看器内嵌编辑模式——单窗口看图+标注,
@@ -6126,8 +6144,14 @@ class WinClipboardApp(QObject):
 
     # ---- 托盘动作 ----
     def clear_all(self):
-        self.core.clear_unpinned()
+        box = MessageBox("清空历史", "确定清空全部未置顶条目?清空后 6 秒内仍可撤销。",
+                         self.win)
+        if not box.exec():
+            return
+        removed = self.core.soft_clear_unpinned()
         self.refresh_view()
+        if removed:
+            self._offer_undo(len(removed), "已清空(置顶保留)")
 
     def show_private(self):
         if not self.private:
