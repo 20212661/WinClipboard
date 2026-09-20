@@ -14,6 +14,7 @@
 | 🌗 深浅色主题 | qfluentwidgets 原生主题,默认跟随系统,设置页/config 可切换 |
 | 🏷️ 类型图标 | 卡片以图标 + 元信息行区分类型(文本/链接/文件/图片),悬停显示快捷操作 |
 | ⌨️ 全局热键 | `Ctrl + Shift + V` 显示 / 隐藏 主窗口;设置页可直接**按键录制**新热键,被占用即时提示并保留原组合 |
+| ⚡ 快捷粘贴浮层 | `Alt + \`` 弹出 Win+V 式超轻量列表:打开即聚焦搜索框,`↑↓` 选择、`Enter` 直接粘贴、`Shift+Enter` 纯文本粘贴(丢掉富文本格式)、`Ctrl+Enter` 打开查看器、`Ctrl+1~9` 直选、`Tab` 切类型、`Del` 删除;无边框不进任务栏,失焦自动收起,Esc 关闭并回到原窗口;热键同样可在设置页录制 |
 | 📝 文本 + 图片 | 自动捕获复制的文字和截图,换行/中文完整保留 |
 | 📁 文件复制 | 资源管理器里复制的文件/文件夹也进历史,可粘回 |
 | 🔒 敏感隔离 | 密码/银行卡/身份证/API 密钥等自动识别,存入私密区不进普通历史;私密区列表**默认遮罩**,点「显示明文」解锁、30 秒后或切走页面自动遮回;DPAPI 不可用时界面如实标注「未加密」而不是谎称已加密 |
@@ -104,6 +105,7 @@
 | 操作 | 效果 |
 |------|------|
 | `Ctrl + Shift + V` | 显示 / 隐藏 主窗口 |
+| `Alt + \`` | 快捷粘贴浮层(Win+V 式):搜索 + `↑↓` + `Enter` 粘贴,全程键盘;失焦自动收起,`Esc` 关闭并回到原窗口 |
 | `Ctrl + Shift + P` | 把当前剪贴板图片直接钉到图钉画布(出现在鼠标附近;不产生历史条目) |
 | `↑` `↓` | 上下选择条目 |
 | `Enter` | 复制选中条目并粘贴到当前窗口 |
@@ -135,6 +137,8 @@ WinClipboard\
 │                             DPAPI 加密/持久化/AI 调用;不含界面)
 ├── pinboard\                 图钉画布子包(manager 门面 / window·view·items 交互 /
 │                             model·storage 数据与资产 / layout 排列算法 / loader 后台解码)
+├── quickpaste.py             快捷粘贴浮层(Alt+`,Win+V 式:搜索 + 键盘粘贴 / 失焦收起 /
+│                             缩略图 / Tab 切类型 / Ctrl+数字直选)
 ├── python.txt                指定 Python 解释器(一行 pythonw.exe 完整路径;可选)
 ├── requirements.txt          源码运行依赖清单(pip install -r requirements.txt)
 ├── winclipboard.spec         PyInstaller 打包配置(onedir,EXE 免装 Python)
@@ -143,14 +147,14 @@ WinClipboard\
 ├── 安装.bat                  安装器入口(自动带上当前版本号)
 ├── 启动剪贴板.vbs            无窗口启动器(python.txt → .venv → PATH,无硬编码路径)
 ├── 启动剪贴板.bat            带控制台启动器(调试用,同样自动选择解释器)
-├── _core_test.py             核心逻辑单元测试(137 项,无需 GUI;含内容识别管线/Diff/撤销栈/热键标签/按应用排除/自动清理/历史加密/富文本/筛选/导入导出/版本比较)
+├── _core_test.py             核心逻辑单元测试(142 项,无需 GUI;含内容识别管线/Diff/撤销栈/热键标签/按应用排除/自动清理/历史加密/富文本/筛选/导入导出/版本比较/快捷粘贴后端)
 ├── _ai_test.py               AI 工作流端到端测试(38 项;本地假 AI 服务器,无外部依赖)
 ├── _pinboard_test.py         图钉画布单元+集成自检(72 项;序列化/资产/布局/持久化/迁移/LRU)
-├── _integration_test.py      Qt 前端集成自检(211 项;真实 app/核心/面板,离屏渲染,
+├── _integration_test.py      Qt 前端集成自检(224 项;真实 app/核心/面板,离屏渲染,
 │                             含 URL/JWT/Base64 Inspector、Diff、动作注册表、卡片徽章、
 │                             删除撤销、私密遮罩、热键录制、暂停监听、按应用排除、
 │                             存储清理、富文本剪贴板往返、来源/时间筛选、批量删除、
-│                             导入导出、更新检查)
+│                             导入导出、更新检查、快捷粘贴浮层)
 ├── _ui_preview.py            UI 离屏渲染预览(python _ui_preview.py [light|dark],开发用)
 ├── _inspector_preview.py     Inspector 视图离屏渲染(URL/JWT/Base64 截图,开发用)
 ├── _gui_test.py              热键弹出实测(对已启动的进程注入 Ctrl+Shift+V,传入其 PID)
@@ -174,6 +178,8 @@ WinClipboard\
 {
   "hotkey_mod": 6,        // 修饰键位掩码: Ctrl=2, Shift=4, Alt=1, Win=8(6 = Ctrl+Shift)
   "hotkey_key": 86,       // 主键虚拟键码: 86 = V
+  "quick_mod": 1,         // 快捷粘贴浮层热键:修饰键(1 = Alt)
+  "quick_key": 192,       // 快捷粘贴浮层主键: 192 = `(反引号, VK_OEM_3)
   "auto_paste": false,    // 选中条目回车后是否自动向当前窗口发送 Ctrl+V(默认关,只写剪贴板)
   "sensitive_guard": true,// 敏感内容自动识别并隔离(false 则关闭)
   "exclude_apps": [],     // 按应用排除:名单内程序的复制不入史(exe 名,设置页可视化维护)

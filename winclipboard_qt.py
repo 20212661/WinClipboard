@@ -24,6 +24,7 @@ import clipboard_manager as cm   # 后端复用
 import perf_probe
 from perf_probe import PerfSpan, since, stamp   # 关键路径性能埋点
 from pinboard import PinBoardManager   # 图钉画布(置顶多图板)子包
+from quickpaste import QuickPasteWindow  # 快捷粘贴浮层(默认 Alt+`)
 from urllib.parse import unquote as _unquote, quote as _quote, urlsplit
 
 from PySide6.QtCore import (Qt, QTimer, QRectF, QRect, QSize, QEvent, QPropertyAnimation,
@@ -1389,6 +1390,16 @@ class PrivatePage(QWidget):
 # ============================================================
 # 设置页(全部使用 qfluentwidgets SettingCard 组件)
 # ============================================================
+# Qt 键值 → VK 码(HotkeyRecorderDialog 用;OEM 符号键,含快捷粘贴默认 `)
+_QT_KEY_TO_VK = {
+    Qt.Key_QuoteLeft: 0xC0, Qt.Key_Minus: 0xBD, Qt.Key_Equal: 0xBB,
+    Qt.Key_Comma: 0xBC, Qt.Key_Period: 0xBE, Qt.Key_Slash: 0xBF,
+    Qt.Key_Semicolon: 0xBA, Qt.Key_Apostrophe: 0xDE,
+    Qt.Key_BracketLeft: 0xDB, Qt.Key_BracketRight: 0xDD,
+    Qt.Key_Backslash: 0xDC,
+}
+
+
 class HotkeyRecorderDialog(MessageBoxBase):
     """全局热键录制:点击输入框直接按键捕获组合,「应用」经核心线程
     重注册(即冲突检测),被占用时回滚并提示,不再要求手改配置文件。"""
@@ -1452,8 +1463,11 @@ class HotkeyRecorderDialog(MessageBoxBase):
             vk = 0x70 + (k - Qt.Key_F1)
         elif k == Qt.Key_Space:
             vk = 0x20
+        else:
+            vk = _QT_KEY_TO_VK.get(k)      # OEM 键(`、-、= 等,快捷粘贴默认 Alt+`)
         if vk is None:
-            self.capture.setText("暂不支持该按键,请用字母 / 数字 / F1-F12 / 空格")
+            self.capture.setText("暂不支持该按键,请用字母 / 数字 / F1-F12 / 空格"
+                                 " / ` - = 等符号键")
             self.yesButton.setEnabled(False)
             return
         if mod == 0:
@@ -1836,11 +1850,29 @@ class SettingsPage(QWidget):
         c_key.hBoxLayout.addWidget(b_key, 0, Qt.AlignRight)
         c_key.hBoxLayout.addSpacing(16)
 
+        # 快捷粘贴浮层热键(默认 Alt+`):Win+V 式轻入口
+        c_qkey = SettingCard(
+            FIF.PASTE, "快捷粘贴浮层",
+            "弹出超轻量剪贴列表(Win+V 式):搜索 + ↑↓ + Enter 直接粘贴;"
+            "点「更改」按键录制,被占用即时提示并保留原热键",
+            parent=group2)
+        self.lbl_quick = CaptionLabel(cm.hotkey_label(
+            cfg.get("quick_mod", cm.MOD_ALT), cfg.get("quick_key", 0xC0)))
+        self.lbl_quick.setStyleSheet("color: %s; font-weight: 600;" % ACCENT)
+        b_qkey = PushButton("更改", self)
+        b_qkey.clicked.connect(lambda: HotkeyRecorderDialog(
+            self, self.lbl_quick.text(), app.apply_quick_hotkey).exec())
+        c_qkey.hBoxLayout.addWidget(self.lbl_quick, 0, Qt.AlignRight)
+        c_qkey.hBoxLayout.addSpacing(8)
+        c_qkey.hBoxLayout.addWidget(b_qkey, 0, Qt.AlignRight)
+        c_qkey.hBoxLayout.addSpacing(16)
+
         group2.addSettingCard(c_theme)
         group2.addSettingCard(c_accent)
         group2.addSettingCard(c_mica)
         group2.addSettingCard(c_auto)
         group2.addSettingCard(c_key)
+        group2.addSettingCard(c_qkey)
         c_help = PushSettingCard(
             "查看", FIF.HELP, "快捷键与操作",
             "全局热键 / 列表 / 查看器 / 图片编辑的按键总览(主窗口按 F1 也可打开)",
@@ -1873,6 +1905,12 @@ class SettingsPage(QWidget):
         self.lbl_hotkey.setText(cm.hotkey_label(
             self.app.cfg.get("hotkey_mod", cm.MOD_CONTROL | cm.MOD_SHIFT),
             self.app.cfg.get("hotkey_key", 0x56)))
+
+    def update_quick_label(self):
+        """快捷粘贴浮层热键变更后(qp_hotkey_change/启动注册结果)回写显示。"""
+        self.lbl_quick.setText(cm.hotkey_label(
+            self.app.cfg.get("quick_mod", cm.MOD_ALT),
+            self.app.cfg.get("quick_key", 0xC0)))
 
     def sync_monitor_pause(self):
         """托盘菜单切换暂停监听后,设置页开关同步显示(值未变不发信号,无回环)。"""
@@ -4661,6 +4699,12 @@ class ThumbLoader(QObject):
         for c in self.app._card_widgets:
             if c.rec.get("type") == "image" and c.rec.get("content") == path:
                 c.set_thumb(pm)
+        qw = getattr(self.app, "quick", None)      # 快捷粘贴浮层可见则重绘
+        if qw is not None:
+            try:
+                qw.on_thumb(path, pm)
+            except Exception:
+                pass
 
 
 class AIWorker(QThread):
@@ -6054,6 +6098,10 @@ class WinClipboardApp(QObject):
         # 独立于主窗口存在,程序退出才销毁
         self.pinboard = PinBoardManager(self)
 
+        # 快捷粘贴浮层(Win+V 式轻入口,默认 Alt+`):外壳一次构建,
+        # 打开只做过滤 + show,目标 <100ms
+        self.quick = QuickPasteWindow(self)
+
         # 定时器必须先于启动事件排空创建。ClipboardCore 构造时已经启动
         # 托盘/剪贴板线程,启动捕获可能在事件桥接通前积压 change 信号；
         # 若先 _drain_events(),可在 _on_history_change() 里访问到尚不存在的
@@ -6479,6 +6527,31 @@ class WinClipboardApp(QObject):
         except Exception:
             cm.log("热键更改命令投递失败:\n%s" % traceback.format_exc())
 
+    def apply_quick_hotkey(self, mod, key):
+        """快捷粘贴浮层热键录制(同 apply_hotkey 套路,独立命令/事件)。"""
+        try:
+            self.core.worker.cmd_q.put(("hotkey_qp", int(mod), int(key)))
+        except Exception:
+            cm.log("快捷粘贴热键更改命令投递失败:\n%s" % traceback.format_exc())
+
+    def _on_qp_hotkey_change(self, ok, mod, key):
+        label = cm.hotkey_label(mod, key)
+        if ok:
+            self.cfg["quick_mod"] = int(mod)
+            self.cfg["quick_key"] = int(key)
+            cm.save_config(self.cfg)
+            InfoBar.success("快捷粘贴热键已更新", "新热键:" + label,
+                            parent=self.win, position=InfoBarPosition.TOP_RIGHT)
+        else:
+            InfoBar.error("快捷粘贴热键注册失败",
+                          "「%s」可能被其他软件占用,已保留原热键" % label,
+                          parent=self.win, position=InfoBarPosition.TOP_RIGHT,
+                          duration=5000)
+        try:
+            self.win.settings_page.update_quick_label()
+        except Exception:
+            pass
+
     def toggle_monitor_pause(self, on=None):
         """临时隐私模式:暂停期间剪贴板事件不入史(不落盘,重启即恢复监听)。"""
         paused = (not self.core.monitor_paused) if on is None else bool(on)
@@ -6558,10 +6631,18 @@ class WinClipboardApp(QObject):
         """应用内快捷键总览(全局热键动态跟随当前配置)。"""
         hk = cm.hotkey_label(self.cfg.get("hotkey_mod", cm.MOD_CONTROL | cm.MOD_SHIFT),
                              self.cfg.get("hotkey_key", 0x56))
+        qk = cm.hotkey_label(self.cfg.get("quick_mod", cm.MOD_ALT),
+                             self.cfg.get("quick_key", 0xC0))
         return ("全局\n"
                 "  %s   显示 / 隐藏主窗口(设置页可按键录制更改)\n"
+                "  %s   快捷粘贴浮层(Win+V 式:搜索 + ↑↓ + 回车粘贴)\n"
                 "  Ctrl + Shift + P   剪贴板图片直钉到画布\n"
                 "  Ctrl + Alt + T   画布鼠标穿透切换\n"
+                "\n快捷粘贴浮层(%s)\n"
+                "  ↑ / ↓   选择      回车   粘贴      Shift + 回车   纯文本粘贴\n"
+                "  Ctrl + 回车   打开查看器      Ctrl + 1~9   直选粘贴\n"
+                "  Tab   切换类型(全部/文本/链接/图片/文件)\n"
+                "  Del   删除条目(可撤销)      Esc   关闭并回到原窗口\n"
                 "\n历史列表\n"
                 "  ↑ / ↓   移动选择      回车   粘贴选中条目\n"
                 "  Esc   收起主窗口      双击卡片   打开独立查看器\n"
@@ -6571,7 +6652,8 @@ class WinClipboardApp(QObject):
                 "\n图片编辑(查看器内编辑态)\n"
                 "  Ctrl + Z   撤销      Del   删除选中标注      Esc   放弃编辑\n"
                 "\n系统托盘\n"
-                "  左键   切换面板      右键   菜单(暂停监听 / 清空 / 退出)") % hk
+                "  左键   切换面板      右键   菜单(暂停监听 / 清空 / 退出)"
+                % (hk, qk, qk))
 
     def show_shortcut_help(self):
         MessageBox("快捷键与操作", self.shortcut_help_text(), self.win).exec()
@@ -6702,6 +6784,17 @@ class WinClipboardApp(QObject):
                 self.win.toggle()
         elif kind == "pin_hotkey":          # Ctrl+Shift+P:直接钉剪贴板图片
             self.pinboard.pin_clipboard_image()
+        elif kind == "qp_hotkey":           # Alt+`:快捷粘贴浮层
+            with PerfSpan("quickpaste_open"):
+                self.quick.toggle()
+        elif kind == "qp_hotkey_state":     # 启动期快捷粘贴热键注册结果
+            self._qp_hotkey_ok = bool(rest[0])
+            try:
+                self.win.settings_page.update_quick_label()
+            except Exception:
+                pass
+        elif kind == "qp_hotkey_change":    # 设置页录制快捷粘贴热键的结果
+            self._on_qp_hotkey_change(bool(rest[0]), rest[1], rest[2])
         elif kind == "ctt_hotkey":          # Ctrl+Alt+T:切换鼠标穿透
             self.pinboard.toggle_click_through(None)
         elif kind == "ctt_hotkey_state":    # 穿透退出热键注册结果(失败则禁穿透)

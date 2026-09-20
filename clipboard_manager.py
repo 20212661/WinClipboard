@@ -88,6 +88,7 @@ ID_TIMER_CAPTURE = 2002      # 启动剪贴板捕获(单次)
 ID_HOTKEY = 100              # 主热键(Ctrl+Shift+V)
 ID_HOTKEY_PIN = 102          # 图钉画布:直接钉剪贴板图片(Ctrl+Shift+P)
 ID_HOTKEY_CTT = 103          # 图钉画布:鼠标穿透切换(Ctrl+Alt+T)
+ID_HOTKEY_QP = 104           # 快捷粘贴浮层(默认 Alt+`)
 
 # 部分 win32con 构建缺失的托盘常量,这里显式定义(避免 AttributeError)
 NIM_ADD = 0x00000000
@@ -101,9 +102,18 @@ NIF_TIP = 0x00000004
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
+# OEM 键的 VK → 显示名(快捷粘贴默认 Alt+`,录制对话框也允许这些键)
+_VK_OEM_NAMES = {
+    0xC0: "`", 0xBD: "-", 0xBB: "=", 0xBC: ",", 0xBE: ".",
+    0xBF: "/", 0xBA: ";", 0xDE: "'", 0xDB: "[", 0xDD: "]",
+    0xDC: "\\",
+}
+
 DEFAULT_CFG = {
     "hotkey_mod": MOD_CONTROL | MOD_SHIFT,
     "hotkey_key": 0x56,          # 'V'
+    "quick_mod": MOD_ALT,
+    "quick_key": 0xC0,           # '`'(VK_OEM_3):快捷粘贴浮层,Win+V 式轻入口
     "auto_paste": False,
     "sensitive_guard": True,
     "exclude_apps": [],         # 按应用排除:名单内程序的复制不入史(exe 名小写)
@@ -143,6 +153,8 @@ def hotkey_label(mod, key=None):
         parts.append("F%d" % (k - 0x6F))
     elif k == 0x20:
         parts.append("空格")
+    elif k in _VK_OEM_NAMES:
+        parts.append(_VK_OEM_NAMES[k])
     else:
         parts.append("VK 0x%02X" % k)
     return "+".join(parts)
@@ -1090,11 +1102,20 @@ class TrayWorker(threading.Thread):
                                        MOD_CONTROL | MOD_SHIFT, 0x50)   # 'P'
         ctt_ok = user32.RegisterHotKey(self.hwnd, ID_HOTKEY_CTT,
                                        MOD_CONTROL | MOD_ALT, 0x54)     # 'T'
+        # 快捷粘贴浮层热键(默认 Alt+`):失败降级为仅设置页提示,不弹模态
+        qp_ok = user32.RegisterHotKey(
+            self.hwnd, ID_HOTKEY_QP,
+            int(cfg.get("quick_mod", MOD_ALT)), int(cfg.get("quick_key", 0xC0)))
         if not pin_ok:
             log("图钉热键(Ctrl+Shift+P)被占用,直钉剪贴板不可用")
         if not ctt_ok:
             log("穿透热键(Ctrl+Alt+T)被占用,鼠标穿透已禁用")
+        if not qp_ok:
+            log("快捷粘贴热键(%s)被占用,浮层入口不可用(可在设置页录制新组合)"
+                % hotkey_label(cfg.get("quick_mod", MOD_ALT),
+                               cfg.get("quick_key", 0xC0)))
         self.app._post(("ctt_hotkey_state", bool(ctt_ok)))
+        self.app._post(("qp_hotkey_state", bool(qp_ok)))
         user32.SetTimer(self.hwnd, ID_TIMER, 80, None)
 
         # 启动捕获延后到消息循环内:剪贴板里若是大图,PNG 编码可耗时数秒,
@@ -1114,6 +1135,7 @@ class TrayWorker(threading.Thread):
             lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY),
             lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_PIN),
             lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_CTT),
+            lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_QP),
             lambda: user32.RemoveClipboardFormatListener(self.hwnd),
         ):
             try:
@@ -1160,6 +1182,8 @@ class TrayWorker(threading.Thread):
             self.app._post(("pin_hotkey",))
         elif wp == ID_HOTKEY_CTT:
             self.app._post(("ctt_hotkey",))
+        elif wp == ID_HOTKEY_QP:
+            self.app._post(("qp_hotkey",))
         else:
             self.app._post(("hotkey",))
         return 0
@@ -1220,6 +1244,21 @@ class TrayWorker(threading.Thread):
                                       cfg.get("hotkey_mod", MOD_CONTROL | MOD_SHIFT),
                                       cfg.get("hotkey_key", 0x56))
             self.app._post(("hotkey_change", ok, mod, key))
+        elif cmd[0] == "hotkey_qp":
+            # 快捷粘贴热键录制:同主热键套路,重注册即冲突检测,失败回滚
+            mod, key = int(cmd[1]), int(cmd[2])
+            cfg = self.app.cfg
+            try:
+                user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_QP)
+            except Exception:
+                pass
+            ok = bool(user32.RegisterHotKey(self.hwnd, ID_HOTKEY_QP, mod, key))
+            if not ok:
+                user32.RegisterHotKey(
+                    self.hwnd, ID_HOTKEY_QP,
+                    int(cfg.get("quick_mod", MOD_ALT)),
+                    int(cfg.get("quick_key", 0xC0)))
+            self.app._post(("qp_hotkey_change", ok, mod, key))
         elif cmd[0] == "quit":
             self._cleanup()
             win32gui.PostQuitMessage(0)
@@ -1826,8 +1865,9 @@ class ClipboardCore:
         self._ignore_clip_until = time.monotonic() + 0.5
         return self._set_clipboard(rec)
 
-    def paste_record(self, rec):
-        """写回剪贴板 + 自动粘贴排队 + 置顶到最近。文件全部丢失时返回 False。"""
+    def paste_record(self, rec, force=False):
+        """写回剪贴板 + 自动粘贴排队 + 置顶到最近。文件全部丢失时返回 False。
+        force=True 无条件派发回贴(快捷粘贴浮层:用户按 Enter 的意图就是粘贴)。"""
         if rec["type"] == "files":
             existing = [p for p in rec["content"] if os.path.exists(p)]
             if not existing:
@@ -1836,7 +1876,7 @@ class ClipboardCore:
         # 时间窗抑制本次自写入触发的剪贴板回调
         self._ignore_clip_until = time.monotonic() + 0.5
         self._set_clipboard(rec)
-        if self.cfg.get("auto_paste", False):
+        if force or self.cfg.get("auto_paste", False):
             self.worker.cmd_q.put(("paste",))
         try:
             self.history.remove(rec)

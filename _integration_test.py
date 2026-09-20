@@ -1190,6 +1190,55 @@ a.panel.toggle_preview(True)
 a.quit_app()
 pump(0.2)
 
+# ---- 快捷粘贴浮层(默认 Alt+`):构建/过滤/键盘操作/纯文本粘贴 ----
+import quickpaste as _qp
+a.core.add_item(("text", "quickpaste 目标文本 alpha", {"html": "<b>alpha</b>"}, "notepad.exe"))
+a.core.add_item(("text", "quickpaste 目标文本 beta", {}, "notepad.exe"))
+pump(0.2)
+check("浮层已构建", getattr(a, "quick", None) is not None)
+_ms = a.quick.open()
+check("浮层打开可见", a.quick.isVisible(), "%.1fms" % _ms)
+check("浮层为 Tool 窗口(不进任务栏)",
+      bool(a.quick.windowFlags() & wq.Qt.Tool))
+check("浮层行数含注入条目", a.quick.model.rowCount() >= 2)
+check("浮层打开耗时<300ms(offscreen 上限)", _ms < 300, "%.1fms" % _ms)
+a.quick.search.setText("beta")
+a.quick.refresh()
+check("输入即过滤", a.quick.model.rowCount() == 1, str(a.quick.model.rowCount()))
+_captured = []
+_orig_set = a.core._set_clipboard
+_orig_send = cm.send_ctrl_v
+cm.send_ctrl_v = lambda: None          # 拦截真实按键注入(与 worker 线程抢命令)
+a.core._set_clipboard = lambda rec: (_captured.append(rec), True)[1]
+a.quick._sel = 0
+a.quick.act_paste(plain=True)
+check("纯文本粘贴剥离富文本",
+      _captured and "html" not in _captured[0]
+      and _captured[0]["content"].endswith("beta"), str(_captured[:1]))
+check("粘贴强制入队(不受 auto_paste 默认关影响)",
+      a.core.worker.cmd_q.get_nowait()[0] == "paste")
+check("粘贴后浮层收起", not a.quick.isVisible())
+a.core._set_clipboard = _orig_set
+cm.send_ctrl_v = _orig_send
+a.quick.open()
+a.quick.close_restore()
+check("Esc 原路收起", not a.quick.isVisible())
+a.quick.open()
+a.quick.cycle_cat()
+check("Tab 切换类型", a.quick._cat == "text", a.quick._cat)
+a.quick.search.setText("alpha")
+a.quick.refresh()
+_nv = len(a._viewers)
+a.quick._sel = 0
+a.quick.act_view()
+check("Ctrl+Enter 打开查看器", len(a._viewers) > _nv)
+a.quick._cat = "all"
+a.quick.search.clear()
+check("纯文本条目构造剥离 html/rtf",
+      _qp.plain_rec({"type": "text", "content": "x", "html": "<b>x</b>",
+                     "rtf": r"{\rtf}", "ts": 1})
+      == {"type": "text", "content": "x", "ts": 1})
+
 log = open(cm.LOG_FILE, encoding="utf-8").read()
 # 「全局热键注册失败」是预期内的:测试与正在运行的真实实例抢同一个热键,
 # 且已在上方屏蔽其模态告警。其余任何异常/失败都算问题。

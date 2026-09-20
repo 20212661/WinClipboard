@@ -144,7 +144,7 @@ check("hotkey_label 全修饰+F5",
 check("hotkey_label 录制中间态", cm.hotkey_label(2, None) == "Ctrl+…")
 check("hotkey_label 空格/未映射键",
       cm.hotkey_label(1, 0x20) == "Alt+空格"
-      and "VK" in cm.hotkey_label(1, 0xC0))
+      and "VK" in cm.hotkey_label(1, 0x92))
 
 # ---- 按应用排除(捕获门同一隐私线)----
 core = make_core()
@@ -527,6 +527,21 @@ check("徽章:普通文本无", cm.content_badge("今天天气不错") is None)
 check("徽章:JSON 不占用", cm.content_badge('{"a":1}') is None)
 check("徽章:URL 不占用(有 link 卡片)", cm.content_badge("https://a.com/b") is None)
 check("徽章:空文本无", cm.content_badge("") is None)
+
+# ---- 快捷粘贴浮层(后端配合项) ----
+core = make_core(cfg={"auto_paste": False})
+core.add_item(("text", "quick-force", {}, ""))
+rec = core.history[0]
+core.paste_record(rec)
+check("paste_record 默认不回贴(auto_paste 关)", core.worker.cmd_q.empty())
+core.paste_record(rec, force=True)
+check("paste_record force 无条件回贴",
+      core.worker.cmd_q.get_nowait()[0] == "paste")
+check("快捷粘贴默认热键(Alt+`)",
+      cm.DEFAULT_CFG.get("quick_mod") == cm.MOD_ALT
+      and cm.DEFAULT_CFG.get("quick_key") == 0xC0)
+check("hotkey_label OEM 键名", cm.hotkey_label(cm.MOD_ALT, 0xC0) == "Alt+`")
+check("hotkey_label OEM 负号", cm.hotkey_label(cm.MOD_CONTROL, 0xBD) == "Ctrl+-")
 
 print()
 print("RESULT:", "PASS" if not FAILS else "FAIL %d 项: %s" % (len(FAILS), ", ".join(FAILS)))
