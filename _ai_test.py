@@ -150,9 +150,14 @@ wq.init_palette(False)
 
 class FakeCore:
     pasted = []
+    copied = []
 
-    def paste_text(self, t):
+    def paste_text(self, t, force=False):
         self.pasted.append(t)
+        return True
+
+    def copy_text(self, t):
+        self.copied.append(t)
         return True
 
 
@@ -256,9 +261,10 @@ runner.results[-1] = "人工改写后的结果"
 runner.cur = runner.results[-1]           # 模拟 do_save 的效果
 check("Runner.edit-cur", runner.cur == "人工改写后的结果")
 
-# ---- 复制走 core.paste_text ----
+# ---- 复制只写剪贴板(core.copy_text,不派发 Ctrl+V) ----
 runner._copy_latest()
-check("Runner.copy", fake.core.pasted and fake.core.pasted[-1] == "人工改写后的结果")
+check("Runner.copy", fake.core.copied and fake.core.copied[-1] == "人工改写后的结果")
+check("Runner.copy-不回贴", not fake.core.pasted)
 
 # ---- 错误路径:服务不存在 ----
 wf_bad = {"name": "坏流程", "steps": [{"service": "不存在", "prompt": "{input}"}]}
@@ -280,7 +286,8 @@ rw = wq.WorkflowRunner(fake, CFG["ai_workflows"][-1], "原始输入")
 rw._run_step()                      # web 步骤
 app.processEvents()
 check("Web.wait-panel", rw._waiting is not None)
-check("Web.prompt-copied", any("评审:原始输入" in t for t in fake.core.pasted))
+check("Web.prompt-copied", any("评审:原始输入" in t for t in fake.core.copied))
+check("Web.prompt-只复制不回贴", not fake.core.pasted)
 check("Web.url-opened", URLS_OPENED and "review" not in URLS_OPENED[0]
       and "%E8%AF%84%E5%AE%A1" in URLS_OPENED[0], str(URLS_OPENED))
 app.clipboard().setText("网页AI的回答")
