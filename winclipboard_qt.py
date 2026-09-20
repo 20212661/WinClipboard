@@ -1238,10 +1238,20 @@ class MainWindow(FluentWindow):
 
 
 class PrivatePage(QWidget):
+    """私密区:列表默认遮罩显示,点「显示明文」解锁,30 秒后或离开页面
+    自动重新遮蔽——防止旁人扫一眼屏幕就拿到凭据明文。"""
+
+    REVEAL_SECONDS = 30
+
     def __init__(self, app):
         super().__init__()
         self.app = app
         self.setObjectName("privatePage")
+        self._revealed = False
+        self._mask_timer = QTimer(self)
+        self._mask_timer.setSingleShot(True)
+        self._mask_timer.setInterval(self.REVEAL_SECONDS * 1000)
+        self._mask_timer.timeout.connect(lambda: self._set_revealed(False))
         v = QVBoxLayout(self)
         v.setContentsMargins(36, 24, 36, 16)
         v.setSpacing(10)
@@ -1249,14 +1259,22 @@ class PrivatePage(QWidget):
         ttl = TitleLabel("私密区")
         v.addWidget(ttl)
 
-        hint = CaptionLabel("以下内容经敏感识别后隔离保存,不出现在历史面板;使用 Windows DPAPI 加密,仅当前用户可解密。")
+        if cm.dpapi_available():
+            hint = CaptionLabel("以下内容经敏感识别后隔离保存,不出现在历史面板;"
+                                "使用 Windows DPAPI 加密,仅当前用户可解密。"
+                                "列表默认遮罩,点「显示明文」解锁,30 秒后自动遮回。")
+        else:
+            hint = CaptionLabel("⚠ 当前环境 DPAPI 不可用,私密区仅 Base64 编码存储(未加密),"
+                                "请勿在本机存放重要凭据。列表默认遮罩,"
+                                "点「显示明文」解锁,30 秒后自动遮回。")
         hint.setStyleSheet("color: %s;" % TER)
         hint.setWordWrap(True)
         v.addWidget(hint)
 
         self.lst = QListWidget()
         self.lst.setFont(font(13))
-        self.lst.itemDoubleClicked.connect(lambda _: self.do_copy())
+        self.lst.setAccessibleName("私密内容列表(默认遮罩显示)")
+        self.lst.itemDoubleClicked.connect(lambda _: self.do_view())
         self.lst.setStyleSheet(
             "QListWidget { background: %s; border-radius: 12px;"
             " border: 1px solid %s; outline: none; padding: 4px; }"
@@ -1269,6 +1287,8 @@ class PrivatePage(QWidget):
         row.setSpacing(8)
         b_copy = PrimaryPushButton("复制并粘贴", self)
         b_copy.setIcon(FIF.COPY.icon())
+        self.b_eye = PushButton("显示明文", self)
+        self.b_eye.setIcon(FIF.VIEW.icon())
         b_view = PushButton("查看", self)
         b_view.setIcon(FIF.VIEW.icon())
         b_view.setToolTip("独立窗口查看(JWT 自动解码;仅解码,不验签)")
@@ -1276,21 +1296,45 @@ class PrivatePage(QWidget):
         b_del.setIcon(FIF.DELETE.icon())
         b_clear = PushButton("清空", self)
         b_copy.clicked.connect(self.do_copy)
+        self.b_eye.clicked.connect(lambda: self._set_revealed(not self._revealed))
         b_view.clicked.connect(self.do_view)
         b_del.clicked.connect(self.do_del)
         b_clear.clicked.connect(self.do_clear)
-        for b in (b_copy, b_view, b_del, b_clear):
+        for b in (b_copy, self.b_eye, b_view, b_del, b_clear):
             row.addWidget(b)
         row.addStretch(1)
         v.addLayout(row)
         self.refresh()
 
+    # ---- 遮罩 / 解锁 ----
+    def _mask_text(self, s):
+        one = s.replace("\n", " ").replace("\t", " ")
+        if self._revealed:
+            return one[:80] + ("…" if len(one) > 80 else "")
+        n = len(one)
+        return "•" * min(n, 18) + ("(%d 字)" % n if n > 18 else "")
+
+    def _set_revealed(self, on):
+        if on == self._revealed:
+            return
+        self._revealed = on
+        if on:
+            self._mask_timer.start()
+        else:
+            self._mask_timer.stop()
+        self.b_eye.setText("隐藏明文" if on else "显示明文")
+        self.b_eye.setIcon(FIF.HIDE.icon() if on else FIF.VIEW.icon())
+        self.refresh()
+
+    def hideEvent(self, e):
+        # 切走页面立即遮回:不留一个常亮的明文清单
+        self._set_revealed(False)
+        super().hideEvent(e)
 
     def refresh(self):
         self.lst.clear()
         for s in self.app.private:
-            one = s.replace("\n", " ").replace("\t", " ")
-            self.lst.addItem(one[:80] + ("…" if len(one) > 80 else ""))
+            self.lst.addItem(self._mask_text(s))
 
     def do_copy(self):
         item = self.lst.currentItem()
@@ -1299,7 +1343,8 @@ class PrivatePage(QWidget):
         i = self.lst.row(item)
         if not 0 <= i < len(self.app.private):
             return
-        self.app.core.paste_text(self.app.private[i])
+        # 按钮就是「复制并粘贴」:用户显式要求回贴,不受 auto_paste 默认关影响
+        self.app.core.paste_text(self.app.private[i], force=True)
 
     def do_view(self):
         """私密条目 → 独立查看器(JWT 自动落解码视图;rec 带 private 标记,

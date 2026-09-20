@@ -476,6 +476,12 @@ def _dpapi_unprotect(blob):
         return None
 
 
+def dpapi_available():
+    """当前环境能否用 DPAPI 加密(win32crypt 可用即 True)。前端据此如实
+    标注私密区的存储强度,DPAPI 缺位时不得宣称“已加密”。"""
+    return win32crypt is not None
+
+
 def load_private():
     """读私密区:新版 {"dpapi":true,"data":<b64>} 自动解密;旧版明文列表直接兼容
     (下次保存时自动升级为加密);解密失败不覆盖原文件,数据不丢。"""
