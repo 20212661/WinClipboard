@@ -103,7 +103,7 @@ kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 DEFAULT_CFG = {
     "hotkey_mod": MOD_CONTROL | MOD_SHIFT,
     "hotkey_key": 0x56,          # 'V'
-    "auto_paste": True,
+    "auto_paste": False,
     "sensitive_guard": True,
     "max_items": 100,
     "window_w": 600,
@@ -1526,7 +1526,7 @@ class ClipboardCore:
         # 时间窗抑制本次自写入触发的剪贴板回调
         self._ignore_clip_until = time.monotonic() + 0.5
         self._set_clipboard(rec)
-        if self.cfg.get("auto_paste", True):
+        if self.cfg.get("auto_paste", False):
             self.worker.cmd_q.put(("paste",))
         try:
             self.history.remove(rec)
@@ -1536,11 +1536,13 @@ class ClipboardCore:
             pass
         return True
 
-    def paste_text(self, content):
-        """私密区文本:写回剪贴板 + 自动粘贴排队。"""
+    def paste_text(self, content, force=False):
+        """文本写回剪贴板;force=True 无条件派发回贴(用户点了明确的
+        「复制并粘贴」类按钮),否则跟随 auto_paste 开关(默认关:模拟
+        Ctrl+V 会把内容打进当前聚焦窗口,不应是复制动作的默认副作用)。"""
         self._ignore_clip_until = time.monotonic() + 0.5
         self._set_clipboard({"type": "text", "content": content})
-        if self.cfg.get("auto_paste", True):
+        if force or self.cfg.get("auto_paste", False):
             self.worker.cmd_q.put(("paste",))
 
     def copy_text(self, content):

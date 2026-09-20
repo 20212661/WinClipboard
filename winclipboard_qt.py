@@ -1276,9 +1276,10 @@ class SettingsPage(QWidget):
 
         group = SettingCardGroup("剪贴板", self)
         c_paste = SwitchSettingCard(
-            FIF.PASTE, "自动粘贴", "选中条目回车后自动粘贴到当前窗口(部分程序可能不生效)",
+            FIF.PASTE, "自动粘贴", "选中条目回车后自动向当前窗口发送 Ctrl+V;"
+            "关闭则只写入剪贴板、由你手动粘贴(默认关,更安全)",
             parent=group)
-        c_paste.setChecked(bool(cfg.get("auto_paste", True)))
+        c_paste.setChecked(bool(cfg.get("auto_paste", False)))
 
         def on_paste(on):
             cfg["auto_paste"] = bool(on)
@@ -3606,11 +3607,9 @@ class ViewerWindow(QWidget):
         self._set_zoom(self._ZOOMS[max(0, min(len(self._ZOOMS) - 1, i))])
 
     def _copy_all(self):
-        # 私密条目只写剪贴板:不排回贴队列,避免凭据被 Ctrl+V 进查看前聚焦的窗口
-        if self.rec.get("private"):
-            self.app.core.copy_text(self._raw)
-        else:
-            self.app.core.paste_text(self._raw)         # 始终复制原始记录
+        # 查看器「复制」只写剪贴板:不排回贴队列,避免内容被 Ctrl+V
+        # 打进打开查看器之前聚焦的窗口(私密凭据与非私密一视同仁)
+        self.app.core.copy_text(self._raw)
         self.btn_copy.setText("已复制")             # 按钮自身反馈,不弹提示层
         self.btn_copy.setIcon(FIF.ACCEPT.icon())
         self._copy_timer.start()
@@ -5284,7 +5283,9 @@ class WorkflowRunner(QWidget):
 
         if kind == "web":
             prompt = cm.render_prompt(step.get("prompt"), self.cur)
-            self.app.core.paste_text(prompt)                  # 提示词进剪贴板
+            # 只写剪贴板:提示词要用户自己去网页粘贴,自动 Ctrl+V 会把它
+            # 打进当前聚焦窗口(误操作风险),故不走 paste_text
+            self.app.core.copy_text(prompt)
             opened = ""
             url = str(step.get("url") or "").strip()
             if url:
@@ -5350,12 +5351,14 @@ class WorkflowRunner(QWidget):
 
     # ---- 复制 / 关闭 ----
     def _copy_text(self, text):
-        self.app.core.paste_text(text)
+        # 「复制」= 只写剪贴板(不派发 Ctrl+V);显式粘贴入口另行调用
+        # core.paste_text(force=True)
+        self.app.core.copy_text(text)
 
     def _copy_latest(self):
         if self.results:
             self._copy_text(self.results[-1])
-            InfoBar.success("已复制", "结果已放入剪贴板(同时记录进历史)",
+            InfoBar.success("已复制", "结果已放入剪贴板",
                             parent=self, position=InfoBarPosition.TOP_RIGHT)
 
     def closeEvent(self, e):
