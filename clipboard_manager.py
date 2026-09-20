@@ -82,6 +82,7 @@ MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN = 0x0001, 0x0002, 0x0004, 0x0008
 # 托盘菜单项 ID
 M_SHOW, M_CLEAR, M_PRIVATE, M_AUTOSTART, M_ABOUT, M_QUIT = 1001, 1002, 1003, 1004, 1005, 1006
 M_CTT_OFF = 1007                # 退出图钉画布鼠标穿透(穿透中唯一可点入口之一)
+M_PAUSE = 1008                   # 暂停/恢复剪贴板监听(临时隐私模式,不落盘)
 ID_TIMER = 2001
 ID_TIMER_CAPTURE = 2002      # 启动剪贴板捕获(单次)
 ID_HOTKEY = 100              # 主热键(Ctrl+Shift+V)
@@ -105,6 +106,7 @@ DEFAULT_CFG = {
     "hotkey_key": 0x56,          # 'V'
     "auto_paste": False,
     "sensitive_guard": True,
+    "exclude_apps": [],         # 按应用排除:名单内程序的复制不入史(exe 名小写)
     "max_items": 100,
     "window_w": 600,
     "window_h_max": 720,
@@ -524,6 +526,35 @@ def is_remote_session():
         return bool(user32.GetSystemMetrics(0x1000))   # SM_REMOTESESSION
     except Exception:
         return False
+
+
+def foreground_app_exe():
+    """前台窗口所属进程的 exe 文件名(小写,如 "chrome.exe";失败返回 "")。
+
+    剪贴板事件到达瞬间的前台窗口 ≈ 复制来源应用(用户刚在那儿按了 Ctrl+C),
+    必须在托盘线程立即取——延迟到捕获线程时前台多半已经换窗口。"""
+    try:
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return ""
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return ""
+        # PROCESS_QUERY_LIMITED_INFORMATION:最小权限,连 UWP/提权进程也能问
+        h = kernel32.OpenProcess(0x1000, False, pid.value)
+        if not h:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            n = ctypes.c_ulong(1024)
+            if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)):
+                return os.path.basename(buf.value).lower()
+            return ""
+        finally:
+            kernel32.CloseHandle(h)
+    except Exception:
+        return ""
 
 
 # ============================================================
@@ -1043,7 +1074,12 @@ class TrayWorker(threading.Thread):
         # 我们自己写入剪贴板时跳过(时间窗比一次性标志更抗竞态)
         if time.monotonic() < self.app._ignore_clip_until:
             return 0
-        self.app.submit_capture()
+        # 来源应用在事件到达瞬间取(前台窗口进程),延迟到捕获线程就换窗口了;
+        # 暂停监听/按应用排除在此门控,命中即不入史
+        src = foreground_app_exe()
+        if not self.app.should_capture(src):
+            return 0
+        self.app.submit_capture(src)
         return 0
 
     def on_hotkey(self, hwnd, msg, wp, lp):
@@ -1073,7 +1109,7 @@ class TrayWorker(threading.Thread):
         mid = wp & 0xFFFF
         actions = {M_SHOW: "show", M_CLEAR: "clear", M_PRIVATE: "private",
                    M_AUTOSTART: "autostart", M_ABOUT: "about", M_QUIT: "quit",
-                   M_CTT_OFF: "ctt_off"}
+                   M_CTT_OFF: "ctt_off", M_PAUSE: "pause"}
         act = actions.get(mid)
         if act:
             self.app._post(("tray", act))
@@ -1097,6 +1133,10 @@ class TrayWorker(threading.Thread):
         win32gui.AppendMenu(menu, win32con.MF_STRING, M_SHOW,
                             "显示剪贴板  (Ctrl+Shift+V)")
         win32gui.AppendMenu(menu, win32con.MF_STRING, M_CLEAR, "清空历史")
+        pflag = win32con.MF_CHECKED if getattr(self.app, "monitor_paused", False) \
+            else win32con.MF_UNCHECKED
+        win32gui.AppendMenu(menu, win32con.MF_STRING | pflag, M_PAUSE,
+                            "暂停监听(临时隐私模式)")
         win32gui.AppendMenu(menu, win32con.MF_STRING, M_PRIVATE,
                             "私密内容 (%d)" % len(self.app.private))
         flag = win32con.MF_CHECKED if self.app.is_autostart() else win32con.MF_UNCHECKED
@@ -1140,6 +1180,10 @@ class ClipboardCore:
         # 事件唤醒回调(前端注入):queue 只管数据,回调负责把"该排空了"
         # 通知到 UI 线程(如 Qt Signal 的 emit);无 UI / 测试环境保持 None
         self.on_event = None
+        # 临时隐私模式:True 时剪贴板事件不入史(托盘/设置页切换,重启即恢复监听)
+        self.monitor_paused = False
+        # 按应用排除:命中名单的来源应用复制不入史(热集,名单变更时重建)
+        self._exclude_set = self._build_exclude_set()
         # 剪贴板捕获线程(读板 + 大图 PNG 编码都放这):曾同步跑在托盘线程,
         # 大图编码数秒期间热键/托盘消息全部排队失联(启动期尤其明显)
         self._capture_exec = ThreadPoolExecutor(max_workers=1,
@@ -1177,24 +1221,52 @@ class ClipboardCore:
             except Exception:
                 pass
 
+    def _build_exclude_set(self):
+        return {os.path.basename(str(s).strip()).lower()
+                for s in self.cfg.get("exclude_apps") or [] if str(s).strip()}
+
+    def should_capture(self, src=""):
+        """捕获门(与暂停监听同一条隐私控制线):暂停中,或来源应用命中
+        排除名单 → 本次剪贴板事件不入史。"""
+        if self.monitor_paused:
+            return False
+        if src and src.lower() in self._exclude_set:
+            return False
+        return True
+
+    def set_exclude_apps(self, names):
+        """更新按应用排除名单:归一化(取文件名/小写/去空/去重保序)→
+        写配置 → 重建匹配热集;返回归一化后的列表。"""
+        norm, seen = [], set()
+        for n in names or []:
+            v = os.path.basename(str(n).strip()).lower()
+            if v and v not in seen:
+                seen.add(v)
+                norm.append(v)
+        self.cfg["exclude_apps"] = norm
+        self._exclude_set = set(norm)
+        save_config(self.cfg)
+        return norm
+
     # ---- 剪贴板读取(在捕获线程调用) ----
     def submit_capture(self):
         """把一次捕获(读板 + 可能的大图 PNG 编码)提交到后台线程。
-        托盘线程调用后立即返回,不再被编码耗时拖住消息循环。"""
+        托盘线程调用后立即返回,不再被编码耗时拖住消息循环。
+        src = 来源应用 exe 名(已在托盘线程取好,这里只透传给捕获线程)。"""
         exec_ = getattr(self, "_capture_exec", None)
         if exec_ is None:                    # 兼容测试里 __new__ 构造的核心
-            self._capture_once()
+            self._capture_once(src)
             return
         try:
-            exec_.submit(self._capture_once)
+            exec_.submit(self._capture_once, src)
         except Exception:
             pass
 
-    def _capture_once(self):
+    def _capture_once(self, src=""):
         try:
             item = self.read_clipboard_now()
             if item:
-                self._post(("clip", item))
+                self._post(("clip", item + (src,)))
         except Exception:
             pass
 
@@ -1379,7 +1451,16 @@ class ClipboardCore:
             self._dirty = False
 
     def add_item(self, item):
-        kind, content = item
+        kind, content = item[0], item[1]
+        # 尾随元素按类型分流:dict = 富文本格式(html/rtf),str = 来源应用 exe 名
+        # (捕获链路 ("text", t, rich, src);旧调用/测试注入可为二元或三元)
+        rich, src = {}, ""
+        for extra in item[2:]:
+            if isinstance(extra, dict):
+                rich = {k: v for k, v in extra.items()
+                        if k in ("html", "rtf") and v}
+            elif extra:
+                src = str(extra).lower()
         ts = time.time()
         if kind == "text":
             # 敏感内容自动隔离:进私密区,不写入普通历史
@@ -1397,6 +1478,9 @@ class ClipboardCore:
                    "w": content.get("w", 0), "h": content.get("h", 0),
                    "hash": content.get("hash", ""), "ts": ts}
             key = ("img", content.get("hash", ""))
+        if src:
+            rec["src"] = src
+        rec.update(rich)               # 富文本格式随条目存储(回写时多格式并放)
 
         # 去重:已存在则移除旧的,放到最前(置顶的不动)
         for i, h in enumerate(self.history):

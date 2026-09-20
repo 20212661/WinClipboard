@@ -506,17 +506,20 @@ class Card(CardWidget):
                 size = cm._fmt_size(total)
             except Exception:
                 pass
-            meta = " · ".join(x for x in (ext, size, cm._rel_time(rec.get("ts", 0))) if x)
+            meta = " · ".join(x for x in (ext, size, rec.get("src", ""),
+                                          cm._rel_time(rec.get("ts", 0))) if x)
         elif kind == "link":
             title = cm.url_info(rec["content"])[0]
             sub = rec["content"].strip()
-            meta = "链接 · " + cm._rel_time(rec.get("ts", 0))
+            meta = " · ".join(x for x in ("链接", rec.get("src", ""),
+                                          cm._rel_time(rec.get("ts", 0))) if x)
         else:
             lines = [l for l in rec["content"].strip().splitlines() if l.strip()]
             title = lines[0] if lines else ""
             sub = "\n".join(lines[1:3]) if len(lines) > 1 else ""
             badge = self._badge_of(rec)
-            meta = (badge or "文本") + " · " + cm._rel_time(rec.get("ts", 0))
+            meta = " · ".join(x for x in (badge or "文本", rec.get("src", ""),
+                                          cm._rel_time(rec.get("ts", 0))) if x)
         self._set_text(self.title_lbl, elided(title, self.title_lbl.font(), 640))
         self._set_text(self.sub_lbl, elided(sub, self.sub_lbl.font(), 640) if sub else "")
         self.sub_lbl.setVisible(bool(sub))
@@ -570,7 +573,8 @@ class Card(CardWidget):
             self.act_btns.append(b)
 
     def _meta(self, kind):
-        return " · ".join(x for x in (kind, cm._rel_time(self.rec.get("ts", 0))) if x)
+        return " · ".join(x for x in (kind, self.rec.get("src", ""),
+                                      cm._rel_time(self.rec.get("ts", 0))) if x)
 
     def enterEvent(self, e):
         self._ensure_btns()
@@ -1262,6 +1266,83 @@ class PrivatePage(QWidget):
 # ============================================================
 # 设置页(全部使用 qfluentwidgets SettingCard 组件)
 # ============================================================
+
+class ExcludeAppsDialog(MessageBoxBase):
+    """按应用排除名单管理:添加(下拉里带历史出现过的来源应用,可直接输
+    exe 名) / 移除选中 / 保存。命中名单的程序复制内容不入史——与暂停
+    监听同一条隐私控制线,只是按应用长期生效。"""
+
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        ttl = StrongBodyLabel("按应用排除")
+        self.viewLayout.addWidget(ttl)
+        sub = CaptionLabel("名单内程序(如密码管理器、验证器)的复制不进入历史。"
+                           "名称为进程 exe 文件名,不区分大小写;下拉列出最近复制"
+                           "过的来源应用,选中即可一键排除。")
+        sub.setWordWrap(True)
+        sub.setStyleSheet("color: %s;" % TER)
+        self.viewLayout.addWidget(sub)
+
+        row = QHBoxLayout()
+        self.cmb = EditableComboBox()
+        seen, sug = set(), []
+        for h in app.history:                      # 历史出现过的来源应用(最近在前)
+            s = h.get("src")
+            if s and s not in seen:
+                seen.add(s)
+                sug.append(s)
+        for s in (app.cfg.get("exclude_apps") or []):
+            if s not in seen:
+                seen.add(s)
+                sug.append(s)
+        self.cmb.addItems(sug[:40])
+        self.cmb.setMinimumWidth(240)
+        b_add = PushButton("添加", self)
+        b_add.setIcon(FIF.ADD.icon())
+        b_add.clicked.connect(self._add_current)
+        row.addWidget(self.cmb, 1)
+        row.addWidget(b_add)
+        self.viewLayout.addLayout(row)
+
+        self.lst = QListWidget()
+        self.lst.setFont(font(12))
+        self.lst.setSelectionMode(QListWidget.MultiSelection)
+        for s in (app.cfg.get("exclude_apps") or []):
+            self.lst.addItem(s)
+        self.viewLayout.addWidget(self.lst)
+
+        b_rm = PushButton("移除选中", self)
+        b_rm.setIcon(FIF.DELETE.icon())
+        b_rm.clicked.connect(self._remove_selected)
+        self.viewLayout.addWidget(b_rm, 0, Qt.AlignLeft)
+
+        self.yesButton.setText("保存")
+        self.cancelButton.setText("取消")
+        self.widget.setFixedWidth(440)
+
+    def _add_current(self):
+        t = os.path.basename(self.cmb.currentText().strip()).lower()
+        if not t:
+            return
+        for i in range(self.lst.count()):          # 去重
+            if self.lst.item(i).text() == t:
+                return
+        self.lst.addItem(t)
+        self.cmb.setText("")                    # 加完清空输入,便于连续添加
+                          # (qfluentwidgets EditableComboBox 无 lineEdit(),任意文本走 setText)
+
+    def _remove_selected(self):
+        for it in self.lst.selectedItems():
+            self.lst.takeItem(self.lst.row(it))
+
+    def validate(self):
+        """点「保存」:整表交给核心归一化落盘(见 core.set_exclude_apps)。"""
+        names = [self.lst.item(i).text() for i in range(self.lst.count())]
+        self.app.core.set_exclude_apps(names)
+        return True
+
+
 class SettingsPage(QWidget):
     def __init__(self, app):
         super().__init__()
@@ -1275,6 +1356,17 @@ class SettingsPage(QWidget):
         cfg = app.cfg
 
         group = SettingCardGroup("剪贴板", self)
+        c_pause = SwitchSettingCard(
+            FIF.MUTE, "暂停监听", "暂停期间复制的内容不进入历史(临时隐私模式;"
+            "托盘菜单同款开关;重启后自动恢复监听,不落盘)",
+            parent=group)
+        c_pause.setChecked(bool(getattr(app.core, "monitor_paused", False)))
+        self.c_pause = c_pause
+
+        def on_pause(on):
+            app.toggle_monitor_pause(bool(on))
+        c_pause.checkedChanged.connect(on_pause)
+
         c_paste = SwitchSettingCard(
             FIF.PASTE, "自动粘贴", "选中条目回车后自动向当前窗口发送 Ctrl+V;"
             "关闭则只写入剪贴板、由你手动粘贴(默认关,更安全)",
@@ -1296,6 +1388,21 @@ class SettingsPage(QWidget):
             cm.save_config(cfg)
         c_guard.checkedChanged.connect(on_guard)
 
+        # 按应用排除:命中名单的程序(如密码管理器)复制不入史
+        c_excl = SettingCard(
+            FIF.FILTER, "按应用排除",
+            "名单内程序的复制不进入历史(如密码管理器/验证器);点「管理」增删名单",
+            parent=group)
+        self.lbl_excl = CaptionLabel("")
+        self.lbl_excl.setStyleSheet("color: %s; font-weight: 600;" % ACCENT)
+        b_excl = PushButton("管理", self)
+        b_excl.clicked.connect(self._edit_exclusions)
+        c_excl.hBoxLayout.addWidget(self.lbl_excl, 0, Qt.AlignRight)
+        c_excl.hBoxLayout.addSpacing(8)
+        c_excl.hBoxLayout.addWidget(b_excl, 0, Qt.AlignRight)
+        c_excl.hBoxLayout.addSpacing(16)
+        self._refresh_excl_label()
+
         c_max = SettingCard(FIF.TAG, "历史条数上限",
                             "超出后从最旧开始淘汰(置顶条目不计入)", parent=group)
         spin = SpinBox()
@@ -1311,8 +1418,10 @@ class SettingsPage(QWidget):
         c_max.hBoxLayout.addWidget(spin, 0, Qt.AlignRight)
         c_max.hBoxLayout.addSpacing(16)
 
+        group.addSettingCard(c_pause)
         group.addSettingCard(c_paste)
         group.addSettingCard(c_guard)
+        group.addSettingCard(c_excl)
         group.addSettingCard(c_max)
         lay.addWidget(group)
 
@@ -1438,6 +1547,19 @@ class SettingsPage(QWidget):
         group5.addSettingCard(c_repo)
         lay.addWidget(group5)
         lay.addStretch(1)
+
+
+    def sync_monitor_pause(self):
+        """托盘菜单切换暂停监听后,设置页开关同步显示(值未变不发信号,无回环)。"""
+        self.c_pause.setChecked(bool(getattr(self.app.core, "monitor_paused", False)))
+
+    def _refresh_excl_label(self):
+        n = len(self.app.cfg.get("exclude_apps") or [])
+        self.lbl_excl.setText("已排除 %d 个应用" % n if n else "未排除任何应用")
+
+    def _edit_exclusions(self):
+        ExcludeAppsDialog(self, self.app).exec()
+        self._refresh_excl_label()
 
 
 class CompressDialog(MessageBoxBase):
@@ -6013,6 +6135,8 @@ class WinClipboardApp(QObject):
                     self.win.toggle()
             elif act == "clear":
                 self.clear_all()
+            elif act == "pause":
+                self.toggle_monitor_pause()
             elif act == "private":
                 self.show_private()
             elif act == "autostart":
