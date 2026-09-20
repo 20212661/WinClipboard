@@ -555,6 +555,31 @@ check("Base64 卡片徽章", _bc is not None and "Base64 ·" in _bc.meta_lbl.tex
 check("徽章缓存生效", id(_jc.rec) in a._badge_cache
       and a._badge_cache[id(_jc.rec)] == "JWT")
 
+# ---- 敏感隔离 → 私密区「查看」链路(默认护栏下的 JWT Inspector 可达性) ----
+_jwt_priv = (_b64u('{"alg":"HS256","typ":"JWT"}') + "." +
+             _b64u('{"sub":"priv999","name":"私有"}') + "." +
+             "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c")
+_n_priv = len(a.private)
+a.core._post(("clip", ("text", _jwt_priv)))
+pump(0.6)
+check("JWT 默认隔离进私密区", len(a.private) == _n_priv + 1
+      and a.private[0].startswith("eyJ"), str(len(a.private)))
+check("隔离后私密列表已刷新", a.win.private_page.lst.count() == len(a.private))
+pp = a.win.private_page
+pp.lst.setCurrentRow(0)
+pump(0.1)
+_vw = pp.do_view()
+pump(0.3)
+check("私密区查看直达 JWT 解码视图", _vw is not None and _vw._mode == "jwt"
+      and _vw.stack.currentWidget() is _vw.info
+      and _vw._jwt_inf["payload"].get("sub") == "priv999",
+      "mode=%s sub=%s" % (_vw._mode if _vw else "-",
+                          _vw._jwt_inf["payload"].get("sub") if _vw else "-"))
+check("私密条目带 private 标记", _vw.rec.get("private") is True)
+if _vw is not None:
+    _vw.close()
+pump(0.2)
+
 # ---- 图片查看器:独立窗口 + 缩放/1:1/适应(小图不放大) ----
 img_rec = next((h for h in a.history if h.get("type") == "image"), None)
 check("存在图片条目(前置)", img_rec is not None)

@@ -1394,7 +1394,8 @@ class ClipboardCore:
             self.history.pop(i)
 
     def _add_private(self, content):
-        """敏感内容写入私密区(去重、上限 100 条)。"""
+        """敏感内容写入私密区(去重、上限 100 条);投递 private 信号供前端
+        提示(只带 is_jwt 布尔,不把原文再送一遍队列)。"""
         try:
             for i, s in enumerate(self.private):
                 if s == content:
@@ -1404,6 +1405,7 @@ class ClipboardCore:
             del self.private[100:]
             save_private(self.private)
             log("敏感内容已隔离(仅入私密区,不写入普通历史)")
+            self._post(("private", _sniff_jwt(content) is not None))
         except Exception:
             log("私密区写入失败:\n%s" % traceback.format_exc())
 

@@ -1161,13 +1161,17 @@ class PrivatePage(QWidget):
         row.setSpacing(8)
         b_copy = PrimaryPushButton("复制并粘贴", self)
         b_copy.setIcon(FIF.COPY.icon())
+        b_view = PushButton("查看", self)
+        b_view.setIcon(FIF.VIEW.icon())
+        b_view.setToolTip("独立窗口查看(JWT 自动解码;仅解码,不验签)")
         b_del = PushButton("删除", self)
         b_del.setIcon(FIF.DELETE.icon())
         b_clear = PushButton("清空", self)
         b_copy.clicked.connect(self.do_copy)
+        b_view.clicked.connect(self.do_view)
         b_del.clicked.connect(self.do_del)
         b_clear.clicked.connect(self.do_clear)
-        for b in (b_copy, b_del, b_clear):
+        for b in (b_copy, b_view, b_del, b_clear):
             row.addWidget(b)
         row.addStretch(1)
         v.addLayout(row)
@@ -1188,6 +1192,18 @@ class PrivatePage(QWidget):
         if not 0 <= i < len(self.app.private):
             return
         self.app.core.paste_text(self.app.private[i])
+
+    def do_view(self):
+        """私密条目 → 独立查看器(JWT 自动落解码视图;rec 带 private 标记,
+        查看器内「复制」只写剪贴板,不往此前聚焦的窗口回贴)。"""
+        item = self.lst.currentItem()
+        if not item:
+            return None
+        i = self.lst.row(item)
+        if not 0 <= i < len(self.app.private):
+            return None
+        return self.app.open_viewer({"type": "text", "content": self.app.private[i],
+                                     "private": True})
 
     def do_del(self):
         item = self.lst.currentItem()
@@ -3540,7 +3556,11 @@ class ViewerWindow(QWidget):
         self._set_zoom(self._ZOOMS[max(0, min(len(self._ZOOMS) - 1, i))])
 
     def _copy_all(self):
-        self.app.core.paste_text(self._raw)         # 始终复制原始记录
+        # 私密条目只写剪贴板:不排回贴队列,避免凭据被 Ctrl+V 进查看前聚焦的窗口
+        if self.rec.get("private"):
+            self.app.core.copy_text(self._raw)
+        else:
+            self.app.core.paste_text(self._raw)         # 始终复制原始记录
         self.btn_copy.setText("已复制")             # 按钮自身反馈,不弹提示层
         self.btn_copy.setIcon(FIF.ACCEPT.icon())
         self._copy_timer.start()
@@ -5861,6 +5881,15 @@ class WinClipboardApp(QObject):
                 self.core.add_item(item)
         elif kind == "change":
             self._on_history_change()
+        elif kind == "private":
+            # 敏感内容已隔离(捕获默认静默,用户无从得知去哪了——补一条轻提示)
+            jwt = bool(rest[0]) if rest else False
+            self.win.private_page.refresh()
+            InfoBar.success("已隔离敏感内容到私密区",
+                            "JWT 可在 私密区 →「查看」中解码(仅解码,不验签)"
+                            if jwt else "可在左侧「私密区」查看",
+                            parent=self.win, position=InfoBarPosition.TOP_RIGHT,
+                            duration=3000)
         elif kind == "hotkey":
             self._hotkey_ts = stamp()       # 首帧统计起点(paintEvent 收口)
             with PerfSpan("hotkey_to_show_window"):
