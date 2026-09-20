@@ -119,6 +119,7 @@ def init_palette(dark):
             "BADGE_BG": "rgba(0,0,0,0.05)", "NAV_BG": "rgba(0,0,0,0.05)",
             "THUMB_PH": "rgba(0,0,0,0.06)", "THUMB_BORDER": "rgba(0,0,0,0.06)",
             "GUTTER_BG": "#fafafa",
+            "DIFF_ADD": "#1f7a3f", "DIFF_DEL": "#c0392b", "DIFF_CTX": "rgba(0,0,0,0.45)",
         },
         True: {    # 深色
             "TEXT": "rgba(255,255,255,0.93)", "SEC": "rgba(255,255,255,0.65)",
@@ -129,6 +130,7 @@ def init_palette(dark):
             "BADGE_BG": "rgba(255,255,255,0.08)", "NAV_BG": "rgba(255,255,255,0.06)",
             "THUMB_PH": "rgba(255,255,255,0.08)", "THUMB_BORDER": "rgba(255,255,255,0.08)",
             "GUTTER_BG": "#303030",
+            "DIFF_ADD": "#5ec97f", "DIFF_DEL": "#ef8080", "DIFF_CTX": "rgba(255,255,255,0.45)",
         },
     }[bool(dark)]
     g.update(neutral)
@@ -538,6 +540,11 @@ class Card(CardWidget):
         super().leaveEvent(e)
 
     def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and (e.modifiers() & Qt.ControlModifier):
+            # Ctrl+点击 = 对比流:第一条设基准,第二条开对比窗口
+            self.app.select_card(self)
+            self.app.compare_pick(self.rec)
+            return
         if e.button() == Qt.LeftButton:
             self.app.select_card(self)
         elif e.button() == Qt.RightButton:
@@ -3538,6 +3545,174 @@ class ViewerWindow(QWidget):
         e.accept()
 
 
+class DiffWindow(QWidget):
+    """内容对比窗口:unified 文本 diff + JSON 语义 diff(键序无关)。
+
+    入口:历史面板 Ctrl+点击选基准 → Ctrl+点击另一条;或卡片菜单
+    「选为对比基准 / 与基准对比」。A=基准(旧),B=所选(新);JSON 双方
+    都合法时默认语义视图,否则回退文本 unified diff。"""
+
+    def __init__(self, app, rec_a, rec_b):
+        super().__init__(None)
+        self.app = app
+        self.ra, self.rb = rec_a, rec_b
+        self.ta = self._text_of(rec_a)
+        self.tb = self._text_of(rec_b)
+        self._json_ok, self._json_changes = cm.json_semantic_diff(self.ta, self.tb)
+        self._diff_lines = cm.unified_diff_lines(self.ta, self.tb)
+
+        self.setWindowTitle("对比 · WinClipboard")
+        self.setWindowIcon(app.icon)
+        self.setWindowFlags(Qt.Window)
+        self.setStyleSheet("QWidget { background: %s; }" % BG)
+        self.resize(920, 620)
+        self.setMinimumSize(660, 420)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        head = QVBoxLayout()
+        head.setContentsMargins(16, 14, 16, 6)
+        head.setSpacing(2)
+        head.addWidget(StrongBodyLabel("内容对比"))
+        self.lbl_meta = CaptionLabel("")
+        head.addWidget(self.lbl_meta)
+        root.addLayout(head)
+
+        bar = QHBoxLayout()
+        bar.setContentsMargins(16, 2, 16, 8)
+        bar.setSpacing(8)
+        self.seg = SegmentedWidget()
+        self.seg.currentItemChanged.connect(
+            lambda k: self._set_view(k) if k else None)
+        bar.addWidget(self.seg)
+        bar.addStretch(1)
+        self.btn_copy = PushButton("复制结果")
+        self.btn_copy.setIcon(FIF.COPY.icon())
+        self.btn_copy.clicked.connect(self._copy_result)
+        bar.addWidget(self.btn_copy)
+        root.addLayout(bar)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(16, 2, 16, 10)
+        card = SimpleCardWidget()
+        cv = QVBoxLayout(card)
+        cv.setContentsMargins(0, 0, 0, 0)
+        self.ed = _CodeEdit(card)
+        self.ed.setReadOnly(True)
+        self.ed.setStyleSheet(
+            "QPlainTextEdit { background: %s; border: none; color: %s; }"
+            % (CARD_BG, TEXT))
+        cv.addWidget(self.ed)
+        body.addWidget(card)
+        root.addLayout(body, 1)
+
+        self._mode = "sem" if self._json_ok else "text"
+        self._rebuild_modes()
+        self._render()
+
+    @staticmethod
+    def _text_of(rec):
+        c = rec.get("content")
+        if isinstance(c, list):
+            return "\n".join(str(p) for p in c)
+        return str(c or "")
+
+    def _stamp(self, rec):
+        ts = rec.get("ts")
+        if not ts:
+            return "?"
+        t = time.localtime(ts)
+        return time.strftime("%m-%d %H:%M", t)
+
+    def _rebuild_modes(self):
+        self.seg.blockSignals(True)
+        self.seg.clear()
+        if self._json_ok:
+            self.seg.addItem(routeKey="sem", text="语义")
+        self.seg.addItem(routeKey="text", text="文本")
+        self.seg.setCurrentItem(self._mode)
+        self.seg.blockSignals(False)
+
+    def _set_view(self, key):
+        if key and key != self._mode:
+            self._mode = key
+            self._render()
+
+    def _sem_lines(self):
+        ch = self._json_changes
+        if not ch:
+            return ["两个 JSON 语义相同(键顺序与空白无关)。"]
+        lines = []
+        for path, kind, old, new in ch:
+            if kind == "change":
+                lines.append("~ %s:  %s  →  %s" % (path, old, new))
+            elif kind == "add":
+                lines.append("+ %s:  %s" % (path, new))
+            elif kind == "del":
+                lines.append("- %s:  %s" % (path, old))
+            else:
+                lines.append(str(old))
+        return lines
+
+    def _render(self):
+        lines = self._sem_lines() if self._mode == "sem" else self._diff_lines
+        text = "\n".join(lines)
+        self.ed.setPlainText(text)
+        # 逐行配色:前缀 +/- 上色,@@ 与 ---/+++ 说明行置灰
+        fa = QTextCharFormat()
+        fa.setForeground(QColor(DIFF_ADD))
+        fd = QTextCharFormat()
+        fd.setForeground(QColor(DIFF_DEL))
+        fc = QTextCharFormat()
+        fc.setForeground(QColor(DIFF_CTX))
+        runs = []
+        pos = 0
+        for ln in lines:
+            n = len(ln) + 1
+            c = ln[:1]
+            if c == "+":
+                runs.append((pos, pos + n, fa))
+            elif c == "-":
+                runs.append((pos, pos + n, fd))
+            elif c in ("~", "@", "…") or ln.startswith(("---", "+++")):
+                runs.append((pos, pos + n, fc))
+            pos += n
+        apply_format_runs(self.ed.document(), runs)
+        n_add = sum(1 for l in self._diff_lines if l.startswith("+") and not l.startswith("+++"))
+        n_del = sum(1 for l in self._diff_lines if l.startswith("-") and not l.startswith("---"))
+        if self._mode == "sem":
+            detail = "语义差异 %d 处" % len(self._json_changes) \
+                if self._json_changes else "语义相同"
+        else:
+            detail = "+%d / -%d 行" % (n_add, n_del)
+        self.lbl_meta.setText(
+            "A(基准) %s · %s  ↔  B(所选) %s · %s · %s" % (
+                self._stamp(self.ra), cm._fmt_size(len(self.ta.encode("utf-8"))),
+                self._stamp(self.rb), cm._fmt_size(len(self.tb.encode("utf-8"))),
+                detail))
+
+    def _copy_result(self):
+        self.app.core.copy_text(self.ed.toPlainText())
+        self.btn_copy.setText("已复制")
+        QTimer.singleShot(1400, lambda: self.btn_copy.setText("复制结果"))
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:
+            self.close()
+            return
+        super().keyPressEvent(e)
+
+    def closeEvent(self, e):
+        try:
+            self.app._diffs.remove(self)
+        except (ValueError, AttributeError):
+            pass
+        self.deleteLater()
+        e.accept()
+
+
 class ImageViewerWindow(QWidget):
     """图片查看器(独立窗口,与文本查看器同族):适应窗口 / 1:1 / 滚轮缩放 /
     拖拽平移;双击在 适应↔原始 间切换。「编辑标注」在本窗口内切换到内嵌
@@ -5139,6 +5314,10 @@ CLIP_ACTIONS = [
                supported=lambda r: r["type"] == "image"),
     ClipAction("内置编辑器…", lambda r, h: h.open_editor(r),
                supported=lambda r: r["type"] == "image" and cm.find_sharex()),
+    ClipAction(lambda r, h: "与基准对比" if (h._diff_base is not None
+               and h._diff_base is not r) else "选为对比基准(Ctrl+点击)",
+               lambda r, h: h.compare_pick(r),
+               supported=lambda r: r["type"] != "image"),
     WorkflowSlot(),
     ClipAction(lambda r, h: "取消固定" if r.get("pinned") else "固定",
                lambda r, h: h.toggle_pin()),
@@ -5249,6 +5428,8 @@ class WinClipboardApp(QObject):
         self.panel = self.win.history_page     # 既有内部引用的稳定别名
         self._ai_runners = []
         self._viewers = []
+        self._diffs = []
+        self._diff_base = None               # 对比基准记录(Ctrl+点击选定)
 
         # 图钉画布(置顶悬浮多图板):恢复上次钉住的图片与布局;
         # 独立于主窗口存在,程序退出才销毁
@@ -5487,6 +5668,37 @@ class WinClipboardApp(QObject):
         else:
             InfoBar.error("打开失败", info[1][:120], parent=self.win,
                           position=InfoBarPosition.TOP_RIGHT)
+
+    def compare_pick(self, rec):
+        """对比流:第一条 Ctrl+点击设为基准,第二条开对比窗口;再点基准取消。"""
+        if rec.get("type") == "image":
+            InfoBar.warning("对比", "图片暂不支持对比(仅文本 / 文件列表)",
+                            parent=self.win, position=InfoBarPosition.TOP_RIGHT)
+            return
+        if self._diff_base is None:
+            self._diff_base = rec
+            InfoBar.success("对比基准已选", "Ctrl+点击另一条记录开始对比",
+                            parent=self.win, position=InfoBarPosition.TOP_RIGHT)
+        elif self._diff_base is rec:
+            self._diff_base = None
+            InfoBar.info("已取消对比基准", "", parent=self.win,
+                         position=InfoBarPosition.TOP_RIGHT, duration=1500)
+        else:
+            base, self._diff_base = self._diff_base, None
+            self.open_diff(base, rec)
+
+    def open_diff(self, rec_a, rec_b):
+        """打开内容对比窗口(A=基准/旧,B=所选/新)。"""
+        try:
+            w = DiffWindow(self, rec_a, rec_b)
+            _pop_to_front(w)
+            self._diffs.append(w)
+            return w
+        except Exception:
+            cm.log("打开对比窗口失败:\n%s" % traceback.format_exc())
+            MessageBox("WinClipboard", "对比窗口打开失败,详情见:\n%s" % cm.LOG_FILE,
+                       self.panel).exec()
+            return None
 
     def open_files(self, rec):
         """文件条目查看:系统默认程序打开(同资源管理器双击;上限 10 个防爆开)。

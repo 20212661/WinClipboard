@@ -487,6 +487,55 @@ for w in (vw, jv, bjv, mv, cvv, xv, fv, uv, jw, bv, iv2):
 pump(0.2)
 check("查看器关闭后清理", len(a._viewers) == 0)
 
+# ---- Diff 对比:Ctrl+点击选两条 + JSON 语义 diff + 文本 unified diff ----
+a.on_search("")                       # 清掉早前测试遗留的搜索过滤
+pump(0.2)
+a.core._post(("clip", ("text", '{"timeout": 30, "name": "A", "drop": 1}')))
+pump(0.4)
+a.core._post(("clip", ("text", '{\n  "name": "A",\n  "timeout": 60,\n  "retry": 3\n}')))
+pump(0.6)
+a.win.show()                          # 弹面板触发卡片重建
+pump(0.4)
+_cards = a._card_widgets
+_ra = next((c for c in _cards if '"timeout": 30' in str(c.rec.get("content"))), None)
+_rb = next((c for c in _cards if '"timeout": 60' in str(c.rec.get("content"))), None)
+check("存在两条 JSON 卡片(前置)", _ra is not None and _rb is not None)
+a.compare_pick(_ra.rec)
+check("第一条设为对比基准", a._diff_base is _ra.rec)
+a.compare_pick(_rb.rec)
+check("第二条开对比后基准清空", a._diff_base is None and len(a._diffs) == 1)
+dw = a._diffs[-1] if a._diffs else None
+check("对比窗口默认语义视图", dw is not None and dw._mode == "sem"
+      and "~ $.timeout:  30  →  60" in dw.ed.toPlainText(),
+      dw.ed.toPlainText()[:200] if dw else "")
+check("语义视图含增删", "+ $.retry" in dw.ed.toPlainText()
+      and "- $.drop" in dw.ed.toPlainText())
+dw._set_view("text")
+check("文本 unified diff 视图", any(l.startswith("-") and "30" in l
+      for l in dw.ed.toPlainText().splitlines())
+      and any(l.startswith("+") and "60" in l
+              for l in dw.ed.toPlainText().splitlines()))
+dw._set_view("sem")
+check("对比元信息", "语义差异 3 处" in dw.lbl_meta.text(), dw.lbl_meta.text())
+
+_okpair = wq.DiffWindow(a, {"type": "text", "content": '{"a":1,"b":2}',
+                            "ts": 1757040000},
+                        {"type": "text", "content": '{"b":2,\n"a":1}',
+                         "ts": 1757040060})
+check("键序不同语义相同", "语义相同" in _okpair.lbl_meta.text()
+      and "两个 JSON 语义相同" in _okpair.ed.toPlainText())
+_tpair = wq.DiffWindow(a, {"type": "text", "content": "alpha\nbeta"},
+                       {"type": "text", "content": "alpha\ngamma"})
+check("非 JSON 回退文本视图", _tpair._mode == "text"
+      and "-beta" in _tpair.ed.toPlainText()
+      and "+gamma" in _tpair.ed.toPlainText())
+if dw:
+    dw.close()
+_okpair.close()
+_tpair.close()
+pump(0.2)
+check("对比窗口关闭后清理", len(a._diffs) == 0)
+
 # ---- 图片查看器:独立窗口 + 缩放/1:1/适应(小图不放大) ----
 img_rec = next((h for h in a.history if h.get("type") == "image"), None)
 check("存在图片条目(前置)", img_rec is not None)

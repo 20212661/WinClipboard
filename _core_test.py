@@ -273,6 +273,35 @@ check("空文本 ContentInfo", cm.detect_content("").subtype == "plain")
 check("包装保持 lang 语义", cm.detect_lang('{"a":1}') == "json"
       and cm.detect_lang(_JWT) == "text")
 
+# ---- Diff:unified + JSON 语义对比 ----
+_dl = cm.unified_diff_lines("timeout: 30\n", "timeout: 60\nretry: 3\n")
+check("unified diff 有增删行", any(l.startswith("-") and "30" in l for l in _dl)
+      and any(l.startswith("+") and "60" in l for l in _dl)
+      and any(l.startswith("+") and "retry" in l for l in _dl), str(_dl))
+check("unified diff 截断护栏",
+      len(cm.unified_diff_lines("", "x\n" * 9999, cap=100)) <= 101)
+
+_ok, _ch = cm.json_semantic_diff('{"name":"A","timeout":30}',
+                                 '{"timeout": 30, "name": "A"}')
+check("JSON 键序不同=无差异", _ok and _ch == [], str(_ch))
+_ok, _ch = cm.json_semantic_diff('{"timeout":30,"name":"A"}',
+                                 '{"timeout":60,"name":"A","retry":3}')
+_paths = {(p, k) for p, k, *_ in _ch}
+check("JSON 语义找出改/增", ("$.timeout", "change") in _paths
+      and ("$.retry", "add") in _paths, str(_ch))
+check("JSON 值变更带新旧值",
+      next((o for p, k, o, n in _ch if p == "$.timeout"), None) == "30"
+      and next((n for p, k, o, n in _ch if p == "$.timeout"), None) == "60")
+_ok, _ch = cm.json_semantic_diff('{"a":[1,2,3]}', '{"a":[1,2]}')
+check("JSON 数组删项", ("$.a[2]", "del") in {(p, k) for p, k, *_ in _ch})
+_ok, _ch = cm.json_semantic_diff('{"ok":true}', '{"ok":1}')
+check("布尔与数字不同型", ("$.ok", "change") in {(p, k) for p, k, *_ in _ch})
+_ok, _ch = cm.json_semantic_diff('{"n":1}', '{"n":1.0}')
+check("int/float 数值等价", _ok and _ch == [], str(_ch))
+check("非法 JSON 返回不可比", cm.json_semantic_diff("{bad", "{}")[0] is False)
+check("格式化差异语义相等",
+      cm.json_semantic_diff('{"a":1,"b":[1, 2]}', '{\n  "a": 1,\n  "b": [1,2]\n}')[1] == [])
+
 print()
 print("RESULT:", "PASS" if not FAILS else "FAIL %d 项: %s" % (len(FAILS), ", ".join(FAILS)))
 sys.exit(1 if FAILS else 0)

@@ -1727,6 +1727,78 @@ def b64_decode_auto(text):
     return _sniff_base64((text or "").strip())
 
 
+# ---- Diff(内容对比;纯逻辑,查看器渲染) ----
+def unified_diff_lines(a, b, n=3, cap=4000):
+    """unified diff 行列表(difflib;含 @@ 头)。超 cap 行截断并标注,
+    防十万行日志把渲染层拖死。"""
+    import difflib
+    lines = list(difflib.unified_diff((a or "").splitlines(),
+                                      (b or "").splitlines(),
+                                      lineterm="", n=n))
+    if len(lines) > cap:
+        lines = lines[:cap] + ["…(差异行数过多,已截断)"]
+    return lines
+
+
+def json_semantic_diff(a, b, max_changes=200):
+    """JSON 语义对比:忽略键序/空白/缩进,只比语义。
+
+    返回 (ok, changes):ok=False = 任一方不是合法 JSON(调用方回退文本
+    diff);changes 为空列表 = 语义相等。每条 (path, kind, old, new),
+    kind ∈ change/add/del(add 时 old=None,del 时 new=None);
+    path 形如 $.users[0].name;值序列化截断到 120 字符。"""
+    try:
+        oa, ob = json.loads(a), json.loads(b)
+    except Exception:
+        return False, []
+    out = []
+
+    def fmt(v):
+        s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+        return s if len(s) <= 120 else s[:120] + "…"
+
+    def kp(key):
+        if isinstance(key, str) and re.match(r"\w+$", key):
+            return "." + key
+        return "[%s]" % json.dumps(key, ensure_ascii=False)
+
+    def num(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    def walk(x, y, path):
+        if len(out) > max_changes:
+            return
+        if isinstance(x, dict) and isinstance(y, dict):
+            for k in x:
+                if k not in y:
+                    out.append((path + kp(k), "del", fmt(x[k]), None))
+                else:
+                    walk(x[k], y[k], path + kp(k))
+            for k in y:
+                if k not in x:
+                    out.append((path + kp(k), "add", None, fmt(y[k])))
+        elif isinstance(x, list) and isinstance(y, list):
+            for i in range(max(len(x), len(y))):
+                if i >= len(x):
+                    out.append(("%s[%d]" % (path, i), "add", None, fmt(y[i])))
+                elif i >= len(y):
+                    out.append(("%s[%d]" % (path, i), "del", fmt(x[i]), None))
+                else:
+                    walk(x[i], y[i], "%s[%d]" % (path, i))
+        else:
+            # 布尔与数字不同型(bool 是 int 子类,单列);数值跨 int/float 视为同型
+            same = (x == y and isinstance(x, bool) == isinstance(y, bool)) \
+                or (num(x) and num(y) and x == y)
+            if not same:
+                out.append((path, "change", fmt(x), fmt(y)))
+
+    walk(oa, ob, "$")
+    if len(out) > max_changes:
+        out.append(("…", "note", "差异超过 %d 处,其余已省略" % max_changes,
+                    None))
+    return True, out
+
+
 # ============================================================
 # 文本语言识别 + JSON 重排(查看器用;pygments 为可选依赖,缺失时退化为纯文本)
 # ============================================================
