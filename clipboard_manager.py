@@ -1604,9 +1604,33 @@ class ClipboardCore:
             cache[key] = blob
         return blob
 
-    def filter_view(self, category, query=""):
-        """按分类 + 关键词过滤,返回命中条目在 history 中的索引列表。"""
+    @staticmethod
+    def time_scope_cutoff(scope):
+        """时间筛选档位 → 截止时间戳;"all"/未知档返回 0(不过滤)。
+        "today" 取本地当日 00:00。"""
+        if scope == "today":
+            lt = time.localtime()
+            return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                                0, 0, 0, 0, 0, -1))
+        secs = {"24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400}.get(scope)
+        return (time.time() - secs) if secs else 0.0
+
+    def source_apps(self):
+        """历史中出现过的来源应用 exe 名(最近在前,去重);供筛选下拉。"""
+        seen, out = set(), []
+        for h in self.history:
+            s = h.get("src")
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
+
+    def filter_view(self, category, query="", src="", since=0.0):
+        """按分类 + 关键词 + 来源应用 + 时间范围过滤,返回命中条目在
+        history 中的索引列表。src 精确匹配 exe 名(小写);since 为时间戳
+        截止点(0 = 不过滤)。"""
         q = (query or "").strip().casefold()
+        src_q = (src or "").strip().lower()
         view = []
         for i, h in enumerate(self.history):
             t = h["type"]
@@ -1617,6 +1641,10 @@ class ClipboardCore:
             if category == "files" and t != "files":
                 continue
             if category == "link" and not (t == "text" and url_info(h["content"])):
+                continue
+            if src_q and (h.get("src") or "").lower() != src_q:
+                continue
+            if since and float(h.get("ts", 0) or 0) < since:
                 continue
             if q:
                 if q not in self._search_text(h):

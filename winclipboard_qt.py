@@ -669,6 +669,26 @@ class HistoryPage(QWidget):
         self.nav.setCurrentItem("all")
         tools.addWidget(self.search, 1)
         tools.addWidget(self.nav, 0, Qt.AlignVCenter)
+        # 来源 / 时间筛选(数据来自条目的 src 与 ts;与分类、搜索叠加生效)
+        self.cmb_src = ComboBox(self)
+        self.cmb_src.setToolTip("按来源应用筛选(条目元信息行显示来源)")
+        self.cmb_src.setMinimumWidth(118)
+        self.cmb_src.setAccessibleName("按来源应用筛选")
+        self.cmb_src.addItem("全部来源", userData="")
+        self.cmb_src.currentIndexChanged.connect(
+            lambda i: self.app.set_src_filter(self.cmb_src.itemData(i) or ""))
+        self.cmb_time = ComboBox(self)
+        for _tl, _ts in (("全部时间", "all"), ("今天", "today"),
+                         ("近 24 小时", "24h"), ("近 7 天", "7d"),
+                         ("近 30 天", "30d")):
+            self.cmb_time.addItem(_tl, userData=_ts)
+        self.cmb_time.setMinimumWidth(104)
+        self.cmb_time.setToolTip("按复制时间筛选")
+        self.cmb_time.setAccessibleName("按时间范围筛选")
+        self.cmb_time.currentIndexChanged.connect(
+            lambda i: self.app.set_time_filter(self.cmb_time.itemData(i) or "all"))
+        tools.addWidget(self.cmb_src)
+        tools.addWidget(self.cmb_time)
         v.addLayout(tools)
 
         # ---- 卡片流 ----
@@ -817,7 +837,28 @@ class HistoryPage(QWidget):
         self.search.clear()
         self.nav.setCurrentItem("all")
         self.app.set_category("all")
+        self.app.set_src_filter("")
+        self.app.set_time_filter("all")
+        self.sync_src_combo()
+        self.cmb_time.setCurrentIndex(0)
+        self.app.refresh_view()
         self.search.setFocus()
+
+    def sync_src_combo(self):
+        """来源下拉与历史同步(最近在前,保留当前选择;被清空的来源回落到全部)。"""
+        cur = self.cmb_src.currentData() or ""
+        apps = self.app.core.source_apps()[:40]
+        if cur and cur not in apps:
+            self.app.src_filter = ""       # 来源已被清理,过滤条件同步失效
+            cur = ""
+        self.cmb_src.blockSignals(True)
+        self.cmb_src.clear()
+        self.cmb_src.addItem("全部来源", userData="")
+        for s in apps:
+            self.cmb_src.addItem(s, userData=s)
+        idx = self.cmb_src.findData(cur)
+        self.cmb_src.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cmb_src.blockSignals(False)
 
     def eventFilter(self, obj, e):
         if obj is self.search:
@@ -5630,6 +5671,8 @@ class WinClipboardApp(QObject):
         self.qapp = qapp
         self.category = "all"
         self.query = ""
+        self.src_filter = ""            # 来源应用筛选(exe 名;空 = 全部)
+        self.time_filter = "all"        # 时间筛选档位(all/today/24h/7d/30d)
         self.selected = None
         self._view = []
         self._card_widgets = []
@@ -5712,11 +5755,14 @@ class WinClipboardApp(QObject):
         t_all = stamp()
         self._view_dirty = False
         with PerfSpan("history_filter"):
-            view = self.core.filter_view(self.category, self.query)
+            view = self.core.filter_view(
+                self.category, self.query, src=self.src_filter,
+                since=cm.ClipboardCore.time_scope_cutoff(self.time_filter))
         self._view = view
         with PerfSpan("history_cards_render"):
             self.panel.set_view(view, self.history)
             self.panel._resize_to_content()   # 卡片数/展开态变化后面板高度自适应
+            self.panel.sync_src_combo()       # 来源下拉跟历史走(保留当前选择)
         total = len(self.history)
         if len(view) == total:
             self.panel.lbl_count.setText("%d 个项目" % total)
@@ -5747,6 +5793,18 @@ class WinClipboardApp(QObject):
         if cat == self.category:
             return
         self.category = cat
+        self.refresh_view()
+
+    def set_src_filter(self, src):
+        if src == self.src_filter:
+            return
+        self.src_filter = src
+        self.refresh_view()
+
+    def set_time_filter(self, scope):
+        if scope == self.time_filter:
+            return
+        self.time_filter = scope
         self.refresh_view()
 
     def move_sel(self, delta):
