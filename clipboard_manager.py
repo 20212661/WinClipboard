@@ -31,6 +31,7 @@ import subprocess
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from collections import namedtuple
 from ctypes import wintypes
 from pathlib import Path
 
@@ -1701,50 +1702,154 @@ _LANG_ALIAS = {
 }
 
 
-def detect_lang(text):
-    """猜测文本语言,返回 VIEW_LANGS 中的 key(识别不出 → 'text')。
+ContentInfo = namedtuple(
+    "ContentInfo", "category subtype lang confidence metadata")
+# (category, subtype, lang, confidence, metadata) —— 见 detect_content 文档
 
-    优先级:严格 JSON(查看器要为它提供 美化/紧凑)> 前缀强特征(XML/HTML)
-    > Markdown 围栏/标题 > pygments guess_lexer(截断采样控时)。
+
+def _sniff_jwt(t):
+    """JWT 嗅探:恰好三段 base64url(兼容混用标准字母表的 + /),头段可解出
+    含 alg 的 JSON dict。返回 (header, payload) 或 None。只解码不验签——
+    剪贴板场景拿不到密钥,验签语义由查看器 UI 明示。"""
+    s = t.strip()
+    parts = s.split(".")
+    if len(parts) != 3 or len(s) < 24:
+        return None
+    for seg in parts:
+        if not seg or not re.match(r"\A[A-Za-z0-9_+/-]+\Z", seg):
+            return None
+
+    def _dec(seg):
+        try:
+            return json.loads(
+                base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+                .decode("utf-8"))
+        except Exception:
+            return None
+
+    head = _dec(parts[0])
+    if not isinstance(head, dict) or "alg" not in head:
+        return None
+    pay = _dec(parts[1])
+    if not isinstance(pay, dict):
+        return None
+    return head, pay
+
+
+_B64_STD_RE = re.compile(r"\A[A-Za-z0-9+/]+={0,2}\Z")
+_B64URL_RE = re.compile(r"\A[A-Za-z0-9_-]+\Z")
+_HEX_RE = re.compile(r"\A[0-9a-fA-F]+\Z")
+_DATAURI_RE = re.compile(r"\Adata:[^;,]*;base64,", re.I)
+# 解码上限:32MB 编码文本(≈24MB 原始);再大不做嗅探(宁可漏判不卡 UI)
+_B64_SNIFF_CAP = 32 * 1024 * 1024
+
+
+def _sniff_base64(t):
+    """Base64 嗅探:返回 (kind, 解码字节) 或 None;kind ∈ text/image。
+
+    护栏:去空白/data:前缀后 ≥40 字符;纯十六进制(哈希/长数字)排除;
+    只认「解码出合法 UTF-8 文本(无 NUL)或图片魔数」两种,其余按非
+    Base64 处理——许可证密钥/无空格长单词解码通常是乱码二进制,宁可漏判。"""
+    s = t.strip()
+    m = _DATAURI_RE.match(s)
+    if m:
+        s = s[m.end():]
+    s = "".join(s.split())
+    if len(s) < 40 or len(s) > _B64_SNIFF_CAP or _HEX_RE.match(s):
+        return None
+    if "-" in s or "_" in s:
+        if not _B64URL_RE.match(s):
+            return None
+        try:
+            raw = base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+        except Exception:
+            return None
+    else:
+        if not _B64_STD_RE.match(s):
+            return None
+        try:
+            raw = base64.b64decode(s + "=" * (-len(s) % 4), validate=True)
+        except Exception:
+            return None
+    if raw[:4] in (b"\x89PNG", b"GIF8") or raw[:3] == b"\xff\xd8\xff" or \
+            (raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"):
+        return "image", raw
+    if b"\x00" in raw:
+        return None
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return "text", raw
+
+
+def detect_content(text):
+    """内容识别管线(Content Intelligence 核心)。
+
+    返回 ContentInfo(category, subtype, lang, confidence, metadata):
+      category      text / code / structured_text / markup / url / encoded
+      subtype       具体形态:json / csv / jwt / base64 / web_url / python …
+      lang          兼容旧 detect_lang 的语言 key(VIEW_LANGS 成员)
+      confidence    1.0 解析验证 / ≥0.99 强形态 / 0.9 特征正则 /
+                    0.8 代码特征 / 0.6 pygments 猜测;不足 0.9 的智能视图
+                    不自动启用(查看器回退原文,防「聪明过头」)
+      metadata      识别过程免费得到的附加信息(csv: {"delim": …} 等)
+
+    优先级:严格 JSON > URL(单行) > JWT > Base64 > XML/HTML 前缀 >
+    Markdown 围栏/标题 > CSV 嗅探 > 廉价代码强特征 > pygments 采样猜测。
     """
     t = (text or "").lstrip()
     if not t:
-        return "text"
+        return ContentInfo("text", "plain", "text", 1.0, {})
     try:
         json.loads(t)
-        return "json"
+        return ContentInfo("structured_text", "json", "json", 1.0,
+                           {"valid": True})
     except Exception:
         pass
+    stripped = text.strip()
+    if "\n" not in stripped and _URL_RE.match(stripped):
+        return ContentInfo("url", "web_url", "text", 0.99, {})
+    jwt = _sniff_jwt(t)
+    if jwt is not None:
+        return ContentInfo("encoded", "jwt", "text", 0.99, {})
+    b64 = _sniff_base64(t)
+    if b64 is not None:
+        kind, raw = b64
+        return ContentInfo("encoded", "base64", "text", 0.95,
+                           {"b64_kind": kind, "b64_len": len(raw)})
     head = t[:4000]
     if head[:5].lower() == "<?xml":
-        return "xml"
+        return ContentInfo("structured_text", "xml", "xml", 1.0, {})
     if re.match(r"<(!doctype|html)\b", head, re.I):
-        return "html"
+        return ContentInfo("markup", "html", "html", 0.9, {})
     if "\n```" in t or t.startswith("```") or re.search(r"(?m)^#{1,6} \S", head):
-        return "markdown"
-    if csv_sniff(text):
-        return "csv"
+        return ContentInfo("markup", "markdown", "markdown", 0.9, {})
+    delim = csv_sniff(text)
+    if delim:
+        return ContentInfo("structured_text", "csv", "csv", 0.93,
+                           {"delim": delim})
     # 廉价强特征:剪贴板里多是短片段,pygments 对短文本置信度低,先用正则兜住
     if t[:2] == "#!":
         if "python" in t[:80]:
-            return "python"
+            return ContentInfo("code", "python", "python", 0.8, {})
         if re.search(r"\b(bash|zsh|sh|dash)\b", t[:80]):
-            return "shell"
+            return ContentInfo("code", "shell", "shell", 0.8, {})
     if re.search(r"(?m)^(import\s+[\w.]+|from\s+[\w.]+\s+import\b)", head) and \
             not re.search(r"(?m)^import\s+[\w{}\s,]+\s+from\s+['\"]", head):
-        return "python"
+        return ContentInfo("code", "python", "python", 0.8, {})
     if re.search(r"(?mi)\b(const|let|var)\s+[\w$]+\s*=|function\s*[\w$]*\s*\(|=>"
                  r"|console\.(log|warn|error)\b|document\.getElement", head):
-        return "javascript"
+        return ContentInfo("code", "javascript", "javascript", 0.8, {})
     if re.search(r"(?m)^[\w\s.,#>-]+\{[^{}]*[\w-]+\s*:[^{}]*;[^{}]*\}", head):
-        return "css"
+        return ContentInfo("code", "css", "css", 0.8, {})
     if re.search(r"(?mi)\b(select\s+.+\s+from\b|insert\s+into\b|update\s+\w+\s+set\b"
                  r"|delete\s+from\b|create\s+(table|database|index)\b|alter\s+table\b"
                  r"|with\s+\w+\s+as\s*\()", head):
-        return "sql"
+        return ContentInfo("code", "sql", "sql", 0.8, {})
     if re.search(r"(?m)^\s*(def\s+\w+\s*\(|class\s+\w+[:(]|@\w+(\.[\w.]+)?\s*$)",
                  head):
-        return "python"
+        return ContentInfo("code", "python", "python", 0.8, {})
     if _pg_guess_lexer is not None:
         try:
             # 采样 2000 字符:guess_lexer 对 20KB 输入需 ~36ms(预览面板每次
@@ -1752,10 +1857,16 @@ def detect_lang(text):
             lex = _pg_guess_lexer(t[:2000])
             for a in getattr(lex, "aliases", None) or []:
                 if a in _LANG_ALIAS:
-                    return _LANG_ALIAS[a]
+                    return ContentInfo("code", _LANG_ALIAS[a],
+                                       _LANG_ALIAS[a], 0.6, {})
         except Exception:
             pass
-    return "text"
+    return ContentInfo("text", "plain", "text", 1.0, {})
+
+
+def detect_lang(text):
+    """旧接口:语言 key(detect_content 的薄包装;预览面板/历史缓存沿用)。"""
+    return detect_content(text).lang
 
 
 def json_reformat(text, compact=False):

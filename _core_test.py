@@ -214,6 +214,65 @@ check("JSON 重排保留中文", cm.json_reformat('{"名":"值"}', compact=True)
 check("非法 JSON 返回 None", cm.json_reformat("not json") is None)
 check("空文本识别为纯文本", cm.detect_lang("") == "text")
 
+# ---- ContentInfo 检测管线(detect_content)----
+import base64 as _b64
+import json as _json2
+
+
+def _b64e(s):
+    return _b64.b64encode(s.encode("utf-8")).decode("ascii")
+
+
+def _b64url(s):
+    return _b64.urlsafe_b64encode(s.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+_JWT = (_b64url('{"alg":"HS256","typ":"JWT"}') + "." +
+        _b64url('{"sub":"1234567890","name":"张三"}') + "." +
+        "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c")
+_ci = cm.detect_content(_JWT)
+check("JWT 识别", (_ci.category, _ci.subtype) == ("encoded", "jwt"),
+      "got=%s/%s" % (_ci.category, _ci.subtype))
+check("JWT 不误报语言", _ci.lang == "text")
+_h, _p = cm._sniff_jwt(_JWT)
+check("JWT 解出头与载荷", _h.get("alg") == "HS256" and _p.get("name") == "张三")
+check("两段式不是 JWT", cm.detect_content("abc.def").subtype != "jwt")
+check("URL 不是 JWT", cm._sniff_jwt("https://a.example.com/x.y.z") is None)
+
+_ci = cm.detect_content("https://example.com/api/users?page=2&token=abc")
+check("URL 识别", (_ci.category, _ci.subtype) == ("url", "web_url"))
+check("多行文本不算 URL", cm.detect_content("看这个\nhttps://a.com/b").category != "url")
+
+_ci = cm.detect_content(_b64e("一段需要足够长才能够被嗅探出来的中文文本内容,补足四十个字符以上"))
+check("Base64 文本识别", (_ci.category, _ci.subtype, _ci.metadata.get("b64_kind"))
+      == ("encoded", "base64", "text"))
+_png = bytes.fromhex("89504e470d0a1a0a0000000d4948445200000001000000010806000000")
+_ci = cm.detect_content(_b64e("x" * 0) + _b64.b64encode(_png * 4).decode())
+check("Base64 图片魔数识别", _ci.subtype == "base64"
+      and _ci.metadata.get("b64_kind") == "image")
+check("data:URI 前缀可识别", cm.detect_content(
+    "data:image/png;base64," + _b64.b64encode(_png * 4).decode()).subtype == "base64")
+check("短词不是 Base64", cm.detect_content("hello").category != "encoded")
+check("十六进制哈希不是 Base64", cm.detect_content("a" * 64).category != "encoded")
+check("无空格长单词不是 Base64",
+      cm.detect_content("thequickbrownfoxjumpsoverthelazydogandrunaway").category
+      != "encoded")
+check("许可证密钥样式不是 Base64",
+      cm.detect_content("AB3JK-9LK2M-7QQW1-PLZ4C-9D2EFGHI").category != "encoded")
+
+_ci = cm.detect_content('{"k": [1,2]}')
+check("JSON ContentInfo", (_ci.category, _ci.subtype, _ci.confidence)
+      == ("structured_text", "json", 1.0))
+_ci = cm.detect_content("a,b\nc,d\ne,f\ng,h")
+check("CSV metadata 带分隔符", _ci.subtype == "csv" and _ci.metadata.get("delim") == ",")
+_ci = cm.detect_content("def f():\n    pass")
+check("代码走 code 类", _ci.category == "code" and _ci.confidence == 0.8)
+_ci = cm.detect_content("普通中文文本,没有任何结构。")
+check("纯文本", (_ci.category, _ci.subtype, _ci.confidence) == ("text", "plain", 1.0))
+check("空文本 ContentInfo", cm.detect_content("").subtype == "plain")
+check("包装保持 lang 语义", cm.detect_lang('{"a":1}') == "json"
+      and cm.detect_lang(_JWT) == "text")
+
 print()
 print("RESULT:", "PASS" if not FAILS else "FAIL %d 项: %s" % (len(FAILS), ", ".join(FAILS)))
 sys.exit(1 if FAILS else 0)
