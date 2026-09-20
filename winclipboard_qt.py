@@ -6172,7 +6172,7 @@ class WinClipboardApp(QObject):
         self._view_dirty = False
         self._multi_recs = set()        # 视图重建,段选失效
         with PerfSpan("history_filter"):
-            view = self.core.filter_view(
+            view = self.core.query_view(
                 self.category, self.query, src=self.src_filter,
                 since=cm.ClipboardCore.time_scope_cutoff(self.time_filter))
         self._view = view

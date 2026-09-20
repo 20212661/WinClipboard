@@ -305,8 +305,9 @@ check("图片默认不导出", core3.export_payload()["items"] == [])
 _pl4 = core3.export_payload(include_images=True)
 core4 = make_core()
 _a4, _ = core4.import_payload(_pl4)
-_p2 = _P(cm.IMAGE_DIR) / os.path.basename(core4.history[0]["content"])
-check("内嵌图片导入落盘", _a4 == 1 and _p2.exists())
+_p2 = _P(core4.history[0]["content"])          # 实际落盘路径(分片 blob 布局)
+check("内嵌图片导入落盘", _a4 == 1 and _p2.exists()
+      and "data" in _p2.parts and "blobs" in _p2.parts, str(_p2))
 _px.unlink()
 _p2.unlink()
 
@@ -598,9 +599,16 @@ _r0 = loaded[2]
 check("库往返:字段保真(src/rich/pinned/ts)",
       _r0.get("src") == "a.exe" and _r0.get("html") == "<b>x</b>"
       and _r0["pinned"] is True and _r0["ts"] == 1.0)
-check("FTS5 英文命中", len(st.search("sqlite")) == 1)
-check("中文 LIKE 回退命中", len(st.search("剪贴板")) == 1)
-check("搜索无命中", st.search("zzznotexist") == [])
+check("子串搜索英文命中", len(st.query(q="sqlite")) == 1)
+check("子串搜索部分词命中(LIKE 语义,FTS 词级做不到)",
+      len(st.query(q="sqlit")) == 1)
+check("中文子串命中", len(st.query(q="剪贴板")) == 1)
+check("搜索无命中", st.query(q="zzznotexist") == [])
+import sqlite3 as _sq3
+with _sq3.connect(_sdb) as _cx0:
+    _fts_n = _cx0.execute("SELECT COUNT(*) AS c FROM items_fts "
+                          "WHERE items_fts MATCH ?", ('"sqlite"',)).fetchone()[0]
+check("FTS5 表由触发器同步维护", _fts_n == 1)
 check("query 类型过滤", len(st.query(content_type="text")) == 2)
 check("query 来源过滤", len(st.query(source_app="a.exe")) == 1)
 check("query 时间过滤", len(st.query(since=2.5)) == 1)
@@ -647,6 +655,52 @@ with __import__("sqlite3").connect(os.path.join(_sdir, "core.db")) as _cx:
                        "WHERE text_content = ?", (_b64t,)).fetchone()
 check("子类型列写入(Base64)", _sub and _sub[0] == "Base64", str(_sub))
 st.close(); st2.close(); _reopen.close(); core.store.close()
+
+# query_view(SQL 路径)与 filter_view(内存路径)全组合等价
+core5 = make_core()
+core5.store = _st.ClipboardStore(os.path.join(_sdir, "eq.db"))
+core5.add_item(("text", "hello sqlite world", {}, "notepad.exe"))
+core5.add_item(("text", "你好剪贴板数据库", {}, ""))
+core5.add_item(("text", "https://example.com/a?x=1", {}, "chrome.exe"))
+core5.add_item(("files", [__file__], {}, ""))
+core5.add_item(("image", {"path": os.path.join(_sdir, "x.png"),
+                          "w": 40, "h": 30, "hash": "hash9"}, ""))
+_eq_ok = True
+for _cat in ("all", "text", "link", "image", "files"):
+    for _qq in ("", "sqlite", "sqlit", "剪贴", "example", "zzz"):
+        for _src in ("", "notepad.exe"):
+            if core5.query_view(_cat, _qq, src=_src) != \
+                    core5.filter_view(_cat, _qq, src=_src):
+                _eq_ok = False
+check("query_view 与 filter_view 全组合等价(60 组合)", _eq_ok)
+core5.store.close()
+
+# v1 库(无 search_text)打开即自动升级:补列 + 回填 + 重建 FTS
+_v1 = os.path.join(_sdir, "v1.db")
+_cx = _sq3.connect(_v1)
+_cx.executescript("""
+CREATE TABLE clipboard_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, seq INTEGER NOT NULL,
+    created_at REAL NOT NULL, updated_at REAL NOT NULL,
+    content_type TEXT NOT NULL, content_subtype TEXT, content_hash TEXT,
+    source_app TEXT, source_window TEXT, text_content TEXT,
+    files_json TEXT, rich_json TEXT, blob_hash TEXT, blob_mime TEXT,
+    blob_width INTEGER, blob_height INTEGER, blob_size INTEGER,
+    is_pinned INTEGER NOT NULL DEFAULT 0, metadata_json TEXT);
+""")
+_cx.execute("INSERT INTO clipboard_items (seq, created_at, updated_at, "
+            "content_type, text_content, is_pinned) VALUES (?,?,?,?,?,?)",
+            (1, 1.0, 1.0, "text", "old row hello v1", 0))
+_cx.commit()
+_cx.close()
+stv = _st.ClipboardStore(_v1)
+_v1_ids = stv.query(q="hello")
+check("v1 库自动升级+回填(search_text 命中)", _v1_ids == [1], str(_v1_ids))
+with _sq3.connect(_v1) as _cx1:
+    _fts_v1 = _cx1.execute("SELECT COUNT(*) AS c FROM items_fts "
+                           "WHERE items_fts MATCH ?", ('"hello"',)).fetchone()[0]
+check("v1 升级后 FTS 重建可查", _fts_v1 == 1)
+stv.close()
 
 print()
 print("RESULT:", "PASS" if not FAILS else "FAIL %d 项: %s" % (len(FAILS), ", ".join(FAILS)))

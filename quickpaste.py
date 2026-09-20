@@ -301,7 +301,9 @@ class QuickPasteWindow(QWidget):
     def refresh(self):
         from PySide6.QtGui import QStandardItem
         q = self.search.text().strip()
-        self._view = self.app.core.filter_view(self._cat, q)[:LIST_CAP]
+        # SQL 优先(库模式走索引过滤),无库自动回退内存 filter_view
+        view = self.app.core.query_view(self._cat, q, limit=LIST_CAP)
+        self._view = view[:LIST_CAP]
         self.model.clear()
         for hi in self._view:
             it = QStandardItem()

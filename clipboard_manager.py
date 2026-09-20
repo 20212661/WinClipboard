@@ -31,7 +31,7 @@ import subprocess
 import threading
 import traceback
 import pipeline                      # 捕获管线(纯阶段;cm → pipeline 单向)
-from store import ClipboardStore     # SQLite 历史存储(事实存储/写透)
+from store import ClipboardStore, blob_full_path   # SQLite 历史存储 + blob 分片路径
 from concurrent.futures import ThreadPoolExecutor
 from collections import namedtuple
 from ctypes import wintypes
@@ -1540,8 +1540,11 @@ class ClipboardCore:
         try:
             img = Image.open(io.BytesIO(_dib_to_bmp_bytes(dib)))
             hsh = pixel_sha256(img)
-            path = os.path.join(IMAGE_DIR, "img_%s.png" % hsh)
+            # 新捕获走分片 blob 布局(data/blobs/<2位>/<哈希>);旧
+            # images/img_*.png 由绝对路径继续引用,互不冲突
+            path = blob_full_path(APP_DIR, hsh)
             if not os.path.exists(path):
+                os.makedirs(os.path.dirname(path), exist_ok=True)
                 # 去重命中时完全跳过 PNG 编码(4K 图编码秒级,像素哈希只要百毫秒级)
                 with PerfSpan("png_encode"):
                     buf = io.BytesIO()
@@ -1691,6 +1694,38 @@ class ClipboardCore:
                             pass
             if removed:
                 log("孤儿图片清理:删除 %d 个未引用文件" % removed)
+        except Exception:
+            pass
+
+        # 分片 blob 目录(data/blobs/<2位>/<哈希>)同样清理
+        try:
+            refs = {h.get("content") for h in self.history
+                    if h.get("type") == "image"}
+            now = time.time()
+            removed = 0
+            blob_root = os.path.join(APP_DIR, "data", "blobs")
+            if os.path.isdir(blob_root):
+                for d in os.scandir(blob_root):
+                    if not d.is_dir():
+                        continue
+                    for e in os.scandir(d.path):
+                        if not e.is_file():
+                            continue
+                        fp = os.path.join(d.path, e.name)
+                        if fp in refs:
+                            continue
+                        try:
+                            if now - e.stat().st_mtime < min_age:
+                                continue
+                        except OSError:
+                            continue
+                        try:
+                            os.remove(fp)
+                            removed += 1
+                        except Exception:
+                            pass
+            if removed:
+                log("孤儿 blob 清理:删除 %d 个未引用文件" % removed)
         except Exception:
             pass
 
@@ -1885,8 +1920,7 @@ class ClipboardCore:
 
     def filter_view(self, category, query="", src="", since=0.0):
         """按分类 + 关键词 + 来源应用 + 时间范围过滤,返回命中条目在
-        history 中的索引列表。src 精确匹配 exe 名(小写);since 为时间戳
-        截止点(0 = 不过滤)。"""
+        history 中的索引列表(内存路径;SQL 路径见 query_view)。"""
         q = (query or "").strip().casefold()
         src_q = (src or "").strip().lower()
         view = []
@@ -1909,6 +1943,34 @@ class ClipboardCore:
                     continue
             view.append(i)
         return view
+
+    def query_view(self, category, query="", src="", since=0.0, limit=400):
+        """视图过滤(SQL 优先):组合过滤在库上执行,返回命中条目在
+        self.history 中的下标列表——与 filter_view 同序同义(UI 索引语义
+        不变)。无库(测试/加密模式)或存在未入库条目(外部直插)时,
+        整体回退内存 filter_view,行为完全一致。"""
+        if getattr(self, "store", None) is None:
+            return self.filter_view(category, query, src=src, since=since)
+        if any(h.get("_db") is None for h in self.history):
+            return self.filter_view(category, query, src=src, since=since)
+        q = (query or "").strip()
+        src_q = (src or "").strip().lower()
+        ctype = {"text": "text", "image": "image",
+                 "files": "files"}.get(category)
+        recs, _total = self.store.query_page(
+            content_type=ctype, source_app=src_q or None,
+            since=since, q=q or None, limit=max(int(limit), 1))
+        if category == "link":
+            recs = [r for r in recs
+                    if r.get("type") == "text" and url_info(r["content"])]
+        pos = {h["_db"]: i for i, h in enumerate(self.history)}
+        out, seen = [], set()
+        for r in recs:
+            i = pos.get(r.get("_db"))
+            if i is not None and i not in seen:
+                seen.add(i)
+                out.append(i)
+        return out
 
     # ---- 回写 / 粘贴 ----
     def copy_record(self, rec):
@@ -2122,8 +2184,9 @@ class ClipboardCore:
                     raw = base64.b64decode(it["image_b64"])
                     img = Image.open(io.BytesIO(raw))
                     hsh = pixel_sha256(img)
-                    path = os.path.join(IMAGE_DIR, "img_%s.png" % hsh)
+                    path = blob_full_path(APP_DIR, hsh)   # 分片 blob 布局
                     if not os.path.exists(path):
+                        os.makedirs(os.path.dirname(path), exist_ok=True)
                         tmp = path + ".tmp"
                         Path(tmp).write_bytes(raw)
                         os.replace(tmp, path)

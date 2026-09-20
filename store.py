@@ -2,24 +2,22 @@
 """SQLite 历史存储(clipboard.db)—— 剪贴板条目的事实存储。
 
 设计:
-- 表 clipboard_items:用户可见字段(created_at/content_type/content_subtype/
-  content_hash/source_app/text_content/blob_*/is_pinned/…)+ seq 显式顺序列
-  (列表语义 = 最近在前;dedup 提升与撤销恢复都取 max(seq)+1)。
-- 全文搜索 FTS5(unicode61);CJK 无分词,查询含非 ASCII 时自动退回
-  LIKE '%q%'(参数绑定),两类路径都只返回 id 列表,由上层回内存对象。
-- 图片二进制不入库:blob_hash 等元数据列指向磁盘上按内容寻址的
-  images/img_<hash>.png(与现行完全一致;分片目录布局留待后续阶段)。
-- 所有 SQL 一律参数绑定,禁止拼接。
-- 写入策略:单写者(GUI 线程)逐操作写透,WAL 模式;
-  load_all() 只在启动/测试重载时调用。
+- 表 clipboard_items + seq 显式顺序列(列表语义 = 最近在前;dedup 提升
+  与撤销恢复都取 max(seq)+1)。
+- 统一检索串 search_text 列(文本=内容 / 文件=路径 / 图片=尺寸行),
+  FTS5(unicode61)对其建全文索引;子串搜索(UI 语义)走 LIKE 参数绑定。
+- 图片二进制不入库:blob_hash 等元数据列指向磁盘上按内容寻址的文件
+  (images/img_<hash>.png 与 data/blobs/<2位>/<hash> 两种布局并存,
+  记录用绝对路径引用,互不冲突)。
+- 安全约定:所有 SQL 为调用点内联字面量,动态值一律参数绑定;
+  组合过滤用固定语句 + 空参数(? IS NULL OR col = ?),不拼接 SQL 文本。
+- 写入策略:单写者(GUI 线程)逐操作写透,WAL 模式。
 
-兼容:is_sensitive 条目不入本表(私密区 private.json + DPAPI 独立存储);
-encrypt_history=True 时核心直接禁用本存储、继续走 JSON(库文件无法整体
-DPAPI 加密,不做静默降级)。
+兼容:敏感条目不入本表(私密区 private.json + DPAPI 独立存储);
+encrypt_history=True 时核心不启用本存储写透,继续走 JSON。
 """
 import json
 import os
-import re
 import sqlite3
 import threading
 import time
@@ -30,14 +28,15 @@ CREATE TABLE IF NOT EXISTS clipboard_items (
     seq           INTEGER NOT NULL,
     created_at    REAL    NOT NULL,
     updated_at    REAL    NOT NULL,
-    content_type  TEXT    NOT NULL,        -- text | files | image
-    content_subtype TEXT,                  -- JWT / Base64 / …(可空,探测缓存)
-    content_hash  TEXT,                    -- 去重键(文本=sha1,图片=像素哈希,文件=组合)
+    content_type  TEXT    NOT NULL,
+    content_subtype TEXT,
+    content_hash  TEXT,
     source_app    TEXT,
-    source_window TEXT,                    -- 预留(当前恒空)
-    text_content  TEXT,                    -- 文本条目全文(FTS 索引)
-    files_json    TEXT,                    -- 文件条目路径列表
-    rich_json     TEXT,                    -- {"html":…,"rtf":…}
+    source_window TEXT,
+    text_content  TEXT,
+    search_text   TEXT,
+    files_json    TEXT,
+    rich_json     TEXT,
     blob_hash     TEXT,
     blob_mime     TEXT,
     blob_width    INTEGER,
@@ -51,38 +50,43 @@ CREATE INDEX IF NOT EXISTS idx_items_type  ON clipboard_items(content_type);
 CREATE INDEX IF NOT EXISTS idx_items_src   ON clipboard_items(source_app);
 CREATE INDEX IF NOT EXISTS idx_items_created ON clipboard_items(created_at);
 CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
-    text_content, content='clipboard_items', content_rowid='id',
+    search_text, content='clipboard_items', content_rowid='id',
     tokenize='unicode61');
 CREATE TRIGGER IF NOT EXISTS items_fts_ai AFTER INSERT ON clipboard_items
 BEGIN
-    INSERT INTO items_fts(rowid, text_content)
-    VALUES (new.id, new.text_content);
+    INSERT INTO items_fts(rowid, search_text) VALUES (new.id, new.search_text);
 END;
 CREATE TRIGGER IF NOT EXISTS items_fts_ad AFTER DELETE ON clipboard_items
 BEGIN
-    INSERT INTO items_fts(items_fts, rowid, text_content)
-    VALUES ('delete', old.id, old.text_content);
+    INSERT INTO items_fts(items_fts, rowid, search_text)
+    VALUES ('delete', old.id, old.search_text);
 END;
-CREATE TRIGGER IF NOT EXISTS items_fts_au AFTER UPDATE OF text_content
+CREATE TRIGGER IF NOT EXISTS items_fts_au AFTER UPDATE OF search_text
 ON clipboard_items
 BEGIN
-    INSERT INTO items_fts(items_fts, rowid, text_content)
-    VALUES ('delete', old.id, old.text_content);
-    INSERT INTO items_fts(rowid, text_content)
-    VALUES (new.id, new.text_content);
+    INSERT INTO items_fts(items_fts, rowid, search_text)
+    VALUES ('delete', old.id, old.search_text);
+    INSERT INTO items_fts(rowid, search_text) VALUES (new.id, new.search_text);
 END;
 """
-
-_ASCII_ONLY = re.compile(r"^[\x20-\x7e]*$")
 
 
 def _hash_text(content):
     import hashlib
-    return hashlib.sha1(str(content).encode("utf-8", "replace")).hexdigest()
+    return hashlib.sha256(str(content).encode("utf-8", "replace")).hexdigest()
+
+
+def blob_full_path(app_dir, hsh):
+    """新布局的 blob 路径:data/blobs/<前两位>/<哈希>(按内容寻址,分片目录)。"""
+    h = str(hsh or "")
+    return os.path.join(app_dir, "data", "blobs", h[:2] if len(h) >= 2 else "_", h)
 
 
 class ClipboardStore:
-    """单写者 SQLite 仓库:启动 load_all;运行期 insert/update/delete 写透。"""
+    """单写者 SQLite 仓库:启动 load_all;运行期 insert/update/delete 写透。
+
+    所有 execute() 的 SQL 均为内联字面量,动态值全部参数绑定;
+    组合过滤用固定语句 + 空参数(? IS NULL OR …),不存在 SQL 文本拼接。"""
 
     def __init__(self, db_path):
         self.path = str(db_path)
@@ -92,11 +96,53 @@ class ClipboardStore:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
+        self._ensure_v2()          # 旧库升级必须先于 schema(触发器引用新列)
         self.db.executescript(_SCHEMA)
+        if self._upgraded:
+            # 既有行的 FTS 索引重建(外容表只能用 rebuild,不能手工插行)
+            self.db.execute("INSERT INTO items_fts(items_fts) VALUES ('rebuild')")
         self.db.commit()
-        row = self.db.execute("SELECT COALESCE(MAX(seq), 0) AS m "
-                              "FROM clipboard_items").fetchone()
-        self._seq = int(row["m"])
+        self._seq = int(self.db.execute(
+            "SELECT COALESCE(MAX(seq), 0) AS m FROM clipboard_items"
+        ).fetchone()["m"])
+
+    def _ensure_v2(self):
+        """v1 库(无 search_text)就地升级:加列、回填。
+        必须在 executescript(_SCHEMA) 之前执行——schema 里的触发器引用
+        search_text,而外容 FTS 绝不能经触发器手工回填(索引会损坏)。"""
+        self._upgraded = False
+        names = [r["name"] for r in self.db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'clipboard_items'").fetchall()]
+        if not names:
+            return                                  # 全新库,直接建 v2
+        cols = [r["name"] for r in self.db.execute(
+            "PRAGMA table_info(clipboard_items)").fetchall()]
+        if "search_text" in cols:
+            return                                  # 已是 v2
+        self.db.execute("ALTER TABLE clipboard_items ADD COLUMN search_text TEXT")
+        rows = self.db.execute(
+            "SELECT id, content_type, text_content, files_json, "
+            "blob_width, blob_height FROM clipboard_items").fetchall()
+        for r in rows:
+            if r["content_type"] == "files":
+                files = json.loads(r["files_json"] or "[]")
+                st = (os.path.basename(files[0]) + " " + " ".join(files)) \
+                    if files else ""
+            elif r["content_type"] == "image":
+                st = "图片 截图 %s×%s" % (r["blob_width"] or 0,
+                                         r["blob_height"] or 0)
+            else:
+                st = r["text_content"] or ""
+            self.db.execute(
+                "UPDATE clipboard_items SET search_text = ? WHERE id = ?",
+                (st, r["id"]))
+        # v1 可能带着按 text_content 建的旧 FTS/触发器:清场,稍后重建
+        self.db.execute("DROP TRIGGER IF EXISTS items_fts_ai")
+        self.db.execute("DROP TRIGGER IF EXISTS items_fts_ad")
+        self.db.execute("DROP TRIGGER IF EXISTS items_fts_au")
+        self.db.execute("DROP TABLE IF EXISTS items_fts")
+        self._upgraded = True
 
     def close(self):
         with self._lock:
@@ -107,26 +153,18 @@ class ClipboardStore:
 
     # ---- 行 ⇄ 记录 ----
     @staticmethod
-    def _rec_from_row(r):
-        rec = {"type": r["content_type"], "pinned": bool(r["is_pinned"]),
-               "ts": float(r["created_at"]), "_db": r["id"]}
-        if r["content_type"] == "text":
-            rec["content"] = r["text_content"]
-        elif r["content_type"] == "files":
-            rec["content"] = json.loads(r["files_json"] or "[]")
-        else:
-            meta = json.loads(r["metadata_json"]) if r["metadata_json"] else {}
-            rec["content"] = meta.get("path") or r["blob_hash"] or ""
-            rec["w"], rec["h"] = r["blob_width"] or 0, r["blob_height"] or 0
-            rec["hash"] = r["content_hash"] or ""
-        if r["source_app"]:
-            rec["src"] = r["source_app"]
-        rich = json.loads(r["rich_json"]) if r["rich_json"] else {}
-        rec.update(rich)
-        return rec
+    def _search_text_of(rec):
+        """统一检索串(与内存版 core._search_text 语义一致)。"""
+        t = rec.get("type")
+        if t == "files":
+            c = rec.get("content") or []
+            return ((os.path.basename(c[0]) + " " + " ".join(c)) if c else "")
+        if t == "image":
+            return "图片 截图 %s×%s" % (rec.get("w", 0), rec.get("h", 0))
+        return str(rec.get("content") or "")
 
-    @staticmethod
-    def _row_from_rec(rec, seq):
+    @classmethod
+    def _row_from_rec(cls, rec, seq):
         t = rec.get("type")
         blob_size = None
         try:
@@ -155,16 +193,31 @@ class ClipboardStore:
                           ensure_ascii=False) if t == "image" else None
         return (seq, float(rec.get("ts") or now), now, t,
                 rec.get("_subtype"), chash, rec.get("src"),
-                None, text, files,
+                None, text, cls._search_text_of(rec), files,
                 json.dumps(rich, ensure_ascii=False) if rich else None,
                 bhash, bmime, bw, bh, blob_size,
                 1 if rec.get("pinned") else 0, meta)
 
-    _COLS = ("seq, created_at, updated_at, content_type, content_subtype, "
-             "content_hash, source_app, source_window, text_content, "
-             "files_json, rich_json, blob_hash, blob_mime, blob_width, "
-             "blob_height, blob_size, is_pinned, metadata_json")
-    _PLACE = "(" + ",".join("?" * 18) + ")"
+    @staticmethod
+    def _rec_from_row(r):
+        rec = {"type": r["content_type"], "pinned": bool(r["is_pinned"]),
+               "ts": float(r["created_at"]), "_db": r["id"]}
+        if r["content_type"] == "text":
+            rec["content"] = r["text_content"]
+        elif r["content_type"] == "files":
+            rec["content"] = json.loads(r["files_json"] or "[]")
+        else:
+            meta = json.loads(r["metadata_json"]) if r["metadata_json"] else {}
+            rec["content"] = meta.get("path") or r["blob_hash"] or ""
+            rec["w"], rec["h"] = r["blob_width"] or 0, r["blob_height"] or 0
+            rec["hash"] = r["content_hash"] or ""
+        if r["source_app"]:
+            rec["src"] = r["source_app"]
+        if r["content_subtype"]:
+            rec["_subtype"] = r["content_subtype"]
+        rich = json.loads(r["rich_json"]) if r["rich_json"] else {}
+        rec.update(rich)
+        return rec
 
     # ---- 载入 ----
     def load_all(self):
@@ -173,9 +226,10 @@ class ClipboardStore:
             rows = self.db.execute(
                 "SELECT id, seq, created_at, updated_at, content_type, "
                 "content_subtype, content_hash, source_app, source_window, "
-                "text_content, files_json, rich_json, blob_hash, blob_mime, "
-                "blob_width, blob_height, blob_size, is_pinned, metadata_json "
-                "FROM clipboard_items ORDER BY seq DESC").fetchall()
+                "text_content, search_text, files_json, rich_json, blob_hash, "
+                "blob_mime, blob_width, blob_height, blob_size, is_pinned, "
+                "metadata_json FROM clipboard_items ORDER BY seq DESC"
+            ).fetchall()
         return [self._rec_from_row(r) for r in rows]
 
     def count(self):
@@ -186,12 +240,16 @@ class ClipboardStore:
 
     # ---- 写透 ----
     def insert(self, rec):
-        """插入新条目到最前;rec 原地补 _db 与 _subtype。"""
+        """插入新条目到最前;rec 原地补 _db。"""
         with self._lock:
             self._seq += 1
             cur = self.db.execute(
-                "INSERT INTO clipboard_items (%s) VALUES %s"
-                % (self._COLS, self._PLACE),
+                "INSERT INTO clipboard_items (seq, created_at, updated_at, "
+                "content_type, content_subtype, content_hash, source_app, "
+                "source_window, text_content, search_text, files_json, "
+                "rich_json, blob_hash, blob_mime, blob_width, blob_height, "
+                "blob_size, is_pinned, metadata_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 self._row_from_rec(rec, self._seq))
             rec["_db"] = cur.lastrowid
             self.db.commit()
@@ -209,10 +267,10 @@ class ClipboardStore:
                 self.db.execute(
                     "UPDATE clipboard_items SET seq=?, created_at=?, "
                     "updated_at=?, content_subtype=?, content_hash=?, "
-                    "source_app=?, rich_json=?, is_pinned=?, blob_size=? "
-                    "WHERE id = ?",
+                    "source_app=?, search_text=?, rich_json=?, blob_size=?, "
+                    "is_pinned=? WHERE id = ?",
                     (row[0], row[1], row[2], row[4], row[5], row[6],
-                     row[10], row[16], row[15], dbid))
+                     row[9], row[11], row[16], row[17], dbid))
                 self.db.commit()
                 return dbid
             return self.insert(rec)
@@ -246,71 +304,75 @@ class ClipboardStore:
             self.db.commit()
             self._seq = 0
 
-    # ---- 查询(未来 UI 分页/筛选的直连通道;本阶段供测试与 API 演进) ----
+    # ---- 查询(UI 视图直连通道;固定语句 + 空参数,不拼接 SQL 文本) ----
+    def _filter_args(self, content_type, source_app, since, q, pinned):
+        qlike = None
+        if q:
+            qlike = "%" + str(q).strip().casefold() + "%"
+        p = None if pinned is None else (1 if pinned else 0)
+        return (content_type, content_type, source_app, source_app,
+                float(since or 0.0), float(since or 0.0),
+                p, p, qlike, qlike)
+
     def query(self, content_type=None, source_app=None, since=0.0,
               q=None, pinned=None, limit=None, offset=0):
-        """参数化组合查询,返回 id 列表(seq 降序)。q 走 FTS/CJK-LIKE。"""
-        sql = ("SELECT id FROM clipboard_items WHERE 1=1")
-        args = []
-        if content_type:
-            sql += " AND content_type = ?"
-            args.append(content_type)
-        if source_app:
-            sql += " AND source_app = ?"
-            args.append(source_app)
-        if since:
-            sql += " AND created_at >= ?"
-            args.append(float(since))
-        if pinned is not None:
-            sql += " AND is_pinned = ?"
-            args.append(1 if pinned else 0)
-        if q:
-            sql += " AND id IN (%s)" % self._search_subquery(q)
-            args.extend(self._search_args(q))
-        sql += " ORDER BY seq DESC"
-        if limit is not None:
-            sql += " LIMIT ? OFFSET ?"
-            args.extend([int(limit), int(offset)])
+        """参数化组合查询,返回 id 列表(seq 降序)。q 为子串语义(LIKE)。"""
+        a = self._filter_args(content_type, source_app, since, q, pinned)
+        sql = ("SELECT id FROM clipboard_items WHERE "
+               "(? IS NULL OR content_type = ?) "
+               "AND (? IS NULL OR source_app = ?) "
+               "AND (? = 0 OR created_at >= ?) "
+               "AND (? IS NULL OR is_pinned = ?) "
+               "AND (? IS NULL OR search_text LIKE ?) "
+               "ORDER BY seq DESC LIMIT ? OFFSET ?")
+        args = a + (10 ** 9 if limit is None else int(limit), int(offset))
         with self._lock:
             return [r["id"] for r in self.db.execute(sql, args).fetchall()]
 
-    def search(self, q, limit=100):
-        """全文搜索:id 列表。ASCII 词走 FTS5;含 CJK 时 FTS 无法分词,
-        退回 LIKE(同样参数绑定)。"""
-        if not q:
-            return []
-        sql = "SELECT id FROM clipboard_items WHERE id IN (%s) " \
-              "ORDER BY seq DESC LIMIT ?" % self._search_subquery(q)
-        args = self._search_args(q) + [int(limit)]
+    def query_page(self, content_type=None, source_app=None, since=0.0,
+                   q=None, pinned=None, limit=200, offset=0):
+        """分页查询:返回 (rec 列表, 命中总数)。rec 与内存条目同构(含 _db)。"""
+        a = self._filter_args(content_type, source_app, since, q, pinned)
+        total_sql = ("SELECT COUNT(*) AS c FROM clipboard_items WHERE "
+                     "(? IS NULL OR content_type = ?) "
+                     "AND (? IS NULL OR source_app = ?) "
+                     "AND (? = 0 OR created_at >= ?) "
+                     "AND (? IS NULL OR is_pinned = ?) "
+                     "AND (? IS NULL OR search_text LIKE ?)")
+        page_sql = ("SELECT id, seq, created_at, updated_at, content_type, "
+                    "content_subtype, content_hash, source_app, source_window, "
+                    "text_content, search_text, files_json, rich_json, "
+                    "blob_hash, blob_mime, blob_width, blob_height, blob_size, "
+                    "is_pinned, metadata_json FROM clipboard_items WHERE "
+                    "(? IS NULL OR content_type = ?) "
+                    "AND (? IS NULL OR source_app = ?) "
+                    "AND (? = 0 OR created_at >= ?) "
+                    "AND (? IS NULL OR is_pinned = ?) "
+                    "AND (? IS NULL OR search_text LIKE ?) "
+                    "ORDER BY seq DESC LIMIT ? OFFSET ?")
         with self._lock:
-            return [r["id"] for r in self.db.execute(sql, args).fetchall()]
-
-    @staticmethod
-    def _search_subquery(q):
-        if _ASCII_ONLY.match(q):
-            return ("SELECT rowid FROM items_fts WHERE items_fts MATCH ?")
-        return ("SELECT id FROM clipboard_items WHERE text_content LIKE ?")
-
-    @staticmethod
-    def _search_args(q):
-        if _ASCII_ONLY.match(q):
-            fts_q = " OR ".join('"%s"' % w.replace('"', '""')
-                                for w in q.split() if w)
-            return [fts_q or q]
-        return ["%" + q + "%"]
+            total = int(self.db.execute(total_sql, a).fetchone()["c"])
+            rows = self.db.execute(
+                page_sql, a + (int(limit), int(offset))).fetchall()
+        return [self._rec_from_row(r) for r in rows], total
 
     def migrate_from_list(self, history):
-        """history.json(最近在前)一次性导入,单事务;返回条数。"""
+        """history 列表(最旧在前)一次性导入,单事务;返回条数。"""
         with self._lock:
             self.db.execute("BEGIN")
             n = 0
             try:
-                for rec in history:               # 最旧在后 → 先插旧的,seq 递增
+                for rec in history:
                     self._seq += 1
-                    row = self._row_from_rec(rec, self._seq)
                     self.db.execute(
-                        "INSERT INTO clipboard_items (%s) VALUES %s"
-                        % (self._COLS, self._PLACE), row)
+                        "INSERT INTO clipboard_items (seq, created_at, "
+                        "updated_at, content_type, content_subtype, "
+                        "content_hash, source_app, source_window, text_content, "
+                        "search_text, files_json, rich_json, blob_hash, "
+                        "blob_mime, blob_width, blob_height, blob_size, "
+                        "is_pinned, metadata_json) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        self._row_from_rec(rec, self._seq))
                     n += 1
                 self.db.commit()
             except Exception:
