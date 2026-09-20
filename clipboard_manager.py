@@ -1249,7 +1249,39 @@ class ClipboardCore:
         return norm
 
     # ---- 剪贴板读取(在捕获线程调用) ----
-    def submit_capture(self):
+    # 富文本格式保留:浏览器/Office 复制时剪贴板同时带 HTML Format / RTF,
+    # 随文本条目存储、回写时多格式并放,粘贴到 Word/表格不再退化成纯文本。
+    # 用 latin-1 解码/编码做字节级无损往返:HTML Format 头里的
+    # StartHTML/EndHTML 是字节偏移,utf-8"replace"解码会移动偏移致消费端解析错乱。
+    RICH_FORMATS = (("html", "HTML Format"), ("rtf", "Rich Text Format"))
+    _RICH_CAP = 512 * 1024       # 单格式捕获上限,超大只存纯文本
+
+    @staticmethod
+    def _reg_fmt(name):
+        try:
+            return win32clipboard.RegisterClipboardFormat(name)
+        except Exception:
+            return 0
+
+    def _read_rich_formats(self):
+        """富文本格式捕获(剪贴板已打开时调用):返回 {"html":…,"rtf":…} 子集。"""
+        rich = {}
+        for key, fmt in self.RICH_FORMATS:
+            try:
+                cf = self._reg_fmt(fmt)
+                if not cf or not win32clipboard.IsClipboardFormatAvailable(cf):
+                    continue
+                raw = win32clipboard.GetClipboardData(cf)
+                if not raw:
+                    continue
+                txt = raw.decode("latin-1") if isinstance(raw, bytes) else str(raw)
+                if txt and len(txt) <= self._RICH_CAP:
+                    rich[key] = txt
+            except Exception:
+                continue
+        return rich
+
+    def submit_capture(self, src=""):
         """把一次捕获(读板 + 可能的大图 PNG 编码)提交到后台线程。
         托盘线程调用后立即返回,不再被编码耗时拖住消息循环。
         src = 来源应用 exe 名(已在托盘线程取好,这里只透传给捕获线程)。"""
@@ -1290,6 +1322,9 @@ class ClipboardCore:
                         if t:
                             t = t.rstrip("\r\n")   # 统一尾随换行,便于去重
                             if t.strip("\r\n\t "):
+                                rich = self._read_rich_formats()
+                                if rich:
+                                    return ("text", t, rich)
                                 return ("text", t)
                 finally:
                     win32clipboard.CloseClipboard()
@@ -1644,6 +1679,19 @@ class ClipboardCore:
                     if rec["type"] == "text":
                         win32clipboard.SetClipboardData(
                             win32clipboard.CF_UNICODETEXT, rec["content"])
+                        # 富文本格式并放(HTML Format / RTF):粘贴到 Word/浏览器/
+                        # Excel 保留排版;单格式失败不影响主文本
+                        for key, fmt in self.RICH_FORMATS:
+                            val = rec.get(key)
+                            if not val:
+                                continue
+                            try:
+                                cf = self._reg_fmt(fmt)
+                                if cf:
+                                    win32clipboard.SetClipboardData(
+                                        cf, val.encode("latin-1"))
+                            except Exception:
+                                pass
                     elif rec["type"] == "files":
                         win32clipboard.SetClipboardData(
                             win32clipboard.CF_HDROP, build_dropfiles(rec["content"]))
