@@ -110,6 +110,7 @@ DEFAULT_CFG = {
     "max_items": 100,
     "cleanup_days": 0,          # 自动清理:删除 N 天前的未置顶条目(0 = 关闭)
     "disk_cap_mb": 0,           # 图片缓存上限 MB,超限从最旧删起(0 = 关闭)
+    "encrypt_history": False,   # history.json 用 DPAPI 加密(关闭 = 明文,便于备份迁移)
     "window_w": 600,
     "window_h_max": 720,
     # ---- AI 工作流(Qt 版 UI 使用;两版前端共享配置) ----
@@ -359,13 +360,34 @@ def save_config(cfg):
             pass
 
 
+def _history_from_container(data):
+    """历史容器解包:旧版明文 list,或新版 {"dpapi":bool,"data":<b64>} 整体
+    DPAPI 加密(与私密区同一机制);解析/解密失败返回 None(交给上层试备份)。"""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and "data" in data:
+        try:
+            blob = base64.b64decode(data["data"])
+            if data.get("dpapi"):
+                blob = _dpapi_unprotect(blob)
+                if blob is None:
+                    log("history.json 解密失败(DPAPI),尝试备份恢复")
+                    return None
+            out = json.loads(blob.decode("utf-8"))
+            return out if isinstance(out, list) else None
+        except Exception:
+            return None
+    return None
+
+
 def load_history():
-    # 主文件损坏时依次回退到最近备份(.bak1/.bak2/.bak3)
+    # 主文件损坏时依次回退到最近备份(.bak1/.bak2/.bak3);明文/加密两种
+    # 格式都会被 _history_from_container 识别(备份里两种混存也各自可用)
     for fp in (HISTORY_FILE, HISTORY_FILE + ".bak1",
                HISTORY_FILE + ".bak2", HISTORY_FILE + ".bak3"):
         try:
             with open(fp, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                data = _history_from_container(json.load(f))
         except Exception:
             continue
         if not isinstance(data, list):
@@ -403,12 +425,22 @@ def _rotate_history_backup():
         pass
 
 
-def save_history(hist):
-    # 原子写:滚动备份 + 临时文件替换,避免写入中途崩溃损坏历史
+def save_history(hist, encrypt=False):
+    """原子写 + 滚动备份。encrypt=True 时整体 DPAPI 加密成
+    {"dpapi":true,"data":<b64>} 容器(与私密区同一机制,绑定当前用户);
+    读取两种格式自动识别(load_history)。DPAPI 不可用时本次退化为明文并记日志。"""
+    payload = hist
+    if encrypt:
+        blob = _dpapi_protect(json.dumps(hist, ensure_ascii=False).encode("utf-8"))
+        if blob is None:
+            log("win32crypt 不可用,history.json 本次以明文保存")
+        else:
+            payload = {"dpapi": True,
+                       "data": base64.b64encode(blob).decode("ascii")}
     tmp = HISTORY_FILE + ".tmp"
     try:
         _rotate_history_backup()
-        Path(tmp).write_text(json.dumps(hist, ensure_ascii=False),
+        Path(tmp).write_text(json.dumps(payload, ensure_ascii=False),
                              encoding="utf-8")
         os.replace(tmp, HISTORY_FILE)
     except Exception:
@@ -1446,7 +1478,8 @@ class ClipboardCore:
                 changed = True
             self.history[:] = keep      # 原地替换,保持前端别名有效
             if changed:
-                save_history(self.history)
+                save_history(self.history,
+                             encrypt=bool(self.cfg.get("encrypt_history")))
         except Exception:
             pass
 
@@ -1604,7 +1637,8 @@ class ClipboardCore:
             return
         gen = getattr(self, "_gen", 0)
         with PerfSpan("history_save"):
-            save_history(self.history)
+            save_history(self.history,
+                         encrypt=bool(self.cfg.get("encrypt_history")))
         if gen == getattr(self, "_gen", 0):
             self._dirty = False
 

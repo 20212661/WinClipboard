@@ -1639,6 +1639,27 @@ class SettingsPage(QWidget):
         c_disk.hBoxLayout.addWidget(combo_disk, 0, Qt.AlignRight)
         c_disk.hBoxLayout.addSpacing(16)
 
+        c_enc = SwitchSettingCard(
+            FIF.CERTIFICATE, "历史加密存储",
+            "history.json 用 Windows DPAPI 加密(绑定当前用户,复制文件到别的"
+            "电脑读不出);关闭则明文存储,便于备份与迁移", parent=group3)
+        c_enc.setChecked(bool(cfg.get("encrypt_history")))
+
+        def on_enc(on):
+            cfg["encrypt_history"] = bool(on)
+            cm.save_config(cfg)
+            # 立即按新格式落盘一次(格式转换需强制写:置脏再冲刷)
+            app.core._mark_dirty()
+            app.core.flush_history()
+            InfoBar.success("历史加密已" + ("开启" if on else "关闭"),
+                            "文件已转换为" + ("加密" if on else "明文") + "格式",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT)
+        c_enc.checkedChanged.connect(on_enc)
+        self.c_enc = c_enc
+        if not cm.dpapi_available():       # DPAPI 缺位时不开空头支票(与私密区同原则)
+            c_enc.setEnabled(False)
+            c_enc.setContent("当前环境 DPAPI 不可用,历史加密无法开启")
+
         group3.addSettingCard(c_days)
         group3.addSettingCard(c_disk)
         group3.addSettingCard(c_enc)
