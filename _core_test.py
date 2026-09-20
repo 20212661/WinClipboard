@@ -18,11 +18,13 @@ import clipboard_manager as cm
 TMP = tempfile.mkdtemp(prefix="wclb_test_")
 cm.APP_DIR = TMP
 cm.IMAGE_DIR = os.path.join(TMP, "images")
+cm.BLOB_DIR = os.path.join(TMP, "blobs")
 cm.HISTORY_FILE = os.path.join(TMP, "history.json")
 cm.PRIVATE_FILE = os.path.join(TMP, "private.json")
 cm.CONFIG_FILE = os.path.join(TMP, "config.json")
 cm.LOG_FILE = os.path.join(TMP, "app.log")
 os.makedirs(cm.IMAGE_DIR, exist_ok=True)
+os.makedirs(cm.BLOB_DIR, exist_ok=True)
 
 FAILS = []
 
@@ -305,8 +307,9 @@ check("图片默认不导出", core3.export_payload()["items"] == [])
 _pl4 = core3.export_payload(include_images=True)
 core4 = make_core()
 _a4, _ = core4.import_payload(_pl4)
-_p2 = _P(cm.IMAGE_DIR) / os.path.basename(core4.history[0]["content"])
-check("内嵌图片导入落盘", _a4 == 1 and _p2.exists())
+_p2 = _P(core4.history[0]["content"])          # CAS:导入落 blobs/<h2>/<hash>
+check("内嵌图片导入落盘(CAS 分片)", _a4 == 1 and _p2.exists()
+      and cm.BLOB_DIR in str(_p2) and "images" not in str(_p2))
 _px.unlink()
 _p2.unlink()
 
@@ -647,6 +650,129 @@ with __import__("sqlite3").connect(os.path.join(_sdir, "core.db")) as _cx:
                        "WHERE text_content = ?", (_b64t,)).fetchone()
 check("子类型列写入(Base64)", _sub and _sub[0] == "Base64", str(_sub))
 st.close(); st2.close(); _reopen.close(); core.store.close()
+
+# ============================================================
+# Transaction 撤销(state 状态机)/ CAS 布局 / 引用计数 / Privacy Gate
+# ============================================================
+import sqlite3 as _sql
+import time
+
+# ---- 旧库(无 state 列)自动升级 ----
+_olddb = os.path.join(_sdir, "legacy_nostate.db")
+_cx = _sql.connect(_olddb)
+_cx.executescript("""
+CREATE TABLE clipboard_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, seq INTEGER NOT NULL,
+    created_at REAL NOT NULL, updated_at REAL NOT NULL,
+    content_type TEXT NOT NULL, content_subtype TEXT, content_hash TEXT,
+    source_app TEXT, source_window TEXT, text_content TEXT, files_json TEXT,
+    rich_json TEXT, blob_hash TEXT, blob_mime TEXT, blob_width INTEGER,
+    blob_height INTEGER, blob_size INTEGER, is_pinned INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT);
+""")
+_cx.execute("INSERT INTO clipboard_items (seq, created_at, updated_at, "
+            "content_type, text_content, is_pinned) VALUES (1,1,1,'text','旧世界',0)")
+_cx.commit(); _cx.close()
+_st_old = _st.ClipboardStore(_olddb)
+_cols = {r["name"] for r in _st_old.db.execute("PRAGMA table_info(clipboard_items)")}
+check("旧库自动加 state/deleted_at 列", "state" in _cols and "deleted_at" in _cols)
+check("旧行视为 active", _st_old.count() == 1)
+_st_old.close()
+
+# ---- state 原语:mark_deleted / restore / collect_garbage / blob_refcount ----
+_tdb = os.path.join(_sdir, "txn.db")
+tst = _st.ClipboardStore(_tdb)
+_r1 = {"type": "text", "content": "one", "pinned": False, "ts": 1.0}
+_r2 = {"type": "text", "content": "two", "pinned": False, "ts": 2.0}
+tst.insert(_r1); tst.insert(_r2)
+_d1, _d2 = _r1["_db"], _r2["_db"]
+tst.mark_deleted([_d1])
+check("deleted 不进 load_all", [r["content"] for r in tst.load_all()] == ["two"])
+check("deleted 不进 count/query/search",
+      tst.count() == 1 and tst.query() == [_d2] and tst.search("one") == [])
+tst.restore([_d1])
+check("restore 回 active 且提到最前",
+      [r["content"] for r in tst.load_all()] == ["one", "two"])
+_imgb = "f" * 64
+tst.insert({"type": "image", "content": "blobs/x", "hash": _imgb,
+            "pinned": False, "ts": 3.0, "w": 1, "h": 1})
+_imgid = tst.db.execute("SELECT id FROM clipboard_items WHERE blob_hash=?",
+                        (_imgb,)).fetchone()[0]
+tst.mark_deleted([_imgid], now=time.time() - 999.0)      # 早已过宽限
+tst.mark_deleted([_d2])                                    # 刚删(宽限内)
+_gone = tst.collect_garbage(45.0)
+check("GC 只收宽限期已过的行", [g[0] for g in _gone] == [_imgid])
+check("GC 后 blob 引用计数归零", tst.blob_refcount(_imgb) == 0)
+tst.restore([_d2])                                    # 宽限内的行撤销救回
+check("宽限内 deleted 行可救回", tst.count() == 2 and tst.search("two") == [_d2])
+tst.close()
+
+# ---- Transaction:库模式 删除→撤销 / GC 后撤销重建 ----
+core = make_core()
+core.store = _st.ClipboardStore(os.path.join(_sdir, "txn_core.db"))
+core.add_item(("text", "tx-a", {}, ""))
+core.add_item(("text", "tx-b", {}, ""))            # history = [tx-b, tx-a]
+core.soft_delete_at(0)
+check("事务软删:内存出列+库行 deleted",
+      [h["content"] for h in core.history] == ["tx-a"])
+check("事务软删:count 只数 active", core.store.count() == 1)
+_back = core.undo_delete()
+check("事务撤销:回列最前+库行恢复",
+      [h["content"] for h in core.history] == ["tx-b", "tx-a"]
+      and [b["content"] for b in _back] == ["tx-b"]
+      and core.store.count() == 2)
+# GC 已物理删行后撤销:upsert 用内存 rec 重建
+core.soft_delete_at(0)
+core.store.mark_deleted(
+    [r["_db"] for r in core._txn_list()[0].recs], now=time.time() - 999.0)
+_gone = core.store.collect_garbage(45.0)
+check("预置:行已被 GC", len(_gone) == 1)
+_back = core.undo_delete()
+check("GC 后撤销仍可重建(内存数据兜底)",
+      [h["content"] for h in core.history] == ["tx-b", "tx-a"]
+      and core.store.count() == 2)
+core.store.close()
+
+# ---- Transaction:JSON 模式(无库)删除→撤销 ----
+core = make_core(history=[
+    {"type": "text", "content": "j-1", "pinned": False, "ts": 2},
+    {"type": "text", "content": "j-2", "pinned": False, "ts": 1}])
+core.batch_soft_delete([core.history[0]])
+check("JSON 模式批删出列", [h["content"] for h in core.history] == ["j-2"])
+core.undo_delete()
+check("JSON 模式撤销回列", [h["content"] for h in core.history] == ["j-1", "j-2"])
+
+# ---- CAS:blob_path 布局 / _migrate_blobs / 引用计数释放 ----
+_h64 = "37acd83b" + "ab" * 28
+check("blob_path 分片布局",
+      cm.blob_path(_h64) == os.path.join(cm.BLOB_DIR, "37", _h64))
+check("blob_path 拒绝非十六进制", cm.blob_path("zzzz") is None)
+_old_img = os.path.join(cm.IMAGE_DIR, "img_%s.png" % _h64)
+Path(_old_img).write_bytes(b"PNGDATA")
+core = make_core(history=[
+    {"type": "image", "content": _old_img, "pinned": False,
+     "w": 8, "h": 8, "hash": _h64, "ts": 1},
+    {"type": "text", "content": "keep", "pinned": False, "ts": 2}])
+core._migrate_blobs()
+_newp = os.path.join(cm.BLOB_DIR, "37", _h64)
+check("CAS 迁移:文件挪到分片路径", os.path.exists(_newp) and not os.path.exists(_old_img))
+check("CAS 迁移:条目路径原地更新", core.history[0]["content"] == _newp)
+# 引用计数:两条共享同 blob,删一条文件保留,删光才删文件
+core.history.insert(0, {"type": "image", "content": _newp, "pinned": False,
+                        "w": 8, "h": 8, "hash": _h64, "ts": 3})
+_rec0 = core.history.pop(0)
+check("共享 blob 删一条文件保留", core._blob_unref(_rec0) == 0 and os.path.exists(_newp))
+_rec1 = core.history.pop(0)
+check("引用归零文件删除", core._blob_unref(_rec1) > 0 and not os.path.exists(_newp))
+# 撤销栈引用保护:事务窗口内文件不删
+Path(_newp).write_bytes(b"PNGDATA2")
+core.history[:] = [{"type": "image", "content": _newp, "pinned": False,
+                    "w": 8, "h": 8, "hash": _h64, "ts": 4}]
+core.soft_delete_at(0)
+check("撤销窗口内文件不动", os.path.exists(_newp))
+core.undo_delete()
+check("撤销后文件仍可用", os.path.exists(_newp) and
+      core.history[0]["content"] == _newp)
 
 print()
 print("RESULT:", "PASS" if not FAILS else "FAIL %d 项: %s" % (len(FAILS), ", ".join(FAILS)))

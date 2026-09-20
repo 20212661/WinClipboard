@@ -8,10 +8,15 @@
 - 全文搜索 FTS5(unicode61);CJK 无分词,查询含非 ASCII 时自动退回
   LIKE '%q%'(参数绑定),两类路径都只返回 id 列表,由上层回内存对象。
 - 图片二进制不入库:blob_hash 等元数据列指向磁盘上按内容寻址的
-  images/img_<hash>.png(与现行完全一致;分片目录布局留待后续阶段)。
+  blobs/<hash[:2]>/<hash>(CAS,由 cm 层落盘;引用计数归零才删文件)。
 - 所有 SQL 一律参数绑定,禁止拼接。
 - 写入策略:单写者(GUI 线程)逐操作写透,WAL 模式;
   load_all() 只在启动/测试重载时调用。
+- 删除语义(事务撤销):用户删除只置 deleted 态(state 列,deleted_at 记时),
+  撤销窗口内可 restore(seq 提升到最前);宽限期过后 collect_garbage()
+  物理删行,其 blob 是否删文件由 cm 按引用计数决定(表内任意态的行都算
+  引用——deleted 行在宽限期内仍可能被撤销救回)。
+  所有读路径(load_all/count/query/search)只返回 active 行。
 
 兼容:is_sensitive 条目不入本表(私密区 private.json + DPAPI 独立存储);
 encrypt_history=True 时核心直接禁用本存储、继续走 JSON(库文件无法整体
@@ -44,7 +49,9 @@ CREATE TABLE IF NOT EXISTS clipboard_items (
     blob_height   INTEGER,
     blob_size     INTEGER,
     is_pinned     INTEGER NOT NULL DEFAULT 0,
-    metadata_json TEXT
+    metadata_json TEXT,
+    state         TEXT    NOT NULL DEFAULT 'active',   -- active | deleted
+    deleted_at    REAL                                   -- 进 deleted 态的时刻
 );
 CREATE INDEX IF NOT EXISTS idx_items_seq   ON clipboard_items(seq DESC);
 CREATE INDEX IF NOT EXISTS idx_items_type  ON clipboard_items(content_type);
@@ -93,10 +100,23 @@ class ClipboardStore:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(_SCHEMA)
+        self._upgrade_schema()
         self.db.commit()
         row = self.db.execute("SELECT COALESCE(MAX(seq), 0) AS m "
                               "FROM clipboard_items").fetchone()
         self._seq = int(row["m"])
+
+    def _upgrade_schema(self):
+        """旧库平滑升级:CREATE TABLE IF NOT EXISTS 不改已存在的表,
+        缺列在此补(state/deleted_at;带默认值,ALTER 即生效,老行视为 active)。"""
+        cols = {r["name"] for r in self.db.execute(
+            "PRAGMA table_info(clipboard_items)").fetchall()}
+        if "state" not in cols:
+            self.db.execute("ALTER TABLE clipboard_items "
+                            "ADD COLUMN state TEXT NOT NULL DEFAULT 'active'")
+        if "deleted_at" not in cols:
+            self.db.execute("ALTER TABLE clipboard_items "
+                            "ADD COLUMN deleted_at REAL")
 
     def close(self):
         with self._lock:
@@ -168,21 +188,22 @@ class ClipboardStore:
 
     # ---- 载入 ----
     def load_all(self):
-        """按 seq 降序(最近在前)载入全部条目,rec 与现行内存格式一致。"""
+        """按 seq 降序(最近在前)载入全部 active 条目,rec 与现行内存格式一致。"""
         with self._lock:
             rows = self.db.execute(
                 "SELECT id, seq, created_at, updated_at, content_type, "
                 "content_subtype, content_hash, source_app, source_window, "
                 "text_content, files_json, rich_json, blob_hash, blob_mime, "
                 "blob_width, blob_height, blob_size, is_pinned, metadata_json "
-                "FROM clipboard_items ORDER BY seq DESC").fetchall()
+                "FROM clipboard_items WHERE state='active' "
+                "ORDER BY seq DESC").fetchall()
         return [self._rec_from_row(r) for r in rows]
 
     def count(self):
         with self._lock:
             return int(self.db.execute(
-                "SELECT COUNT(*) AS c FROM clipboard_items"
-            ).fetchone()["c"])
+                "SELECT COUNT(*) AS c FROM clipboard_items "
+                "WHERE state='active'").fetchone()["c"])
 
     # ---- 写透 ----
     def insert(self, rec):
@@ -198,7 +219,8 @@ class ClipboardStore:
             return rec["_db"]
 
     def upsert_promote(self, rec):
-        """撤销恢复/重复提升:已有 _db 则更新并移到最前,否则插入。"""
+        """撤销恢复/重复提升:已有 _db 则恢复(置回 active)并移到最前,
+        否则插入。行已被 GC 时走插入重建——数据在内存 rec 里仍然完整。"""
         with self._lock:
             dbid = rec.get("_db")
             if dbid is not None and self.db.execute(
@@ -208,7 +230,8 @@ class ClipboardStore:
                 row = self._row_from_rec(rec, self._seq)
                 self.db.execute(
                     "UPDATE clipboard_items SET seq=?, created_at=?, "
-                    "updated_at=?, content_subtype=?, content_hash=?, "
+                    "updated_at=?, state='active', deleted_at=NULL, "
+                    "content_subtype=?, content_hash=?, "
                     "source_app=?, rich_json=?, is_pinned=?, blob_size=? "
                     "WHERE id = ?",
                     (row[0], row[1], row[2], row[4], row[5], row[6],
@@ -224,7 +247,69 @@ class ClipboardStore:
                 "WHERE id = ?", (1 if pinned else 0, time.time(), dbid))
             self.db.commit()
 
+    def mark_deleted(self, dbids, now=None):
+        """用户删除:行置 deleted 态(可撤销);不物理删行,不动 blob 文件。"""
+        ids = [int(i) for i in dbids if i is not None]
+        if not ids:
+            return
+        now = float(now if now is not None else time.time())
+        with self._lock:
+            self.db.executemany(
+                "UPDATE clipboard_items SET state='deleted', deleted_at=?, "
+                "updated_at=? WHERE id = ?",
+                [(now, now, i) for i in ids])
+            self.db.commit()
+
+    def restore(self, dbids):
+        """撤销删除:行回 active 态并提升 seq 到最前(列表语义 = 最近)。"""
+        ids = [int(i) for i in dbids if i is not None]
+        if not ids:
+            return
+        with self._lock:
+            for i in ids:
+                self._seq += 1
+                self.db.execute(
+                    "UPDATE clipboard_items SET state='active', deleted_at=NULL, "
+                    "seq=? WHERE id = ?", (self._seq, i))
+            self.db.commit()
+
+    def collect_garbage(self, grace_seconds):
+        """物理删除宽限期已过的 deleted 行;返回 [(id, blob_hash), …] 供
+        上层做 blob 引用计数清点(grace 内的行保留——撤销还救得回)。"""
+        cutoff = time.time() - float(grace_seconds)
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT id, blob_hash FROM clipboard_items "
+                "WHERE state='deleted' AND deleted_at IS NOT NULL "
+                "AND deleted_at < ?", (cutoff,)).fetchall()
+            if not rows:
+                return []
+            self.db.executemany(
+                "DELETE FROM clipboard_items WHERE id = ?",
+                [(r["id"],) for r in rows])
+            self.db.commit()
+            return [(r["id"], r["blob_hash"]) for r in rows]
+
+    def blob_refcount(self, blob_hash):
+        """该 blob 被表内多少行引用(任意态——deleted 行在宽限期内仍算,
+        撤销后引用必须仍然成立);文件是否可删由调用方据此判断。"""
+        with self._lock:
+            return int(self.db.execute(
+                "SELECT COUNT(*) AS c FROM clipboard_items "
+                "WHERE blob_hash = ?", (blob_hash,)).fetchone()["c"])
+
+    def update_image_ref(self, dbid, blob_hash, path):
+        """CAS 迁移:图片条目的 blob 落位到 blobs/ 分片路径后的引用更新。"""
+        with self._lock:
+            self.db.execute(
+                "UPDATE clipboard_items SET blob_hash=?, metadata_json=?, "
+                "updated_at=? WHERE id = ?",
+                (blob_hash, json.dumps({"path": path}, ensure_ascii=False),
+                 time.time(), int(dbid)))
+            self.db.commit()
+
     def delete(self, dbid):
+        """物理删行(内部淘汰/去重路径;用户可见删除走 mark_deleted)。"""
         with self._lock:
             self.db.execute("DELETE FROM clipboard_items WHERE id = ?",
                             (dbid,))
@@ -250,7 +335,7 @@ class ClipboardStore:
     def query(self, content_type=None, source_app=None, since=0.0,
               q=None, pinned=None, limit=None, offset=0):
         """参数化组合查询,返回 id 列表(seq 降序)。q 走 FTS/CJK-LIKE。"""
-        sql = ("SELECT id FROM clipboard_items WHERE 1=1")
+        sql = ("SELECT id FROM clipboard_items WHERE state='active'")
         args = []
         if content_type:
             sql += " AND content_type = ?"
@@ -279,8 +364,9 @@ class ClipboardStore:
         退回 LIKE(同样参数绑定)。"""
         if not q:
             return []
-        sql = "SELECT id FROM clipboard_items WHERE id IN (%s) " \
-              "ORDER BY seq DESC LIMIT ?" % self._search_subquery(q)
+        sql = ("SELECT id FROM clipboard_items "
+               "WHERE state='active' AND id IN (%s) "
+               "ORDER BY seq DESC LIMIT ?") % self._search_subquery(q)
         args = self._search_args(q) + [int(limit)]
         with self._lock:
             return [r["id"] for r in self.db.execute(sql, args).fetchall()]

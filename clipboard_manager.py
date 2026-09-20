@@ -63,7 +63,8 @@ REPO_URL = "https://github.com/haoshangyang/WinClipboard"
 RELEASE_API = "https://api.github.com/repos/haoshangyang/WinClipboard/releases/latest"
 _APPDATA = os.environ.get("APPDATA", os.path.expanduser("~"))
 APP_DIR = os.path.join(_APPDATA, APP_NAME)
-IMAGE_DIR = os.path.join(APP_DIR, "images")
+IMAGE_DIR = os.path.join(APP_DIR, "images")      # 旧布局(迁移期兼容)
+BLOB_DIR = os.path.join(APP_DIR, "blobs")        # CAS:blobs/<hash[:2]>/<hash>
 ICON_FILE = os.path.join(APP_DIR, "icon.ico")
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 HISTORY_FILE = os.path.join(APP_DIR, "history.json")
@@ -207,6 +208,16 @@ def apply_rounded_corners(hwnd):
 def ensure_dirs():
     os.makedirs(APP_DIR, exist_ok=True)
     os.makedirs(IMAGE_DIR, exist_ok=True)
+    os.makedirs(BLOB_DIR, exist_ok=True)
+
+
+def blob_path(blob_id):
+    """CAS 落位路径:blobs/<hash前2位>/<hash>(256 桶,单目录文件数可控)。
+    blob_id 为空或格式异常时返回 None——调用方按无文件处理。"""
+    b = str(blob_id or "").strip().lower()
+    if len(b) < 4 or not re.fullmatch(r"[0-9a-f]+", b):
+        return None
+    return os.path.join(BLOB_DIR, b[:2], b)
 
 
 def _dec_field(value):
@@ -1301,6 +1312,60 @@ class TrayWorker(threading.Thread):
 
 
 # ============================================================
+# 事务(可撤销操作的统一抽象;Command 模式)
+# 设计:删除类事务条目只进 deleted 态(库模式)或仅出列(JSON 模式),
+# 图片文件一律不动——真正的文件释放只发生在引用计数归零
+# (GC 之后 / 硬删路径复检),撤销窗口内的引用始终成立。
+# 扩展点:unpin / clear / 画布删除等可按同骨架加子类。
+# ============================================================
+class Transaction:
+    """一次可整体撤销的操作:commit 落库,rollback 原样回滚。"""
+
+    label = "操作"
+
+    def __init__(self, core, recs):
+        self.core = core
+        self.recs = list(recs)
+        self.at = time.time()
+
+    def commit(self):
+        raise NotImplementedError
+
+    def rollback(self):
+        """撤销:恢复条目;默认实现按记录身份防重复恢复。"""
+        live = {id(h) for h in self.core.history}
+        return [r for r in self.recs if id(r) not in live]
+
+
+class DeleteTransaction(Transaction):
+    """删除一批条目:出列 + 库行置 deleted 态;撤销 = 回列最前 + restore。"""
+
+    label = "删除"
+
+    def commit(self):
+        live = {id(h) for h in self.core.history}
+        gone = [r for r in self.recs if id(r) in live]
+        self.core.history[:] = [h for h in self.core.history
+                                if id(h) not in {id(r) for r in gone}]
+        if self.core.store is not None:
+            self.core.store.mark_deleted(
+                [r.get("_db") for r in gone if r.get("_db") is not None])
+        self.core._mark_dirty()
+        return gone
+
+    def rollback(self):
+        back = super().rollback()
+        self.core.history[0:0] = back
+        if self.core.store is not None:
+            for r in back:
+                # 行仍存在(仅 deleted 态)→置回 active 并提升最前;
+                # 行已被 GC→upsert 用内存 rec 重建。两种路径同一入口。
+                self.core.store.upsert_promote(r)
+        self.core._mark_dirty()
+        return back
+
+
+# ============================================================
 # 核心后端(与 UI 无关;由 winclipboard_qt.py 的 Qt 前端调用)
 # ============================================================
 class ClipboardCore:
@@ -1316,6 +1381,7 @@ class ClipboardCore:
     """
 
     store = None        # SQLite 仓库(类级默认:__new__ 直造的核心/测试为 None→JSON 路径)
+    _txn_stack = None   # 撤销栈(类级默认同上;访问一律经 _txn_list)
 
     def __init__(self):
         self.cfg, _cfg_stale = _load_config_raw()
@@ -1373,6 +1439,8 @@ class ClipboardCore:
         self._search_cache = {}       # id(rec) → casefold 检索串(条目内容不可变)
         self.on_dirty = None            # 前端回调(启动防抖定时器)
         self._ignore_clip_until = 0.0   # 抑制自写入剪贴板事件的截止时间(单调钟)
+        # 可撤销操作栈(Transaction;上限批数见 _TXN_MAX)
+        self._txn_stack = []
         if json_world:
             # 历史迁移:补齐哈希、合并重复图片条目(孤儿文件清理延迟到启动后,
             # 见 cleanup_orphan_images;条目迁移仍须在后台线程启动前完成)
@@ -1395,6 +1463,10 @@ class ClipboardCore:
         else:
             # 库模式:图片修正已在首次迁移前做过;启动清理走库写透
             self.apply_cleanup()
+        # CAS 布局迁移(images/img_<hash>.png → blobs/<h2>/<hash>;两种模式都要)
+        self._migrate_blobs()
+        # 上次会话残留的 deleted 态行(异常退出没等到 GC)在此清账
+        self._collect_garbage()
         # 旧版明文私密区/密钥自动升级为 DPAPI 加密
         self._migrate_private()
         self._migrate_config_secrets()
@@ -1540,13 +1612,16 @@ class ClipboardCore:
         try:
             img = Image.open(io.BytesIO(_dib_to_bmp_bytes(dib)))
             hsh = pixel_sha256(img)
-            path = os.path.join(IMAGE_DIR, "img_%s.png" % hsh)
+            path = blob_path(hsh)
+            if path is None:
+                return None
             if not os.path.exists(path):
                 # 去重命中时完全跳过 PNG 编码(4K 图编码秒级,像素哈希只要百毫秒级)
                 with PerfSpan("png_encode"):
                     buf = io.BytesIO()
                     img.save(buf, "PNG")
                 # 原子落盘:崩溃不留半截文件(否则下次命中坏文件无法自愈)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
                 Path(path + ".tmp").write_bytes(buf.getvalue())
                 os.replace(path + ".tmp", path)
             w = struct.unpack("<i", dib[4:8])[0]
@@ -1554,6 +1629,69 @@ class ClipboardCore:
             return ("image", {"path": path, "w": w, "h": h, "hash": hsh})
         except Exception:
             return None
+
+    _BLOB_NAME_RE = re.compile(r"^img_([0-9a-f]{64})\.png$")
+
+    def _migrate_blobs(self):
+        """CAS 布局一次性迁移:images/img_<hash>.png → blobs/<h2>/<hash>。
+
+        只认像素哈希命名的旧文件;其他文件(外部/测试放置)原地不动,
+        条目路径不变照常工作。目标已存在(内容相同)→ 直接删源文件。
+        条目 content 原地更新;库模式同步 update_image_ref 写透。
+        迁移后 images/ 若已空则移除。"""
+        try:
+            moved = 0
+            by_path = {}
+            # 历史与撤销栈里的条目都可能引用旧路径(撤销窗口内文件挪走后
+            # 仍要能显示),迁移统一原地更新两处引用
+            live_recs = list(self.history)
+            for t in self._txn_list():
+                live_recs.extend(t.recs)
+            for h in live_recs:
+                if h.get("type") == "image" and h.get("content"):
+                    by_path[os.path.normcase(h["content"])] = h
+            if not os.path.isdir(IMAGE_DIR):
+                return
+            for name in os.listdir(IMAGE_DIR):
+                m = self._BLOB_NAME_RE.match(name)
+                if not m:
+                    continue
+                hsh = m.group(1)
+                src = os.path.join(IMAGE_DIR, name)
+                dst = blob_path(hsh)
+                if dst is None:
+                    continue
+                try:
+                    if os.path.exists(dst):
+                        os.remove(src)          # 内容相同,保留一份即可
+                    else:
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        os.replace(src, dst)
+                    moved += 1
+                    rec = by_path.get(os.path.normcase(src))
+                    if rec is not None:
+                        rec["content"] = dst
+                        if self.store is not None and rec.get("_db") is not None:
+                            self.store.update_image_ref(rec["_db"], hsh, dst)
+                except Exception:
+                    continue
+            if moved:
+                log("CAS 迁移:%d 个图片文件移入 blobs/ 分片布局" % moved)
+                if self.store is None:
+                    save_history(self.history,
+                                 encrypt=bool(self.cfg.get("encrypt_history")))
+                else:
+                    self._mark_dirty()
+                # images/ 空了(只剩非托管文件则不动目录)→ 尝试清掉
+                try:
+                    with os.scandir(IMAGE_DIR) as it:
+                        empty = not any(it)
+                    if empty:
+                        os.rmdir(IMAGE_DIR)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _migrate_images(self):
         """图片历史迁移:补齐哈希、合并重复内容(只动条目,不碰磁盘文件)。
@@ -1594,18 +1732,9 @@ class ClipboardCore:
             pass
 
     def _free_record_file(self, rec):
-        """清理条目时释放其磁盘资产(图片文件);返回释放的字节数。"""
-        freed = 0
-        if rec.get("type") == "image":
-            try:
-                freed = os.path.getsize(rec["content"])
-            except Exception:
-                freed = 0
-            try:
-                os.remove(rec["content"])
-            except Exception:
-                pass
-        return freed
+        """清理条目时释放其磁盘资产;文件删除经引用计数复检
+        (同内容多条目共享 CAS blob,不再直接删)。返回释放的字节数。"""
+        return self._blob_unref(rec)
 
     def apply_cleanup(self):
         """按 cleanup_days / disk_cap_mb 自动清理(置顶条目一律豁免)。
@@ -1621,14 +1750,15 @@ class ClipboardCore:
             gone = []
             for h in self.history:
                 if not h.get("pinned") and float(h.get("ts", 0) or 0) < cutoff:
-                    freed += self._free_record_file(h)
                     gone.append(h)
                     n += 1
                 else:
                     keep.append(h)
-            if n:
-                self.history[:] = keep
+            if gone:
+                self.history[:] = keep            # 先出列,引用计数才不含自身
                 self._store_del(gone)
+                for h in gone:
+                    freed += self._free_record_file(h)
         cap = float(self.cfg.get("disk_cap_mb", 0) or 0)
         if cap > 0:
             cap_bytes = cap * 1024 * 1024
@@ -1645,52 +1775,108 @@ class ClipboardCore:
             for h in imgs:
                 if total <= cap_bytes:
                     break
+                try:
+                    self.history.remove(h)      # 先出列(引用计数不含自身)
+                except ValueError:
+                    continue
+                self._store_del([h])
                 sz = self._free_record_file(h)
                 total -= sz
                 freed += sz
                 n += 1
-                try:
-                    self.history.remove(h)
-                    self._store_del([h])
-                except ValueError:
-                    pass
         if n:
             self._mark_dirty()
             log("自动清理:删除 %d 条,释放 %s" % (n, _fmt_size(freed)))
         return n, freed
 
     def cleanup_orphan_images(self, min_age=120.0):
-        """删除不被任何历史条目引用的孤儿图片(前端延迟调度,不占启动路径)。
+        """删除引用计数为零的孤儿 blob(前端延迟调度,不占启动路径)。
 
         线程约定:与历史变更同线程(UI 线程)调用,引用快照才一致;
         min_age 秒内新建的文件一律跳过——捕获线程刚落盘、事件尚未入史的
         瞬间文件恰好"无引用",靠时间窗兜底而不是加锁。
+
+        引用计数:库模式按表内全部行(含 deleted 态——撤销还救得回);
+        JSON 模式按内存 history + 撤销栈。blobs/ 只认哈希命名的文件;
+        旧 images/ 目录仍按整目录托管清理(迁移后残留即孤儿)。
         """
         try:
-            refs = {h.get("content") for h in self.history
-                    if h.get("type") == "image"}
+            refs_path, refs_blob = set(), set()
+            if self.store is not None:
+                with self.store._lock:
+                    rows = self.store.db.execute(
+                        "SELECT blob_hash, metadata_json FROM clipboard_items "
+                        "WHERE content_type='image'").fetchall()
+                for r in rows:
+                    if r["blob_hash"]:
+                        refs_blob.add(r["blob_hash"])
+                    try:
+                        p = json.loads(r["metadata_json"] or "{}").get("path")
+                        if p:
+                            refs_path.add(os.path.normcase(p))
+                    except Exception:
+                        pass
+            live_recs = list(self.history)
+            for t in self._txn_list():
+                live_recs.extend(t.recs)
+            for h in live_recs:
+                if h.get("type") == "image":
+                    if h.get("hash"):
+                        refs_blob.add(h["hash"])
+                    if h.get("content"):
+                        refs_path.add(os.path.normcase(h["content"]))
             now = time.time()
             removed = 0
+
+            def _unlink_orphan(fp, mtime):
+                try:
+                    if now - mtime < min_age:
+                        return False              # 可能正被捕获流程写入
+                except OSError:
+                    return False
+                try:
+                    os.remove(fp)
+                    return True
+                except Exception:
+                    return False
+
+            if os.path.isdir(BLOB_DIR):
+                with os.scandir(BLOB_DIR) as buckets:
+                    for b in buckets:             # 256 个哈希前缀桶
+                        if not b.is_dir():
+                            continue
+                        with os.scandir(b.path) as it:
+                            for e in it:
+                                if e.is_dir() or "." in e.name:
+                                    continue      # 只认纯哈希名;*.tmp 等跳过
+                                if e.name in refs_blob:
+                                    continue
+                                try:
+                                    mt = e.stat().st_mtime
+                                except OSError:
+                                    continue
+                                if _unlink_orphan(e.path, mt):
+                                    removed += 1
+                        try:
+                            os.rmdir(b.path)      # 空桶顺手回收
+                        except Exception:
+                            pass
             if os.path.isdir(IMAGE_DIR):
                 with os.scandir(IMAGE_DIR) as it:     # 扁平目录,无需 os.walk
                     for e in it:
                         if e.is_dir() or not e.name.lower().endswith((".png", ".tmp")):
                             continue
                         fp = os.path.join(IMAGE_DIR, e.name)
-                        if fp in refs:
+                        if os.path.normcase(fp) in refs_path:
                             continue
                         try:
-                            if now - e.stat().st_mtime < min_age:
-                                continue               # 可能正被捕获流程写入
+                            mt = e.stat().st_mtime
                         except OSError:
                             continue
-                        try:
-                            os.remove(fp)
+                        if _unlink_orphan(fp, mt):
                             removed += 1
-                        except Exception:
-                            pass
             if removed:
-                log("孤儿图片清理:删除 %d 个未引用文件" % removed)
+                log("孤儿 blob 清理:删除 %d 个引用计数为零的文件" % removed)
         except Exception:
             pass
 
@@ -2003,62 +2189,130 @@ class ClipboardCore:
         self._mark_dirty()
 
     def delete_at(self, hi):
+        """硬删除单条:行立即物理删;图片文件经引用计数复检(refcount==0 才删)。"""
         rec = self.history.pop(hi)
-        if rec["type"] == "image":
-            try:
-                os.remove(rec["content"])
-            except Exception:
-                pass
         self._store_del([rec])
+        self._blob_unref(rec)
         self._mark_dirty()
         return rec
 
     def clear_unpinned(self):
-        """清空未置顶条目(连同其图片文件);置顶保留。"""
-        removed = []
-        for h in self.history:
-            if not h.get("pinned") and h["type"] == "image":
-                try:
-                    os.remove(h["content"])
-                except Exception:
-                    pass
+        """清空未置顶条目(置顶保留);文件删除走引用计数。"""
         removed = [h for h in self.history if not h.get("pinned")]
         self.history[:] = [h for h in self.history if h.get("pinned")]
         self._store_del(removed)
+        for h in removed:
+            self._blob_unref(h)
         self._mark_dirty()
 
-    # ---- 可撤销删除(批次撤销栈) ----
-    _TRASH_BATCHES = 20          # 最多记住 20 次删除操作
+    # ---- 可撤销删除(Transaction 栈) ----
+    _TXN_MAX = 20                  # 撤销栈最多保留 20 笔事务(弹底即不可再撤)
+    _TXN_GC_GRACE = 45.0           # deleted 态行的 GC 宽限(秒);须远大于 UI 6s 撤销窗
 
-    def _trash_push(self, recs):
-        """软删除入撤销栈:条目出列但图片文件保留原位(撤销后原样可显示);
-        未撤销的文件由下次启动的孤儿清理兜底删除。栈按「批次」存,
-        一次操作(单删/清空)= 一批,撤销一次恢复一批。"""
-        if not hasattr(self, "_trash"):
-            self._trash = []
-        if recs:
-            self._trash.append(list(recs))
-        while len(self._trash) > self._TRASH_BATCHES:
-            self._trash.pop(0)
-        self._mark_dirty()
+    def _txn_list(self):
+        """撤销栈(惰性初始化,__new__ 直造的核心同样可用)。"""
+        if self._txn_stack is None:
+            self._txn_stack = []
+        return self._txn_stack
+
+    def _txn_run(self, txn):
+        """执行一笔事务并入撤销栈;栈满弹底(最老的批次先失去撤销机会)。"""
+        stack = self._txn_list()
+        gone = txn.commit()
+        if gone:
+            stack.append(txn)
+            while len(stack) > self._TXN_MAX:
+                stack.pop(0)
+            self._schedule_gc()
+        return gone
+
+    def _txn_stack_refs(self, path, blob):
+        """撤销栈中的事务是否仍引用该文件/哈希(撤销窗口内文件不能删)。"""
+        for t in self._txn_list():
+            for r in t.recs:
+                if r.get("type") != "image":
+                    continue
+                if (blob and r.get("hash") == blob) or r.get("content") == path:
+                    return True
+        return False
+
+    def _blob_unref(self, rec):
+        """条目被物理移除后释放其磁盘资产:图片文件只在引用计数归零时删除
+        (同内容多条目共享一个 CAS blob;库模式按表内行计数,含 deleted 态
+        ——那些行还可能被撤销救回;JSON 模式按内存引用计数)。返回释放字节数。"""
+        if rec.get("type") != "image":
+            return 0
+        path = rec.get("content") or ""
+        blob = rec.get("hash") or ""
+        if self.store is not None:
+            if blob and self.store.blob_refcount(blob) > 0:
+                return 0
+        else:
+            live = sum(1 for h in self.history
+                       if h.get("type") == "image"
+                       and ((blob and h.get("hash") == blob)
+                            or h.get("content") == path))
+            if live or self._txn_stack_refs(path, blob):
+                return 0
+        freed = 0
+        try:
+            freed = os.path.getsize(path)
+        except Exception:
+            freed = 0
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        return freed
+
+    def _schedule_gc(self):
+        """删除后安排一次延迟 GC:宽限期略大于调度延迟,时点过了自然幂等。"""
+        if self.store is None:
+            return
+        t = threading.Timer(self._TXN_GC_GRACE + 5.0, self._collect_garbage)
+        t.daemon = True
+        t.start()
+
+    def _collect_garbage(self):
+        """物理删除宽限期已过的 deleted 行,再对涉及 blob 复检引用计数。"""
+        if self.store is None:
+            return
+        try:
+            gone = self.store.collect_garbage(self._TXN_GC_GRACE)
+        except Exception:
+            return
+        freed = 0
+        for _dbid, bhash in gone:
+            if not bhash:
+                continue
+            if self.store.blob_refcount(bhash) == 0:
+                p = blob_path(bhash)
+                if p and os.path.exists(p):
+                    try:
+                        freed += os.path.getsize(p)
+                        os.remove(p)
+                    except Exception:
+                        pass
+        # 撤销栈里已全被 GC 的旧事务清掉(rollback 有重建防御,这里只是收尾)
+        gone_ids = {g[0] for g in gone}
+        self._txn_stack = [t for t in self._txn_list()
+                           if any(r.get("_db") not in gone_ids for r in t.recs)]
+        if gone and freed:
+            log("事务 GC:回收 %d 行,释放 %s" % (len(gone), _fmt_size(freed)))
 
     def soft_delete_at(self, hi):
-        """可撤销的单条删除(不删图片文件)。"""
-        rec = self.history.pop(hi)
-        self._store_del([rec])
-        self._trash_push([rec])
-        return rec
+        """可撤销的单条删除(行进 deleted 态,文件不动)。"""
+        txn = DeleteTransaction(self, [self.history[hi]])
+        self._txn_run(txn)
+        return txn.recs[0]
 
     def batch_soft_delete(self, recs):
-        """可撤销的批量删除(按记录身份匹配,文件保留);返回实际删除条数。"""
+        """可撤销的批量删除(按记录身份匹配);返回实际删除条数。"""
         ids = {id(r) for r in recs}
         removed = [h for h in self.history if id(h) in ids]
         if not removed:
             return 0
-        keep = [h for h in self.history if id(h) not in ids]
-        self.history[:] = keep
-        self._store_del(removed)
-        self._trash_push(removed)
+        self._txn_run(DeleteTransaction(self, removed))
         return len(removed)
 
     # ---- 导出 / 导入(备份与迁移) ----
@@ -2122,8 +2376,13 @@ class ClipboardCore:
                     raw = base64.b64decode(it["image_b64"])
                     img = Image.open(io.BytesIO(raw))
                     hsh = pixel_sha256(img)
-                    path = os.path.join(IMAGE_DIR, "img_%s.png" % hsh)
+                    path = blob_path(hsh)
+                    if path is None:
+                        skipped += 1
+                        continue
+                    # hash 已存在(CAS 命中)→ 跳过落盘,同图 50 份也只存一份
                     if not os.path.exists(path):
+                        os.makedirs(os.path.dirname(path), exist_ok=True)
                         tmp = path + ".tmp"
                         Path(tmp).write_bytes(raw)
                         os.replace(tmp, path)
@@ -2148,26 +2407,19 @@ class ClipboardCore:
         return added, skipped
 
     def soft_clear_unpinned(self):
-        """可撤销的清空(置顶保留,不删图片文件);返回被移除的条目。"""
+        """可撤销的清空(置顶保留,行进 deleted 态);返回被移除的条目。"""
         removed = [h for h in self.history if not h.get("pinned")]
-        self.history[:] = [h for h in self.history if h.get("pinned")]
-        self._store_del(removed)
-        self._trash_push(removed)
+        if not removed:
+            return removed
+        self._txn_run(DeleteTransaction(self, removed))
         return removed
 
     def undo_delete(self):
-        """撤销最近一批软删除:条目按原相对顺序回到列表最前。"""
-        if not getattr(self, "_trash", None):
+        """撤销最近一笔删除事务:条目按原相对顺序回到列表最前。"""
+        stack = self._txn_list()
+        if not stack:
             return []
-        recs = self._trash.pop()
-        live = {id(h) for h in self.history}
-        back = [r for r in recs if id(r) not in live]   # 防重复恢复
-        self.history[0:0] = back
-        if self.store is not None:
-            for r in back:
-                self.store.upsert_promote(r)     # 已有行:提升 seq 到最前
-        self._mark_dirty()
-        return back
+        return stack.pop().rollback()
 
     def save_all(self):
         self.flush_history()
@@ -2185,6 +2437,7 @@ class ClipboardCore:
         self.cfg["encrypt_history"] = on
         if on:
             save_history(self.history, encrypt=True)
+            self._txn_stack = []      # 库已停用,旧事务按 JSON 语义无意义
             if self.store is not None:
                 try:
                     self.store.close()
@@ -2201,10 +2454,12 @@ class ClipboardCore:
                 with st._lock:
                     ids = [r["id"] for r in st.db.execute(
                         "SELECT id FROM clipboard_items "
-                        "ORDER BY seq DESC").fetchall()]
+                        "WHERE state='active' ORDER BY seq DESC").fetchall()]
                 for rec, dbid in zip(self.history, ids):
                     rec["_db"] = dbid
                 self.store = st
+                # 重建后行 id 全变,指向旧行的撤销事务一并作废
+                self._txn_stack = []
                 try:
                     os.remove(HISTORY_FILE)
                 except Exception:
