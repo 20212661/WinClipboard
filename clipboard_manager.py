@@ -1826,6 +1826,57 @@ class ClipboardCore:
                 "exported_at": time.time(), "include_images": include_images,
                 "items": items}
 
+    def import_payload(self, payload):
+        """导入 export_payload 载荷:合并去重(add_item 同款键),图片按像素
+        哈希落盘重建,ts/置顶随条目还原。返回 (新增, 跳过)。"""
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            raise ValueError("不是有效的 WinClipboard 导出文件")
+        added = skipped = 0
+        for it in items:
+            if not isinstance(it, dict):
+                skipped += 1
+                continue
+            t, ts = it.get("type"), float(it.get("ts") or time.time())
+            if t == "text" and isinstance(it.get("content"), str) and it["content"].strip():
+                rich = {k: it[k] for k in ("html", "rtf") if it.get(k)}
+                item = ("text", it["content"], rich, it.get("src", ""))
+            elif t == "files" and isinstance(it.get("content"), list):
+                live = [p for p in it["content"] if os.path.exists(p)]
+                if not live:
+                    skipped += 1
+                    continue
+                item = ("files", live, it.get("src", ""))
+            elif t == "image" and it.get("image_b64"):
+                try:
+                    raw = base64.b64decode(it["image_b64"])
+                    img = Image.open(io.BytesIO(raw))
+                    hsh = pixel_sha256(img)
+                    path = os.path.join(IMAGE_DIR, "img_%s.png" % hsh)
+                    if not os.path.exists(path):
+                        tmp = path + ".tmp"
+                        Path(tmp).write_bytes(raw)
+                        os.replace(tmp, path)
+                    item = ("image", {"path": path, "w": it.get("w", 0),
+                                      "h": it.get("h", 0), "hash": hsh},
+                            it.get("src", ""))
+                except Exception:
+                    skipped += 1
+                    continue
+            else:
+                skipped += 1
+                continue
+            before = len(self.history)
+            self.add_item(item)     # 去重置顶;敏感文本按护栏进私密区
+            if len(self.history) != before:
+                added += 1
+                self.history[0]["ts"] = ts          # 还原原始时间
+                if it.get("pinned"):
+                    self.history[0]["pinned"] = True
+            else:
+                skipped += 1
+        return added, skipped
+
     def soft_clear_unpinned(self):
         """可撤销的清空(置顶保留,不删图片文件);返回被移除的条目。"""
         removed = [h for h in self.history if not h.get("pinned")]

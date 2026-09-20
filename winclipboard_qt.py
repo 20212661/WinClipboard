@@ -1504,6 +1504,16 @@ class SettingsPage(QWidget):
             "导出…", FIF.SAVE_AS, "导出历史",
             "全部条目导出为 JSON(可选内嵌图片),用于备份或迁移到别的电脑",
             parent=group4)
+        c_exp.clicked.connect(self._export_history)
+        c_imp = PushSettingCard(
+            "导入…", FIF.DOWNLOAD, "导入历史",
+            "从导出文件合并条目(自动去重;内嵌图片自动落盘;原时间/置顶还原)",
+            parent=group4)
+        c_imp.clicked.connect(self._import_history)
+        group4.addSettingCard(c_exp)
+        group4.addSettingCard(c_imp)
+        lay.addWidget(group4)
+
         group2 = SettingCardGroup("外观与系统", self)
         c_theme = SettingCard(FIF.BRUSH, "界面主题",
                               "跟随系统或固定浅色/深色(更改后立即生效)", parent=group2)
@@ -1672,6 +1682,25 @@ class SettingsPage(QWidget):
         InfoBar.success("导出完成",
                         "%d 条 → %s" % (len(payload["items"]), path),
                         parent=self, position=InfoBarPosition.TOP_RIGHT)
+
+    def _import_history(self):
+        """导入历史:合并去重,图片落盘重建,时间/置顶还原。"""
+        path, _ = QFileDialog.getOpenFileName(self, "导入历史", "",
+                                              "JSON (*.json);;所有文件 (*.*)")
+        if not path:
+            return
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            added, skipped = self.app.core.import_payload(payload)
+        except Exception as exc:
+            cm.log("导入历史失败:\n%s" % traceback.format_exc())
+            InfoBar.error("导入失败", str(exc)[:160], parent=self,
+                          position=InfoBarPosition.TOP_RIGHT)
+            return
+        self.app.refresh_view()
+        InfoBar.success("导入完成", "新增 %d 条,跳过 %d 条(重复或文件已不存在)"
+                        % (added, skipped), parent=self,
+                        position=InfoBarPosition.TOP_RIGHT)
 
     def _edit_exclusions(self):
         ExcludeAppsDialog(self, self.app).exec()
