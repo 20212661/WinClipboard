@@ -117,6 +117,34 @@ DEFAULT_CFG = {
     "ai_workflows": [],
 }
 
+
+def hotkey_label(mod, key=None):
+    """热键位掩码+虚拟键码 → "Ctrl+Shift+V" 可读文本。
+    key=None 表示只按了修饰键(录制过程中的中间态),结尾显示 "…"。"""
+    parts = []
+    if int(mod) & MOD_ALT:
+        parts.append("Alt")
+    if int(mod) & MOD_CONTROL:
+        parts.append("Ctrl")
+    if int(mod) & MOD_SHIFT:
+        parts.append("Shift")
+    if int(mod) & MOD_WIN:
+        parts.append("Win")
+    if key is None:
+        parts.append("…")
+        return "+".join(parts)
+    k = int(key)
+    if 0x30 <= k <= 0x39 or 0x41 <= k <= 0x5A:
+        parts.append(chr(k))
+    elif 0x70 <= k <= 0x7B:                     # VK_F1..VK_F12
+        parts.append("F%d" % (k - 0x6F))
+    elif k == 0x20:
+        parts.append("空格")
+    else:
+        parts.append("VK 0x%02X" % k)
+    return "+".join(parts)
+
+
 # ---- 面板外观(Apple 风格)----
 SHD = 26                # 窗口四周阴影边距
 PANEL_R = 20            # 面板圆角半径
@@ -993,9 +1021,14 @@ class TrayWorker(threading.Thread):
             self.hinst, None)
 
         # 托盘图标
+        # 托盘图标(提示文本跟随实际热键,可在设置页录制更改)
+        _cfg0 = self.app.cfg
+        _hk_tip = "WinClipboard  (%s)" % hotkey_label(
+            _cfg0.get("hotkey_mod", MOD_CONTROL | MOD_SHIFT),
+            _cfg0.get("hotkey_key", 0x56))
         self._nid = (self.hwnd, 0,
                      NIF_ICON | NIF_MESSAGE | NIF_TIP,
-                     WM_TASKBAR, self.hicon, "WinClipboard  (Ctrl+Shift+V)")
+                     WM_TASKBAR, self.hicon, _hk_tip)
         win32gui.Shell_NotifyIcon(NIM_ADD, self._nid)
 
         # 剪贴板监听 + 全局热键 + 命令定时器
@@ -1123,6 +1156,30 @@ class TrayWorker(threading.Thread):
                 send_ctrl_v()
             except Exception:
                 pass
+        elif cmd[0] == "hotkey":
+            # 设置页热键录制:重注册即冲突检测,失败回滚旧组合并如实上报
+            mod, key = int(cmd[1]), int(cmd[2])
+            cfg = self.app.cfg
+            try:
+                user32.UnregisterHotKey(self.hwnd, ID_HOTKEY)
+            except Exception:
+                pass
+            ok = bool(user32.RegisterHotKey(self.hwnd, ID_HOTKEY, mod, key))
+            if ok:
+                try:
+                    nid = (self.hwnd, 0, NIF_ICON | NIF_MESSAGE | NIF_TIP,
+                           WM_TASKBAR, self.hicon,
+                           "WinClipboard  (%s)" % hotkey_label(mod, key))
+                    win32gui.Shell_NotifyIcon(NIM_MODIFY, nid)
+                    self._nid = nid
+                except Exception:
+                    pass
+            else:
+                # 被占用:把旧热键注册回去,保持可用
+                user32.RegisterHotKey(self.hwnd, ID_HOTKEY,
+                                      cfg.get("hotkey_mod", MOD_CONTROL | MOD_SHIFT),
+                                      cfg.get("hotkey_key", 0x56))
+            self.app._post(("hotkey_change", ok, mod, key))
         elif cmd[0] == "quit":
             self._cleanup()
             win32gui.PostQuitMessage(0)

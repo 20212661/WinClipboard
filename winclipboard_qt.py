@@ -1338,6 +1338,88 @@ class PrivatePage(QWidget):
 # ============================================================
 # 设置页(全部使用 qfluentwidgets SettingCard 组件)
 # ============================================================
+class HotkeyRecorderDialog(MessageBoxBase):
+    """全局热键录制:点击输入框直接按键捕获组合,「应用」经核心线程
+    重注册(即冲突检测),被占用时回滚并提示,不再要求手改配置文件。"""
+
+    _MODIFIER_KEYS = (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt,
+                      Qt.Key_Meta, Qt.Key_AltGr)
+
+    def __init__(self, parent, cur_label, on_apply):
+        super().__init__(parent)
+        self._on_apply = on_apply
+        self._mod = 0
+        self._key = 0
+
+        ttl = StrongBodyLabel("录制全局热键")
+        self.viewLayout.addWidget(ttl)
+        sub = CaptionLabel("当前热键:%s。点击下方输入框,直接按下新组合键"
+                           "(需搭配 Ctrl / Shift / Alt / Win 至少一个);Esc 取消。"
+                           % cur_label)
+        sub.setWordWrap(True)
+        sub.setStyleSheet("color: %s;" % TER)
+        self.viewLayout.addWidget(sub)
+
+        self.capture = LineEdit()
+        self.capture.setReadOnly(True)
+        self.capture.setPlaceholderText("点这里,然后按下组合键(如 Ctrl+Shift+V)")
+        # 只读框默认不吃按键:按下即视为录制(实例级重载,不改库组件)
+        self.capture.keyPressEvent = self._on_key
+        self.viewLayout.addWidget(self.capture)
+
+        self.yesButton.setText("应用")
+        self.cancelButton.setText("取消")
+        self.yesButton.setEnabled(False)
+        self.widget.setFixedWidth(440)
+
+    def _on_key(self, e):
+        k = e.key()
+        if k == Qt.Key_Escape:
+            self.reject()
+            return
+        mod = 0
+        m = e.modifiers()
+        if m & Qt.ControlModifier:
+            mod |= cm.MOD_CONTROL
+        if m & Qt.ShiftModifier:
+            mod |= cm.MOD_SHIFT
+        if m & Qt.AltModifier:
+            mod |= cm.MOD_ALT
+        if m & Qt.MetaModifier:
+            mod |= cm.MOD_WIN
+        if k in self._MODIFIER_KEYS:
+            self._mod, self._key = mod, 0
+            self.capture.setText(cm.hotkey_label(mod, None))
+            self.yesButton.setEnabled(False)
+            return
+        vk = None
+        if Qt.Key_A <= k <= Qt.Key_Z:
+            vk = 0x41 + (k - Qt.Key_A)
+        elif Qt.Key_0 <= k <= Qt.Key_9:
+            vk = 0x30 + (k - Qt.Key_0)
+        elif Qt.Key_F1 <= k <= Qt.Key_F12:
+            vk = 0x70 + (k - Qt.Key_F1)
+        elif k == Qt.Key_Space:
+            vk = 0x20
+        if vk is None:
+            self.capture.setText("暂不支持该按键,请用字母 / 数字 / F1-F12 / 空格")
+            self.yesButton.setEnabled(False)
+            return
+        if mod == 0:
+            self.capture.setText("需至少搭配一个修饰键(Ctrl / Shift / Alt / Win)")
+            self.yesButton.setEnabled(False)
+            return
+        self._mod, self._key = mod, vk
+        self.capture.setText(cm.hotkey_label(mod, vk))
+        self.yesButton.setEnabled(True)
+
+    def validate(self):
+        """点「应用」:交给宿主走重注册链路;真正的成败由 hotkey_change 事件回报。"""
+        if self._mod and self._key:
+            self._on_apply(self._mod, self._key)
+            return True
+        return False
+
 
 class ExcludeAppsDialog(MessageBoxBase):
     """按应用排除名单管理:添加(下拉里带历史出现过的来源应用,可直接输
@@ -1420,11 +1502,24 @@ class SettingsPage(QWidget):
         super().__init__()
         self.app = app
         self.setObjectName("settingsPage")
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(36, 24, 36, 16)
-        lay.setSpacing(8)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(36, 24, 36, 16)
+        outer.setSpacing(8)
         ttl = TitleLabel("设置")
-        lay.addWidget(ttl)
+        outer.addWidget(ttl)
+        # 卡片组放进滚动容器:默认窗口尺寸与高 DPI 缩放下底部卡片
+        # (开机自启/全局热键)不再被裁掉;标题常驻,只有内容滚动
+        scroll = ScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        body = QWidget()
+        body.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(0, 0, 12, 0)
+        lay.setSpacing(8)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
         cfg = app.cfg
 
         group = SettingCardGroup("剪贴板", self)
@@ -1598,18 +1693,21 @@ class SettingsPage(QWidget):
             c_auto.setChecked(app.core.is_autostart())
         c_auto.checkedChanged.connect(on_auto)
 
-        c_key = PushSettingCard(
-            "查看说明", FIF.CUT, "全局热键",
-            "Ctrl + Shift + V 显示/隐藏主窗口(被占用时可修改)", parent=group2)
-
-        def show_key_help():
-            MessageBox(
-                "修改全局热键",
-                "编辑配置文件中的热键位掩码后重启:\n"
-                "  hotkey_mod: Ctrl=2, Shift=4, Alt=1, Win=8(6 = Ctrl+Shift)\n"
-                "  hotkey_key: 主键虚拟键码(86 = V)\n\n配置文件:\n%s" % cm.CONFIG_FILE,
-                self).exec()
-        c_key.clicked.connect(show_key_help)
+        c_key = SettingCard(
+            FIF.CUT, "全局热键",
+            "显示/隐藏主窗口;点「更改」直接按键录制,被占用会即时提示并保留原热键",
+            parent=group2)
+        self.lbl_hotkey = CaptionLabel(cm.hotkey_label(
+            cfg.get("hotkey_mod", cm.MOD_CONTROL | cm.MOD_SHIFT),
+            cfg.get("hotkey_key", 0x56)))
+        self.lbl_hotkey.setStyleSheet("color: %s; font-weight: 600;" % ACCENT)
+        b_key = PushButton("更改", self)
+        b_key.clicked.connect(lambda: HotkeyRecorderDialog(
+            self, self.lbl_hotkey.text(), app.apply_hotkey).exec())
+        c_key.hBoxLayout.addWidget(self.lbl_hotkey, 0, Qt.AlignRight)
+        c_key.hBoxLayout.addSpacing(8)
+        c_key.hBoxLayout.addWidget(b_key, 0, Qt.AlignRight)
+        c_key.hBoxLayout.addSpacing(16)
 
         group2.addSettingCard(c_theme)
         group2.addSettingCard(c_accent)
@@ -1637,6 +1735,11 @@ class SettingsPage(QWidget):
         lay.addWidget(group5)
         lay.addStretch(1)
 
+    def update_hotkey_label(self):
+        """热键变更成功后由应用层(hotkey_change 事件)回写当前组合显示。"""
+        self.lbl_hotkey.setText(cm.hotkey_label(
+            self.app.cfg.get("hotkey_mod", cm.MOD_CONTROL | cm.MOD_SHIFT),
+            self.app.cfg.get("hotkey_key", 0x56)))
 
     def sync_monitor_pause(self):
         """托盘菜单切换暂停监听后,设置页开关同步显示(值未变不发信号,无回环)。"""
@@ -6207,6 +6310,50 @@ class WinClipboardApp(QObject):
     def show_ai_hub(self):
         self.win.switchTo(self.win.workflow_page)
 
+    def apply_hotkey(self, mod, key):
+        """设置页热键录制:命令发给核心线程重注册(RegisterHotKey 失败
+        = 被占用 = 冲突检测),成败经 hotkey_change 事件回 UI。"""
+        try:
+            self.core.worker.cmd_q.put(("hotkey", int(mod), int(key)))
+        except Exception:
+            cm.log("热键更改命令投递失败:\n%s" % traceback.format_exc())
+
+    def toggle_monitor_pause(self, on=None):
+        """临时隐私模式:暂停期间剪贴板事件不入史(不落盘,重启即恢复监听)。"""
+        paused = (not self.core.monitor_paused) if on is None else bool(on)
+        if paused == self.core.monitor_paused:
+            return
+        self.core.monitor_paused = paused
+        if paused:
+            InfoBar.warning("已暂停监听", "期间复制的内容不会进入历史",
+                            parent=self.win, position=InfoBarPosition.TOP_RIGHT,
+                            duration=3000)
+        else:
+            InfoBar.success("已恢复监听", "", parent=self.win,
+                            position=InfoBarPosition.TOP_RIGHT, duration=2000)
+        try:
+            self.win.settings_page.sync_monitor_pause()
+        except Exception:
+            pass
+
+    def _on_hotkey_change(self, ok, mod, key):
+        label = cm.hotkey_label(mod, key)
+        if ok:
+            self.cfg["hotkey_mod"] = int(mod)
+            self.cfg["hotkey_key"] = int(key)
+            cm.save_config(self.cfg)
+            InfoBar.success("热键已更新", "新热键:" + label, parent=self.win,
+                            position=InfoBarPosition.TOP_RIGHT)
+        else:
+            InfoBar.error("热键注册失败",
+                          "「%s」可能被其他软件占用,已保留原热键" % label,
+                          parent=self.win, position=InfoBarPosition.TOP_RIGHT,
+                          duration=5000)
+        try:
+            self.win.settings_page.update_hotkey_label()
+        except Exception:
+            pass
+
     def show_services(self):
         self.win.services_page.refresh()   # 配置可能在别处变动(如工作流页填入示例)
         self.win.switchTo(self.win.services_page)
@@ -6236,6 +6383,8 @@ class WinClipboardApp(QObject):
         self.win.switchTo(self.win.private_page)
 
     def about(self):
+        hk = cm.hotkey_label(self.cfg.get("hotkey_mod", cm.MOD_CONTROL | cm.MOD_SHIFT),
+                             self.cfg.get("hotkey_key", 0x56))
         MessageBox("关于 WinClipboard",
                    "Windows 桌面剪贴板管理器  v%s\n\n"
                    "热键: %s 弹出/隐藏\n"
@@ -6284,8 +6433,10 @@ class WinClipboardApp(QObject):
             return
         self._warned_hotkey = True
         MessageBox("WinClipboard",
-                   "全局热键(Ctrl+Shift+V)注册失败,可能被其他软件占用。\n"
-                   "可在 %s 中修改 hotkey_mod / hotkey_key 后重启。" % cm.CONFIG_FILE,
+                   "全局热键(%s)注册失败,可能被其他软件占用。\n"
+                   "可在设置页直接录制新热键,或重启后重试。"
+                   % cm.hotkey_label(self.cfg.get("hotkey_mod"),
+                                     self.cfg.get("hotkey_key")),
                    self.win).exec()
 
     def quit_app(self):
@@ -6353,6 +6504,8 @@ class WinClipboardApp(QObject):
             self.pinboard.toggle_click_through(None)
         elif kind == "ctt_hotkey_state":    # 穿透退出热键注册结果(失败则禁穿透)
             self.pinboard.mark_ctt_hotkey(bool(rest[0]))
+        elif kind == "hotkey_change":       # 设置页热键录制结果(成败/回滚)
+            self._on_hotkey_change(bool(rest[0]), rest[1], rest[2])
         elif kind == "tray":
             act = rest[0]
             if act == "show":
