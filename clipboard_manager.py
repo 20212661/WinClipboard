@@ -108,6 +108,8 @@ DEFAULT_CFG = {
     "sensitive_guard": True,
     "exclude_apps": [],         # 按应用排除:名单内程序的复制不入史(exe 名小写)
     "max_items": 100,
+    "cleanup_days": 0,          # 自动清理:删除 N 天前的未置顶条目(0 = 关闭)
+    "disk_cap_mb": 0,           # 图片缓存上限 MB,超限从最旧删起(0 = 关闭)
     "window_w": 600,
     "window_h_max": 720,
     # ---- AI 工作流(Qt 版 UI 使用;两版前端共享配置) ----
@@ -1255,6 +1257,8 @@ class ClipboardCore:
         # 历史迁移:补齐哈希、合并重复图片条目(孤儿文件清理延迟到启动后,
         # 见 cleanup_orphan_images;条目迁移仍须在后台线程启动前完成)
         self._migrate_images()
+        # 自动清理(天数/容量策略,置顶豁免):在首笔落盘前做,裁剪结果直接持久化
+        self.apply_cleanup()
         # 旧版明文私密区/密钥自动升级为 DPAPI 加密
         self._migrate_private()
         self._migrate_config_secrets()
@@ -1445,6 +1449,68 @@ class ClipboardCore:
                 save_history(self.history)
         except Exception:
             pass
+
+    def _free_record_file(self, rec):
+        """清理条目时释放其磁盘资产(图片文件);返回释放的字节数。"""
+        freed = 0
+        if rec.get("type") == "image":
+            try:
+                freed = os.path.getsize(rec["content"])
+            except Exception:
+                freed = 0
+            try:
+                os.remove(rec["content"])
+            except Exception:
+                pass
+        return freed
+
+    def apply_cleanup(self):
+        """按 cleanup_days / disk_cap_mb 自动清理(置顶条目一律豁免)。
+
+        - cleanup_days>0:删除 N 天前的未置顶条目(含图片文件);
+        - disk_cap_mb>0:图片缓存总量超上限时,从最旧的未置顶图片条目删起。
+        启动时与设置页变更时调用;返回 (清理条数, 释放字节)。"""
+        n, freed = 0, 0
+        days = float(self.cfg.get("cleanup_days", 0) or 0)
+        if days > 0:
+            cutoff = time.time() - days * 86400
+            keep = []
+            for h in self.history:
+                if not h.get("pinned") and float(h.get("ts", 0) or 0) < cutoff:
+                    freed += self._free_record_file(h)
+                    n += 1
+                else:
+                    keep.append(h)
+            if n:
+                self.history[:] = keep
+        cap = float(self.cfg.get("disk_cap_mb", 0) or 0)
+        if cap > 0:
+            cap_bytes = cap * 1024 * 1024
+            total = 0
+            for h in self.history:
+                if h.get("type") == "image":
+                    try:
+                        total += os.path.getsize(h.get("content", ""))
+                    except Exception:
+                        pass
+            imgs = sorted((h for h in self.history
+                           if h.get("type") == "image" and not h.get("pinned")),
+                          key=lambda h: float(h.get("ts", 0) or 0))
+            for h in imgs:
+                if total <= cap_bytes:
+                    break
+                sz = self._free_record_file(h)
+                total -= sz
+                freed += sz
+                n += 1
+                try:
+                    self.history.remove(h)
+                except ValueError:
+                    pass
+        if n:
+            self._mark_dirty()
+            log("自动清理:删除 %d 条,释放 %s" % (n, _fmt_size(freed)))
+        return n, freed
 
     def cleanup_orphan_images(self, min_age=120.0):
         """删除不被任何历史条目引用的孤儿图片(前端延迟调度,不占启动路径)。

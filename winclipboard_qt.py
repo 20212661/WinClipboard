@@ -1592,6 +1592,57 @@ class SettingsPage(QWidget):
         group.addSettingCard(c_max)
         lay.addWidget(group)
 
+        # ---- 存储与清理 ----
+        group3 = SettingCardGroup("存储与清理", self)
+
+        def _combo_index(combo, values, cur):
+            for i, v in enumerate(values):
+                if v == cur:
+                    combo.setCurrentIndex(i)
+                    break
+
+        c_days = SettingCard(FIF.BROOM, "自动清理历史",
+                             "超期未置顶条目自动删除(含图片文件);启动与每天检查一次",
+                             parent=group3)
+        combo_days = ComboBox()
+        _DAYS_ITEMS = ("关闭", "7 天", "30 天", "90 天")
+        _DAYS_VALS = (0, 7, 30, 90)
+        combo_days.addItems(list(_DAYS_ITEMS))
+        combo_days.setMinimumWidth(110)
+        _combo_index(combo_days, _DAYS_VALS, int(cfg.get("cleanup_days", 0) or 0))
+
+        def on_days(i):
+            cfg["cleanup_days"] = _DAYS_VALS[i]
+            cm.save_config(cfg)
+            self._run_cleanup()
+        combo_days.currentIndexChanged.connect(on_days)
+        self.combo_days = combo_days
+        c_days.hBoxLayout.addWidget(combo_days, 0, Qt.AlignRight)
+        c_days.hBoxLayout.addSpacing(16)
+
+        c_disk = SettingCard(FIF.SAVE, "图片缓存上限",
+                             "截图缓存超过上限时从最旧开始删除(置顶条目豁免)",
+                             parent=group3)
+        combo_disk = ComboBox()
+        _DISK_ITEMS = ("关闭", "200 MB", "500 MB", "1 GB", "2 GB")
+        _DISK_VALS = (0, 200, 500, 1024, 2048)
+        combo_disk.addItems(list(_DISK_ITEMS))
+        combo_disk.setMinimumWidth(110)
+        _combo_index(combo_disk, _DISK_VALS, int(cfg.get("disk_cap_mb", 0) or 0))
+
+        def on_disk(i):
+            cfg["disk_cap_mb"] = _DISK_VALS[i]
+            cm.save_config(cfg)
+            self._run_cleanup()
+        combo_disk.currentIndexChanged.connect(on_disk)
+        self.combo_disk = combo_disk
+        c_disk.hBoxLayout.addWidget(combo_disk, 0, Qt.AlignRight)
+        c_disk.hBoxLayout.addSpacing(16)
+
+        group3.addSettingCard(c_days)
+        group3.addSettingCard(c_disk)
+        group3.addSettingCard(c_enc)
+        lay.addWidget(group3)
 
         # ---- 备份与迁移 ----
         group4 = SettingCardGroup("备份与迁移", self)
@@ -1748,6 +1799,15 @@ class SettingsPage(QWidget):
     def _refresh_excl_label(self):
         n = len(self.app.cfg.get("exclude_apps") or [])
         self.lbl_excl.setText("已排除 %d 个应用" % n if n else "未排除任何应用")
+
+    def _run_cleanup(self):
+        """清理策略变更后立即执行一次(核心会按新配置裁剪并置脏落盘)。"""
+        n, freed = self.app.core.apply_cleanup()
+        if n:
+            self.app.refresh_view()
+            InfoBar.success("自动清理", "删除 %d 条,释放 %s"
+                            % (n, cm._fmt_size(freed)),
+                            parent=self, position=InfoBarPosition.TOP_RIGHT)
 
     # ---- 备份与迁移 ----
     def _export_history(self):
@@ -5950,6 +6010,11 @@ class WinClipboardApp(QObject):
         # 孤儿图片清理:启动收尾全部完成后再做(不占启动关键路径,
         # UI 线程执行 + 方法内的新文件时间窗防护,与捕获线程无竞态)
         QTimer.singleShot(3000, self._cleanup_orphan_images)
+        # 清理策略周期执行(常驻多日也要按天数/容量裁剪):每 6 小时一次
+        self._cleanup_timer = QTimer(self)
+        self._cleanup_timer.setInterval(6 * 3600 * 1000)
+        self._cleanup_timer.timeout.connect(self._periodic_cleanup)
+        self._cleanup_timer.start()
 
         # UI 事件循环健康监控:Mica 在个别远程会话上致派发器假死时
         # 无 Mica 自重启(机制与触发日志见 UiHealthMonitor)
@@ -6579,6 +6644,15 @@ class WinClipboardApp(QObject):
             self.core.cleanup_orphan_images()
         except Exception:
             cm.log("孤儿图片清理失败:\n%s" % traceback.format_exc())
+
+    def _periodic_cleanup(self):
+        """每 6 小时按 cleanup_days / disk_cap_mb 裁剪一次(常驻多日场景)。"""
+        try:
+            n, _ = self.core.apply_cleanup()
+            if n:
+                self.refresh_view()
+        except Exception:
+            cm.log("周期清理跳过:\n%s" % traceback.format_exc())
 
     def _prewarm(self):
         """启动 600ms 后的空闲预热:后台生成缩略图 + 隐藏时预构建卡片池。
