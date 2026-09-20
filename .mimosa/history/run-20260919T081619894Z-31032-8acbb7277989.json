@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20260919T081619894Z-31032-8acbb7277989",
+  "runStatus": "inconclusive",
+  "errors": [
+    "scan:perf_probe.py: scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+    "scan:clipboard_manager.py: scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+    "scan:winclipboard_qt.py: scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+    "scan:pinboard/loader.py: scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+    "scan:pinboard/manager.py: scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+    "scan:_integration_test.py: scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT"
+  ],
+  "target": ".",
+  "revision": "322786b2e3edfb245f0543cc9c437df4ea260b4f",
+  "diffHash": "e623ad80ed049f6970ea4cebbd0d22e0d0823eae2d7aabbe6fb5a0f0362ad3af",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-09-19T08:16:19.894Z",
+  "timing": {
+    "startedAt": "2026-09-19T08:16:16.838Z",
+    "completedAt": "2026-09-19T08:16:19.894Z",
+    "durationMs": 3056
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 0,
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "scanner_failed": 6,
+      "project_check_failed": 6
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_e1d29231-7c20-4930-b2e7-b74f616dcfe4-20260919T081619894Z-31032-8acbb7277989.json"
+}

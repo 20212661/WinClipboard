@@ -1,0 +1,299 @@
+{
+  "schema_version": "mimosa-task-review/v2",
+  "run_id": "20260917T064552729Z-6648-2986791ef9ac",
+  "run_status": "completed",
+  "errors": [],
+  "coverage": {
+    "schema_version": "mimosa-hook-coverage/v1",
+    "status": "complete",
+    "scope": "hook_observed_diff",
+    "baseline": {
+      "complete": true,
+      "captured_files": 20,
+      "candidate_limit": 5000,
+      "truncated": false,
+      "enumeration_error_count": 0,
+      "snapshot_error_count": 0,
+      "compensated_target_count": 3
+    },
+    "change_tracking": {
+      "touched_observed": 3,
+      "touched_retained": 3,
+      "truncated": false,
+      "bash_mutation": true,
+      "bash_discovered": 3,
+      "bash_discovery_limit": 80,
+      "bash_discovery_truncated": false
+    },
+    "candidates": {
+      "eligible_files": 3,
+      "selected_files": 3,
+      "limit": 20,
+      "truncated": false
+    },
+    "scanning": {
+      "required_files": 3,
+      "scanned_files": 3,
+      "skipped_files": 0,
+      "failed_files": 0,
+      "project_checks_required": 0,
+      "project_checks_completed": 0
+    },
+    "notification": {
+      "eligible_findings": 0,
+      "detailed_findings": 0,
+      "detail_limit": 3,
+      "truncated": false
+    },
+    "reason_counts": {},
+    "reasons": [],
+    "reasons_truncated": false
+  },
+  "generated_at": "2026-09-17T06:45:52.729Z",
+  "session_id": "sess_abecd1bc-f2d6-4402-b356-c4933313a8a0",
+  "target": ".",
+  "revision": "322786b2e3edfb245f0543cc9c437df4ea260b4f",
+  "rules_version": "unavailable",
+  "diff_hash": "ad47c3cd18448cc2fec49a1af3bbaea2e98cece335e3e3833b2a945647a4bbc2",
+  "diff": {
+    "algorithm": "sha256",
+    "changed_file_count": 3,
+    "changed_files": [
+      {
+        "file": "_ui_preview.py",
+        "ranges": [
+          {
+            "start": 175,
+            "end": 235
+          }
+        ],
+        "before_hash": "1371afcb760405fd289f77db90b47f91e66f22529a3b565dafbf554a2627587f",
+        "after_hash": "b81e7fb382f110390f8b3eab97cc1fc9ed02a3c0a37417311ea96f598f60c664"
+      },
+      {
+        "file": "clipboard_manager.py",
+        "ranges": [
+          {
+            "start": 1435,
+            "end": 1437
+          },
+          {
+            "start": 1441,
+            "end": 1442
+          },
+          {
+            "start": 1445,
+            "end": 1445
+          },
+          {
+            "start": 1447,
+            "end": 1447
+          },
+          {
+            "start": 1449,
+            "end": 1449
+          },
+          {
+            "start": 1453,
+            "end": 1453
+          }
+        ],
+        "before_hash": "9d0dc02367275de7a0fb9a33bd1689b25f16bd1178b436c2392a0c59e34bcca6",
+        "after_hash": "5869ce7071bcec4b5b172f6f16011dca4215843475dca329e0fe3f9202d5b334"
+      },
+      {
+        "file": "winclipboard_qt.py",
+        "ranges": [
+          {
+            "start": 34,
+            "end": 35
+          },
+          {
+            "start": 43,
+            "end": 43
+          },
+          {
+            "start": 1341,
+            "end": 1397
+          },
+          {
+            "start": 1428,
+            "end": 1432
+          },
+          {
+            "start": 1434,
+            "end": 1435
+          },
+          {
+            "start": 1438,
+            "end": 1439
+          },
+          {
+            "start": 1444,
+            "end": 1444
+          },
+          {
+            "start": 1451,
+            "end": 1451
+          },
+          {
+            "start": 1453,
+            "end": 1453
+          },
+          {
+            "start": 1456,
+            "end": 1457
+          },
+          {
+            "start": 1464,
+            "end": 1610
+          },
+          {
+            "start": 1614,
+            "end": 1614
+          },
+          {
+            "start": 1618,
+            "end": 1618
+          },
+          {
+            "start": 1623,
+            "end": 1623
+          },
+          {
+            "start": 1625,
+            "end": 1625
+          },
+          {
+            "start": 1631,
+            "end": 1640
+          },
+          {
+            "start": 1642,
+            "end": 1648
+          },
+          {
+            "start": 1650,
+            "end": 1654
+          },
+          {
+            "start": 1656,
+            "end": 1716
+          },
+          {
+            "start": 1719,
+            "end": 1725
+          },
+          {
+            "start": 1727,
+            "end": 1727
+          },
+          {
+            "start": 1730,
+            "end": 1741
+          },
+          {
+            "start": 1743,
+            "end": 1759
+          },
+          {
+            "start": 1766,
+            "end": 1766
+          },
+          {
+            "start": 1768,
+            "end": 1781
+          },
+          {
+            "start": 1793,
+            "end": 1794
+          },
+          {
+            "start": 1797,
+            "end": 1800
+          },
+          {
+            "start": 1802,
+            "end": 1803
+          },
+          {
+            "start": 1806,
+            "end": 1815
+          },
+          {
+            "start": 1818,
+            "end": 1828
+          },
+          {
+            "start": 1839,
+            "end": 1841
+          },
+          {
+            "start": 1848,
+            "end": 1849
+          },
+          {
+            "start": 1862,
+            "end": 1864
+          },
+          {
+            "start": 1866,
+            "end": 1871
+          }
+        ],
+        "before_hash": "e370d051a657cc826909d2f9a402b599dbe6e546185197d63fa573370066ab72",
+        "after_hash": "608b472c3eb7d1bd5edfdcab632d7dbb9b56002c740eae11a68e7539c5612551"
+      }
+    ]
+  },
+  "timing": {
+    "started_at": "2026-09-17T06:45:50.286Z",
+    "completed_at": "2026-09-17T06:45:52.729Z",
+    "duration_ms": 2443,
+    "measurement": "hook_wall_clock"
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "model_calls": 0,
+    "measurement": "known-zero"
+  },
+  "telemetry": {
+    "schemaVersion": "mimosa-gate-telemetry/v1",
+    "profile": "gate",
+    "operation": "Stop",
+    "outcome": "complete",
+    "latencyMs": 2443,
+    "peakMemoryBytes": 145367040,
+    "memoryMeasurement": "max-observed-process-rss",
+    "scannedFiles": 3,
+    "cache": {
+      "hits": 0,
+      "misses": 0,
+      "measurement": "not-applicable"
+    },
+    "denyCount": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0,
+      "modelCalls": 0,
+      "measurement": "known-zero"
+    }
+  },
+  "finding_count": 0,
+  "rewake_finding_count": 0,
+  "evidence_boundary": {
+    "scan": "candidate",
+    "static_fix_verification": "observed_static_only",
+    "runtime_verification": "not_performed"
+  },
+  "finding_events": [],
+  "findings": [],
+  "artifacts": {
+    "immutable_report": ".mimosa/reports/task-review-sess_abecd1bc-f2d6-4402-b356-c4933313a8a0-20260917T064552729Z-6648-2986791ef9ac.json",
+    "latest_report": ".mimosa/reports/task-review-sess_abecd1bc-f2d6-4402-b356-c4933313a8a0.json",
+    "history_summary": ".mimosa/history/run-20260917T064552729Z-6648-2986791ef9ac.json"
+  }
+}

@@ -1,0 +1,363 @@
+{
+  "schema_version": "mimosa-task-review/v2",
+  "run_id": "20260919T081619894Z-31032-8acbb7277989",
+  "run_status": "inconclusive",
+  "errors": [
+    {
+      "stage": "scan",
+      "target": "perf_probe.py",
+      "reason": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "clipboard_manager.py",
+      "reason": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "winclipboard_qt.py",
+      "reason": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "pinboard/loader.py",
+      "reason": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "pinboard/manager.py",
+      "reason": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "_integration_test.py",
+      "reason": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT"
+    }
+  ],
+  "coverage": {
+    "schema_version": "mimosa-hook-coverage/v1",
+    "status": "partial",
+    "scope": "hook_observed_diff",
+    "baseline": {
+      "complete": true,
+      "captured_files": 21,
+      "candidate_limit": 5000,
+      "truncated": false,
+      "enumeration_error_count": 0,
+      "snapshot_error_count": 0,
+      "compensated_target_count": 6
+    },
+    "change_tracking": {
+      "touched_observed": 6,
+      "touched_retained": 6,
+      "truncated": false,
+      "bash_mutation": false,
+      "bash_discovered": 0,
+      "bash_discovery_limit": 80,
+      "bash_discovery_truncated": false
+    },
+    "candidates": {
+      "eligible_files": 6,
+      "selected_files": 6,
+      "limit": 20,
+      "truncated": false
+    },
+    "scanning": {
+      "required_files": 6,
+      "scanned_files": 0,
+      "skipped_files": 0,
+      "failed_files": 6,
+      "project_checks_required": 0,
+      "project_checks_completed": 0
+    },
+    "notification": {
+      "eligible_findings": 0,
+      "detailed_findings": 0,
+      "detail_limit": 3,
+      "truncated": false
+    },
+    "reason_counts": {
+      "scanner_failed": 6,
+      "project_check_failed": 6
+    },
+    "reasons": [
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "perf_probe.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "clipboard_manager.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "winclipboard_qt.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "pinboard/loader.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "pinboard/manager.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "_integration_test.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "perf_probe.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "clipboard_manager.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "winclipboard_qt.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "pinboard/loader.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "pinboard/manager.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "_integration_test.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      }
+    ],
+    "reasons_truncated": false
+  },
+  "generated_at": "2026-09-19T08:16:19.894Z",
+  "session_id": "sess_e1d29231-7c20-4930-b2e7-b74f616dcfe4",
+  "target": ".",
+  "revision": "322786b2e3edfb245f0543cc9c437df4ea260b4f",
+  "rules_version": "unavailable",
+  "diff_hash": "e623ad80ed049f6970ea4cebbd0d22e0d0823eae2d7aabbe6fb5a0f0362ad3af",
+  "diff": {
+    "algorithm": "sha256",
+    "changed_file_count": 6,
+    "changed_files": [
+      {
+        "file": "_integration_test.py",
+        "ranges": [
+          {
+            "start": 94,
+            "end": 108
+          }
+        ],
+        "before_hash": "6c9a9d685a1d694a6164baab4d346272caa08ca32ff2562913ce24f4a3b57106",
+        "after_hash": "ff9555824c5758b6fe4845fe40519ed0ef31934417d3b55972bdb793a97eb280"
+      },
+      {
+        "file": "clipboard_manager.py",
+        "ranges": [
+          {
+            "start": 36,
+            "end": 37
+          },
+          {
+            "start": 1145,
+            "end": 1146
+          },
+          {
+            "start": 1253,
+            "end": 1254
+          }
+        ],
+        "before_hash": "bce41ef8de246e8827751f77ab6ff2e214b3439020857a7a42238b39a7a4a756",
+        "after_hash": "2e2f235e2580c5b23381a31f6b6ddcaa8b759f389e0cfd8b346206836b3013ff"
+      },
+      {
+        "file": "perf_probe.py",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 74
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "5fd6e31967b863b42abba41769d6b19572db2b7a2fb9bc66f46f88dd2d27dc18"
+      },
+      {
+        "file": "pinboard/loader.py",
+        "ranges": [
+          {
+            "start": 13,
+            "end": 14
+          },
+          {
+            "start": 39,
+            "end": 39
+          },
+          {
+            "start": 41,
+            "end": 54
+          }
+        ],
+        "before_hash": "9e67d7b405b843c4e354b20097b5d2459b0cf206ac63731100a617cf1736e1c6",
+        "after_hash": "60f5e89b1a320ed07eeda262dad027e866dda2fadb34a5c891ef91ff991aa213"
+      },
+      {
+        "file": "pinboard/manager.py",
+        "ranges": [
+          {
+            "start": 18,
+            "end": 18
+          },
+          {
+            "start": 260,
+            "end": 264
+          }
+        ],
+        "before_hash": "42d823146dbd49e49115df6034ea186acdd415c29c694eb2b4c020fa7e2a1370",
+        "after_hash": "07648838bee429267a2b60cd47514b3e12e46982c3a96aa270bdd8aba67be5a8"
+      },
+      {
+        "file": "winclipboard_qt.py",
+        "ranges": [
+          {
+            "start": 23,
+            "end": 24
+          },
+          {
+            "start": 943,
+            "end": 943
+          },
+          {
+            "start": 950,
+            "end": 954
+          },
+          {
+            "start": 959,
+            "end": 966
+          },
+          {
+            "start": 4183,
+            "end": 4183
+          },
+          {
+            "start": 4185,
+            "end": 4186
+          },
+          {
+            "start": 4188,
+            "end": 4190
+          },
+          {
+            "start": 4202,
+            "end": 4207
+          },
+          {
+            "start": 4211,
+            "end": 4211
+          },
+          {
+            "start": 4523,
+            "end": 4525
+          },
+          {
+            "start": 4535,
+            "end": 4536
+          },
+          {
+            "start": 4637,
+            "end": 4637
+          }
+        ],
+        "before_hash": "0e743374560904d1b2c8d3ba9b60d8d6fd32974202bc4937db396706ab086ea7",
+        "after_hash": "b5b723cdf3ed72cf69839ff94f4fdda6fdfbd778a8de4a7137d7a66f8af3a1aa"
+      }
+    ]
+  },
+  "timing": {
+    "started_at": "2026-09-19T08:16:16.838Z",
+    "completed_at": "2026-09-19T08:16:19.894Z",
+    "duration_ms": 3056,
+    "measurement": "hook_wall_clock"
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "model_calls": 0,
+    "measurement": "known-zero"
+  },
+  "telemetry": {
+    "schemaVersion": "mimosa-gate-telemetry/v1",
+    "profile": "gate",
+    "operation": "Stop",
+    "outcome": "partial/INCONCLUSIVE",
+    "latencyMs": 3056,
+    "peakMemoryBytes": 105648128,
+    "memoryMeasurement": "max-observed-process-rss",
+    "scannedFiles": 0,
+    "cache": {
+      "hits": 0,
+      "misses": 0,
+      "measurement": "not-applicable"
+    },
+    "denyCount": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0,
+      "modelCalls": 0,
+      "measurement": "known-zero"
+    }
+  },
+  "finding_count": 0,
+  "rewake_finding_count": 0,
+  "evidence_boundary": {
+    "scan": "candidate",
+    "static_fix_verification": "observed_static_only",
+    "runtime_verification": "not_performed"
+  },
+  "finding_events": [],
+  "findings": [],
+  "artifacts": {
+    "immutable_report": ".mimosa/reports/task-review-sess_e1d29231-7c20-4930-b2e7-b74f616dcfe4-20260919T081619894Z-31032-8acbb7277989.json",
+    "latest_report": ".mimosa/reports/task-review-sess_e1d29231-7c20-4930-b2e7-b74f616dcfe4.json",
+    "history_summary": ".mimosa/history/run-20260919T081619894Z-31032-8acbb7277989.json"
+  }
+}

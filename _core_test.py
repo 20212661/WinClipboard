@@ -8,6 +8,7 @@ import sys
 import json as _json
 import queue
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -110,16 +111,15 @@ with open(cm.PRIVATE_FILE, "r", encoding="utf-8") as f:
 stored = _json.loads(raw)
 check("private 已加密", stored.get("dpapi") is True and "甲" not in raw and "b&c" not in raw)
 # 旧版明文格式兼容(返回内容,下次保存自动升级)
-with open(cm.PRIVATE_FILE, "w", encoding="utf-8") as f:
-    _json.dump(["旧明文1", "旧明文2"], f, ensure_ascii=False)
+Path(cm.PRIVATE_FILE).write_text(_json.dumps(["旧明文1", "旧明文2"], ensure_ascii=False),
+                                  encoding="utf-8")
 check("旧明文兼容", cm.load_private() == ["旧明文1", "旧明文2"])
 # 解密失败不覆盖原文件(伪造密文)
-with open(cm.PRIVATE_FILE, "w", encoding="utf-8") as f:
-    f.write('{"dpapi": true, "data": "AAAAzw=="}')
+Path(cm.PRIVATE_FILE).write_text('{"dpapi": true, "data": "AAAAzw=="}', encoding="utf-8")
 check("坏密文返回空", cm.load_private() == [])
 # 启动迁移:明文文件 → 立即升级加密
-with open(cm.PRIVATE_FILE, "w", encoding="utf-8") as f:
-    _json.dump(["迁移项"], f, ensure_ascii=False)
+Path(cm.PRIVATE_FILE).write_text(_json.dumps(["迁移项"], ensure_ascii=False),
+                                  encoding="utf-8")
 core = cm.ClipboardCore.__new__(cm.ClipboardCore)
 core.private = cm.load_private()
 core._migrate_private()
@@ -145,9 +145,10 @@ check("config 保留其它键", stored.get("max_items") == 42)
 check("config 往返可解密", cm.load_config()["ai_services"][0]["api_key"] == SECRET)
 
 # 旧版明文 config 自动升级(启动迁移)
-with open(cm.CONFIG_FILE, "w", encoding="utf-8") as f:
-    _json.dump({"ai_services": [{"name": "DeepSeek", "base_url": "http://y/v1",
-                                 "model": "m", "api_key": SECRET}]}, f)
+Path(cm.CONFIG_FILE).write_text(
+    _json.dumps({"ai_services": [{"name": "DeepSeek", "base_url": "http://y/v1",
+                                  "model": "m", "api_key": SECRET}]}),
+    encoding="utf-8")
 core = cm.ClipboardCore.__new__(cm.ClipboardCore)
 core.cfg, core._cfg_need_save = cm._load_config_raw()
 check("明文 config 标记待升级", core._cfg_need_save is True)
@@ -164,9 +165,9 @@ check("备份无明文残留", not leaked, "泄漏于 %s" % leaked)
 check("二次启动不再回写", cm._load_config_raw()[1] is False)
 
 # 坏密文不丢配置、不炸(解密失败置空但不覆盖原文件)
-with open(cm.CONFIG_FILE, "w", encoding="utf-8") as f:
-    f.write('{"ai_services":[{"name":"X","base_url":"u","model":"m",'
-            '"api_key":{"dpapi":true,"data":"AAAAzw=="}}]}')
+Path(cm.CONFIG_FILE).write_text(
+    '{"ai_services":[{"name":"X","base_url":"u","model":"m",'
+    '"api_key":{"dpapi":true,"data":"AAAAzw=="}}]}', encoding="utf-8")
 cfg_bad, stale_bad = cm._load_config_raw()
 check("坏密文置空且不回写", cfg_bad["ai_services"][0]["api_key"] == "" and stale_bad is False)
 
@@ -174,8 +175,7 @@ check("坏密文置空且不回写", cfg_bad["ai_services"][0]["api_key"] == "" 
 cm.save_config({"ai_services": [], "max_items": 42})         # 本代
 cm.save_config({"ai_services": [], "max_items": 99})         # 新一代:42 那份轮转到 .bak1
 check("备份已轮转", _json.load(open(cm.CONFIG_FILE + ".bak1", encoding="utf-8"))["max_items"] == 42)
-with open(cm.CONFIG_FILE, "w", encoding="utf-8") as f:
-    f.write("{ 这不是 JSON")
+Path(cm.CONFIG_FILE).write_text("{ 这不是 JSON", encoding="utf-8")
 check("config 损坏回退备份", cm.load_config().get("max_items") == 42)
 
 # ---- 历史变化事件走队列(不再跨线程直调 UI) ----
@@ -185,6 +185,34 @@ kinds = []
 while not core.signal_q.empty():
     kinds.append(core.signal_q.get_nowait()[0])
 check("add_item 投递 change 信号", kinds == ["change"])
+
+# ---- 查看器:语言识别 + JSON 重排 ----
+_lang_cases = [
+    ('{"a": 1, "b": [1,2]}', "json"),
+    ('{"broken": ', "text"),                     # 不合法 JSON 不应误报
+    ('def hello():\n    import os\n    return 1', "python"),
+    ('from collections import OrderedDict\n', "python"),
+    ('SELECT id FROM users WHERE x > 1;', "sql"),
+    ('const x = [1,2].map(v => v * 2);', "javascript"),
+    ('function add(a, b) {\n  return a + b;\n}', "javascript"),
+    ('.btn {\n  color: red;\n  margin: 0;\n}', "css"),
+    ('<?xml version="1.0"?><root/>', "xml"),
+    ('<html><body>hi</body></html>', "html"),
+    ('# 标题\n\n```python\nprint(1)\n```', "markdown"),
+    ('#!/bin/bash\necho hi', "shell"),
+    ('今天天气不错,适合摸鱼\n- 议题一', "text"),   # 普通中文不应误报为代码
+]
+for _t, _want in _lang_cases:
+    got = cm.detect_lang(_t)
+    check("语言识别 %r→%s" % (_t[:18], _want), got == _want, "got=%s" % got)
+
+check("JSON 美化", cm.json_reformat('{"a":1,"b":[2,3]}') ==
+      '{\n  "a": 1,\n  "b": [\n    2,\n    3\n  ]\n}')
+check("JSON 紧凑", cm.json_reformat('{\n "a": 1,\n "b": 2\n}', compact=True) ==
+      '{"a":1,"b":2}')
+check("JSON 重排保留中文", cm.json_reformat('{"名":"值"}', compact=True) == '{"名":"值"}')
+check("非法 JSON 返回 None", cm.json_reformat("not json") is None)
+check("空文本识别为纯文本", cm.detect_lang("") == "text")
 
 print()
 print("RESULT:", "PASS" if not FAILS else "FAIL %d 项: %s" % (len(FAILS), ", ".join(FAILS)))

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "mimosa-hook-status/v1",
+  "recordedAt": "2026-09-18T02:53:10.167Z",
+  "sessionId": "sess_abecd1bc-f2d6-4402-b356-c4933313a8a0",
+  "event": "PostToolUse",
+  "toolName": "Edit",
+  "file": "C:\\Users\\haoshangyang\\.zcode\\cli\\memories\\projects\\winclipboard-503e423d78eb32d4\\memory\\winclipboard-testing-pipeline.md",
+  "outcome": "clear",
+  "coverage": "complete",
+  "findingCount": 0,
+  "durationMs": 9,
+  "hostState": "hook_complete",
+  "reportHint": ".mimosa/reports/"
+}

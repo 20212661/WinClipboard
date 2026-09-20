@@ -1,0 +1,219 @@
+# -*- coding: utf-8 -*-
+"""ClipboardCore 核心逻辑单元测试(无 GUI;数据写入临时目录,不影响真实历史)。
+
+运行: python _core_test.py   退出码 0 = 全部通过
+"""
+import os
+import sys
+import json as _json
+import queue
+import tempfile
+from types import SimpleNamespace
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import clipboard_manager as cm
+
+# ---- 隔离:所有持久化路径指到临时目录 ----
+TMP = tempfile.mkdtemp(prefix="wclb_test_")
+cm.APP_DIR = TMP
+cm.IMAGE_DIR = os.path.join(TMP, "images")
+cm.HISTORY_FILE = os.path.join(TMP, "history.json")
+cm.PRIVATE_FILE = os.path.join(TMP, "private.json")
+cm.CONFIG_FILE = os.path.join(TMP, "config.json")
+cm.LOG_FILE = os.path.join(TMP, "app.log")
+os.makedirs(cm.IMAGE_DIR, exist_ok=True)
+
+FAILS = []
+
+
+def check(name, cond, detail=""):
+    print(("PASS" if cond else "FAIL"), name, detail if not cond else "")
+    if not cond:
+        FAILS.append(name)
+
+
+def make_core(history=None, private=None, cfg=None, max_items=100):
+    """绕过 __init__(不启动托盘线程/热键),手工构造核心状态。"""
+    core = cm.ClipboardCore.__new__(cm.ClipboardCore)
+    core.cfg = dict(cm.DEFAULT_CFG)
+    core.cfg.update(cfg or {})
+    core.max_items = max_items
+    core.history = history if history is not None else []
+    core.private = private if private is not None else []
+    core.signal_q = queue.Queue()
+    core.worker = SimpleNamespace(cmd_q=queue.Queue())   # 粘贴命令桩
+    core._set_clipboard = lambda rec: None               # 不碰系统剪贴板
+    return core
+
+
+# ---- filter_view:分类 + 关键词 ----
+HIST = [
+    {"type": "text", "content": "hello world", "pinned": False, "ts": 4},
+    {"type": "image", "content": "x.png", "pinned": False,
+     "w": 10, "h": 20, "hash": "a", "ts": 3},
+    {"type": "text", "content": "https://example.com/a", "pinned": False, "ts": 2},
+    {"type": "files", "content": ["C:/tmp/a.txt"], "pinned": False, "ts": 1},
+]
+core = make_core(history=HIST)
+check("filter all", core.filter_view("all") == [0, 1, 2, 3])
+check("filter text", core.filter_view("text") == [0, 2])
+check("filter image", core.filter_view("image") == [1])
+check("filter link", core.filter_view("link") == [2])
+check("filter files", core.filter_view("files") == [3])
+check("filter 关键词", core.filter_view("all", "hello") == [0])
+check("filter 图片尺寸", core.filter_view("all", "10×20") == [1])
+
+# ---- add_item:去重 / 敏感隔离 / 淘汰 ----
+core = make_core()
+core.add_item(("text", "aaa"))
+core.add_item(("text", "bbb"))
+core.add_item(("text", "aaa"))                    # 重复 → 移前去重
+check("去重置顶", [h["content"] for h in core.history] == ["aaa", "bbb"])
+core.add_item(("text", "password: secret123"))    # 敏感 → 私密区
+check("敏感隔离", len(core.history) == 2 and core.private == ["password: secret123"])
+
+core = make_core(max_items=3)
+for i in range(6):
+    core.add_item(("text", "n%d" % i))
+check("超量淘汰", [h["content"] for h in core.history] == ["n5", "n4", "n3"])
+core.toggle_pin_at(2)                             # 置顶 n3(最旧)
+core.add_item(("text", "new"))                    # 超量时淘汰非置顶的 n4,n3 保留
+check("置顶豁免淘汰", [h["content"] for h in core.history] == ["new", "n5", "n3"]
+      and core.history[-1]["pinned"] is True)
+
+# ---- paste_record:重排 / 文件丢失 ----
+core = make_core()
+core.add_item(("text", "x1"))
+core.add_item(("text", "x2"))
+rec = core.history[1]
+check("paste_record", core.paste_record(rec) is True and core.history[0] is rec)
+check("paste 排队", core.worker.cmd_q.get_nowait()[0] == "paste")
+check("丢失文件拒绝", core.paste_record(
+    {"type": "files", "content": ["Z:/不存在/1.txt"]}) is False)
+
+# ---- 条目操作 / 清空 ----
+core.toggle_pin_at(0)
+check("置顶切换", core.history[0]["pinned"] is True)
+core.delete_at(0)
+check("删除", len(core.history) == 1)
+core.add_item(("text", "keep"))
+core.toggle_pin_at(0)
+core.add_item(("text", "gone"))
+core.clear_unpinned()
+check("清空保留置顶", [h["content"] for h in core.history] == ["keep"])
+
+# ---- 私密区持久化往返 + DPAPI 加密 ----
+cm.save_private(["甲", "b&c", "✓ 多行\n文本"])
+check("private 往返", cm.load_private() == ["甲", "b&c", "✓ 多行\n文本"])
+with open(cm.PRIVATE_FILE, "r", encoding="utf-8") as f:
+    raw = f.read()
+stored = _json.loads(raw)
+check("private 已加密", stored.get("dpapi") is True and "甲" not in raw and "b&c" not in raw)
+# 旧版明文格式兼容(返回内容,下次保存自动升级)
+with open(cm.PRIVATE_FILE, "w", encoding="utf-8") as f:
+    _json.dump(["旧明文1", "旧明文2"], f, ensure_ascii=False)
+check("旧明文兼容", cm.load_private() == ["旧明文1", "旧明文2"])
+# 解密失败不覆盖原文件(伪造密文)
+with open(cm.PRIVATE_FILE, "w", encoding="utf-8") as f:
+    f.write('{"dpapi": true, "data": "AAAAzw=="}')
+check("坏密文返回空", cm.load_private() == [])
+# 启动迁移:明文文件 → 立即升级加密
+with open(cm.PRIVATE_FILE, "w", encoding="utf-8") as f:
+    _json.dump(["迁移项"], f, ensure_ascii=False)
+core = cm.ClipboardCore.__new__(cm.ClipboardCore)
+core.private = cm.load_private()
+core._migrate_private()
+with open(cm.PRIVATE_FILE, "r", encoding="utf-8") as f:
+    check("明文自动升级", _json.load(f).get("dpapi") is True)
+
+# ---- 敏感识别(顺带回归) ----
+check("识别 API key", cm.is_sensitive("sk-" + "a" * 30))
+check("识别银行卡", cm.is_sensitive("6222 0210 0110 2581888"[:0] or "6222600260001072444"))
+check("不误判普通文本", not cm.is_sensitive("hello world 123"))
+
+# ---- config.json:原子写 + 密钥 DPAPI 加密 ----
+SECRET = "sk-proj-SUPERSECRET-0123456789abcdef"
+cm.save_config({"ai_services": [{"name": "GLM", "base_url": "http://x/v1",
+                                 "model": "m", "api_key": SECRET}],
+                "max_items": 42})
+with open(cm.CONFIG_FILE, "r", encoding="utf-8") as f:
+    raw_cfg = f.read()
+check("config 密钥不落明文", SECRET not in raw_cfg)
+stored = _json.loads(raw_cfg)
+check("config 密钥已标记 dpapi", stored["ai_services"][0]["api_key"].get("dpapi") is True)
+check("config 保留其它键", stored.get("max_items") == 42)
+check("config 往返可解密", cm.load_config()["ai_services"][0]["api_key"] == SECRET)
+
+# 旧版明文 config 自动升级(启动迁移)
+with open(cm.CONFIG_FILE, "w", encoding="utf-8") as f:
+    _json.dump({"ai_services": [{"name": "DeepSeek", "base_url": "http://y/v1",
+                                 "model": "m", "api_key": SECRET}]}, f)
+core = cm.ClipboardCore.__new__(cm.ClipboardCore)
+core.cfg, core._cfg_need_save = cm._load_config_raw()
+check("明文 config 标记待升级", core._cfg_need_save is True)
+core._migrate_config_secrets()
+with open(cm.CONFIG_FILE, "r", encoding="utf-8") as f:
+    migrated = f.read()
+check("明文 config 已升级加密", SECRET not in migrated
+      and _json.loads(migrated)["ai_services"][0]["api_key"].get("dpapi") is True)
+# 关键回归:迁移不得把明文残留在任何滚动备份里
+leaked = [f for f in os.listdir(TMP)
+          if f.startswith("config.json") and SECRET in open(os.path.join(TMP, f),
+                                                            encoding="utf-8").read()]
+check("备份无明文残留", not leaked, "泄漏于 %s" % leaked)
+check("二次启动不再回写", cm._load_config_raw()[1] is False)
+
+# 坏密文不丢配置、不炸(解密失败置空但不覆盖原文件)
+with open(cm.CONFIG_FILE, "w", encoding="utf-8") as f:
+    f.write('{"ai_services":[{"name":"X","base_url":"u","model":"m",'
+            '"api_key":{"dpapi":true,"data":"AAAAzw=="}}]}')
+cfg_bad, stale_bad = cm._load_config_raw()
+check("坏密文置空且不回写", cfg_bad["ai_services"][0]["api_key"] == "" and stale_bad is False)
+
+# config.json 损坏 → 从备份恢复
+cm.save_config({"ai_services": [], "max_items": 42})         # 本代
+cm.save_config({"ai_services": [], "max_items": 99})         # 新一代:42 那份轮转到 .bak1
+check("备份已轮转", _json.load(open(cm.CONFIG_FILE + ".bak1", encoding="utf-8"))["max_items"] == 42)
+with open(cm.CONFIG_FILE, "w", encoding="utf-8") as f:
+    f.write("{ 这不是 JSON")
+check("config 损坏回退备份", cm.load_config().get("max_items") == 42)
+
+# ---- 历史变化事件走队列(不再跨线程直调 UI) ----
+core = make_core()
+core.add_item(("text", "notify"))
+kinds = []
+while not core.signal_q.empty():
+    kinds.append(core.signal_q.get_nowait()[0])
+check("add_item 投递 change 信号", kinds == ["change"])
+
+# ---- 查看器:语言识别 + JSON 重排 ----
+_lang_cases = [
+    ('{"a": 1, "b": [1,2]}', "json"),
+    ('{"broken": ', "text"),                     # 不合法 JSON 不应误报
+    ('def hello():\n    import os\n    return 1', "python"),
+    ('from collections import OrderedDict\n', "python"),
+    ('SELECT id FROM users WHERE x > 1;', "sql"),
+    ('const x = [1,2].map(v => v * 2);', "javascript"),
+    ('function add(a, b) {\n  return a + b;\n}', "javascript"),
+    ('.btn {\n  color: red;\n  margin: 0;\n}', "css"),
+    ('<?xml version="1.0"?><root/>', "xml"),
+    ('<html><body>hi</body></html>', "html"),
+    ('# 标题\n\n```python\nprint(1)\n```', "markdown"),
+    ('#!/bin/bash\necho hi', "shell"),
+    ('今天天气不错,适合摸鱼\n- 议题一', "text"),   # 普通中文不应误报为代码
+]
+for _t, _want in _lang_cases:
+    got = cm.detect_lang(_t)
+    check("语言识别 %r→%s" % (_t[:18], _want), got == _want, "got=%s" % got)
+
+check("JSON 美化", cm.json_reformat('{"a":1,"b":[2,3]}') ==
+      '{\n  "a": 1,\n  "b": [\n    2,\n    3\n  ]\n}')
+check("JSON 紧凑", cm.json_reformat('{\n "a": 1,\n "b": 2\n}', compact=True) ==
+      '{"a":1,"b":2}')
+check("JSON 重排保留中文", cm.json_reformat('{"名":"值"}', compact=True) == '{"名":"值"}')
+check("非法 JSON 返回 None", cm.json_reformat("not json") is None)
+check("空文本识别为纯文本", cm.detect_lang("") == "text")
+
+print()
+print("RESULT:", "PASS" if not FAILS else "FAIL %d 项: %s" % (len(FAILS), ", ".join(FAILS)))
+sys.exit(1 if FAILS else 0)

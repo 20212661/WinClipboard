@@ -1,0 +1,187 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20260919T122236544Z-23516-faef24036b79",
+  "runId": "20260919T122236544Z-23516-faef24036b79",
+  "runStatus": "inconclusive",
+  "coverage": {
+    "status": "partial",
+    "reasons": [
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "clipboard_manager.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "winclipboard_qt.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "pinboard/picker.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "clipboard_manager.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "winclipboard_qt.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "pinboard/picker.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      }
+    ]
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "322786b2e3edfb245f0543cc9c437df4ea260b4f",
+  "diffHash": "8b74d42a94aba8c96f08d0052d18bbe542855cb954cdfe88b54beffbfc02e2b4",
+  "rulesVersion": "unavailable",
+  "sessionHash": "acd049ae01dedae5ddf63caaa3a0448596045a266af4457082cef96bcce11091",
+  "reportRef": ".mimosa/reports/task-review-sess_87e07af1-9c63-407d-b380-7dcd8b86295c-20260919T122236544Z-23516-faef24036b79.json",
+  "events": [
+    {
+      "eventId": "hook-0a4916401c59c7fd6a15a623e70e74bd",
+      "findingId": "mimosa-46c267e3de74d09c22d6c419",
+      "type": "finding_observed",
+      "at": "2026-09-19T12:09:07.820Z",
+      "identity": {
+        "projectRelativeFile": "clipboard_manager.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "1ae658a26c40ef8ef376fa84a4b2938461b5334b8f4a317e0277658ae31af53a",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 614,
+      "endLine": 614,
+      "reasonCode": "advisory",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "1ae658a26c40ef8ef376fa84a4b2938461b5334b8f4a317e0277658ae31af53a"
+      },
+      "sequence": 0
+    },
+    {
+      "eventId": "hook-2cb41658e3db96fbd5c4f6516cfeaf3d",
+      "findingId": "mimosa-b574d76064190083c3753296",
+      "type": "finding_blocked",
+      "at": "2026-09-19T12:09:38.200Z",
+      "identity": {
+        "projectRelativeFile": "clipboard_manager.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "04bb3aecaae24c2f663f13590fc335ba97ed70aeab8000ba4e2d64ae24bb52df",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 1154,
+      "endLine": 1154,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "04bb3aecaae24c2f663f13590fc335ba97ed70aeab8000ba4e2d64ae24bb52df"
+      },
+      "sequence": 1
+    },
+    {
+      "eventId": "hook-49912893d44baa9b2c19019cfa9b7202",
+      "findingId": "mimosa-b574d76064190083c3753296",
+      "type": "static_fix_verified",
+      "at": "2026-09-19T12:10:12.846Z",
+      "identity": {
+        "projectRelativeFile": "clipboard_manager.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "04bb3aecaae24c2f663f13590fc335ba97ed70aeab8000ba4e2d64ae24bb52df",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 1154,
+      "endLine": 1154,
+      "reasonCode": "static_rescan_passed",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "evidenceHash": "04bb3aecaae24c2f663f13590fc335ba97ed70aeab8000ba4e2d64ae24bb52df"
+      },
+      "sequence": 2
+    },
+    {
+      "eventId": "hook-ad477630ab598c428d28f643cc9c3be1",
+      "findingId": "mimosa-46c267e3de74d09c22d6c419",
+      "type": "finding_observed",
+      "at": "2026-09-19T12:10:13.544Z",
+      "identity": {
+        "projectRelativeFile": "clipboard_manager.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "1ae658a26c40ef8ef376fa84a4b2938461b5334b8f4a317e0277658ae31af53a",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 640,
+      "endLine": 640,
+      "reasonCode": "advisory",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "1ae658a26c40ef8ef376fa84a4b2938461b5334b8f4a317e0277658ae31af53a"
+      },
+      "sequence": 3
+    },
+    {
+      "eventId": "hook-6ccebabb0dace9e53f9fc367725f72e7",
+      "findingId": "mimosa-da8074cc0dcb74a07600323e",
+      "type": "finding_observed",
+      "at": "2026-09-19T12:10:13.545Z",
+      "identity": {
+        "projectRelativeFile": "clipboard_manager.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "d9844988869b5fd98ecd47ec86bf7df1c5259c15bccd6880db87f4ea33b8d1a0",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 1166,
+      "endLine": 1166,
+      "reasonCode": "advisory",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "d9844988869b5fd98ecd47ec86bf7df1c5259c15bccd6880db87f4ea33b8d1a0"
+      },
+      "sequence": 4
+    }
+  ],
+  "observedFindingIds": [],
+  "verifiedFiles": [],
+  "recordedAt": "2026-09-19T12:22:37.222Z"
+}

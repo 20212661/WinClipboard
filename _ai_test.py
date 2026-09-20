@@ -54,6 +54,14 @@ class FakeAI(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def do_GET(self):
+        # OpenAI 标准模型发现端点
+        if self.path.rstrip("/").endswith("/models"):
+            self._reply(200, {"data": [{"id": "model-a"}, {"id": "model-b"},
+                                       {"id": "gpt-x"}]})
+            return
+        self._reply(404, {"error": {"message": "not found"}})
+
     def do_POST(self):
         n = int(self.headers.get("Content-Length") or 0)
         try:
@@ -65,11 +73,14 @@ class FakeAI(BaseHTTPRequestHandler):
                 self._reply(401, {"error": {"message": "Invalid API key"}})
                 return
             if body.get("empty"):
-                self._reply(200, {"choices": []})
+                self._reply(200, {"id": "x", "object": "chat.completion",
+                                  "created": 1, "model": model, "choices": []})
                 return
             reply = "[%s] 处理了:%s" % (model, user)
-            self._reply(200, {"choices": [{"message": {"role": "assistant",
-                                                       "content": reply}}]})
+            self._reply(200, {
+                "id": "x", "object": "chat.completion", "created": 1, "model": model,
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": reply}}]})
         except Exception as e:
             self._reply(400, {"error": {"message": str(e)}})
 
@@ -104,6 +115,22 @@ check("ai_chat.network-refused", not ok, text)
 ok, text = cm.ai_chat(dict(svc, base_url=""), "x")
 check("ai_chat.no-base-url", not ok, text)
 
+# 引擎:环境装有 openai SDK 时走 SDK 路径;强制禁用后 urllib 兜底同样可用
+check("ai_chat.engine-sdk", cm._openai_sdk() is not None)
+_orig_sdk = cm._openai_sdk
+cm._openai_sdk = lambda: None
+ok, text = cm.ai_chat(svc, "兜底引擎")
+check("ai_chat.urllib-fallback", ok and "[model-a]" in text and "兜底引擎" in text, text)
+cm._openai_sdk = _orig_sdk
+
+# 模型发现:GET /models(OpenAI 标准端点)
+ok, models = cm.list_models(svc)
+check("list_models.ok", ok and models == ["gpt-x", "model-a", "model-b"], str(models))
+ok, msg = cm.list_models(dict(svc, base_url=""))
+check("list_models.no-url", not ok, msg)
+ok, msg = cm.list_models(dict(svc, base_url="http://127.0.0.1:1/v1"))
+check("list_models.refused", not ok, msg)
+
 check("render_prompt", cm.render_prompt("前:{input}:后", "内容") == "前:内容:后")
 
 # ============================================================
@@ -116,10 +143,9 @@ from PySide6.QtCore import QObject, Qt
 app = QApplication([])
 app.setQuitOnLastWindowClosed(False)
 import winclipboard_qt as wq
-wq.init_palette(False)
 from qfluentwidgets import setTheme, Theme
 setTheme(Theme.LIGHT)
-wq.setThemeColor(wq.ACCENT)
+wq.init_palette(False)
 
 
 class FakeCore:
@@ -162,10 +188,11 @@ CFG = {
 fake = FakeApp(CFG)
 
 # ---- 管理窗口构造 ----
-sw = wq.ServicesWindow(fake)
-check("ServicesWindow.construct", sw.lst.count() == 3)
+sw = wq.ServicesPage(fake)
+check("ServicesWindow.construct", len(sw.cards) == 3,
+      str([c.svc.get("name") for c in sw.cards]))
 
-ww = wq.WorkflowsWindow(fake)
+ww = wq.WorkflowPage(fake)
 check("WorkflowsWindow.construct", ww.lst.count() == 1)
 
 we = wq.WorkflowEditorWindow(fake, CFG["ai_workflows"][0], None)
@@ -173,11 +200,37 @@ check("WorkflowEditor.construct", len(we._rows) == 3)
 we.close()
 
 d = wq.ServiceEditorDialog(sw, None)
+d.cmb_provider.setCurrentText("自定义")
 d.e_name.setText("X")
 d.e_url.setText(BASE)
-d.e_model.setText("m")
+d.cmb_model.setText("m")
 d.e_key.setText("k")
 check("ServiceEditor.validate", d.validate() and d.result["name"] == "X")
+
+# 预设预选:供应商/模型/接口自动填充,模型信息行有内容
+d2 = wq.ServiceEditorDialog(sw, None, preset=cm.AI_PRESET_SERVICES[1])   # DeepSeek
+check("ServiceEditor.preset-preselect",
+      d2.cmb_provider.currentText() == "DeepSeek"
+      and d2.cmb_model.currentText() == "deepseek-chat"
+      and d2.e_url.text() == cm.AI_PRESET_SERVICES[1]["base_url"]
+      and bool(d2.lbl_model_note.text()), d2.cmb_model.currentText())
+
+# 编辑既有自定义服务:供应商自动判为「自定义」,名称/接口/模型带出
+d3 = wq.ServiceEditorDialog(sw, {"name": "我的中转", "base_url": BASE,
+                                 "model": "m", "api_key": "k"})
+check("ServiceEditor.edit-custom",
+      d3.cmb_provider.currentText() == "自定义" and d3.e_name.text() == "我的中转"
+      and d3.e_url.text() == BASE and d3.cmb_model.currentText() == "m")
+
+# hermes 风格新字段:Provider ID 默认 openai 并随保存写入;发现模型结果填入下拉
+check("ServiceEditor.provider-field",
+      d2.cmb_pid.currentText() == "openai" and d.result.get("provider") == "openai")
+d4 = wq.ServiceEditorDialog(sw, None)
+d4.e_url.setText(BASE)
+d4._apply_models(["m1", "m2", "m3"])
+check("ServiceEditor.discover-apply",
+      d4.cmb_model.count() == 3 and d4.cmb_model.currentText() == "m1",
+      "%d items, cur=%s" % (d4.cmb_model.count(), d4.cmb_model.currentText()))
 
 # ---- 运行器:自动模式 A→B→C ----
 wf = CFG["ai_workflows"][0]
@@ -246,7 +299,7 @@ rw.close()
 
 # ---- 示例模板填入 ----
 cm.save_config(CFG)
-hub = wq.WorkflowsWindow(fake)
+hub = wq.WorkflowPage(fake)
 hub._seed()
 names = [w["name"] for w in CFG["ai_workflows"]]
 svcs = [s["name"] for s in CFG["ai_services"]]

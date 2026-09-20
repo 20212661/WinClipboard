@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20260919T145159921Z-19764-f77f1f172940",
+  "runId": "20260919T145159921Z-19764-f77f1f172940",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "322786b2e3edfb245f0543cc9c437df4ea260b4f",
+  "diffHash": "8958769191cad9edce45a81933dcfba14a30a30b0d7e1fe3a95956af886cbbbf",
+  "rulesVersion": "unavailable",
+  "sessionHash": "acd049ae01dedae5ddf63caaa3a0448596045a266af4457082cef96bcce11091",
+  "reportRef": ".mimosa/reports/task-review-sess_87e07af1-9c63-407d-b380-7dcd8b86295c-20260919T145159921Z-19764-f77f1f172940.json",
+  "events": [],
+  "observedFindingIds": [
+    "mimosa-8d852afea1da296ffee5b0e1",
+    "mimosa-37aa21ad31dfc79367abe5a0"
+  ],
+  "verifiedFiles": [
+    {
+      "file": "winclipboard_qt.py",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "_integration_test.py",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-09-19T14:52:00.619Z"
+}

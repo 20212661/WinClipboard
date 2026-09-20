@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "mimosa-hook-status/v1",
+  "recordedAt": "2026-09-19T11:58:34.368Z",
+  "sessionId": "sess_e1d29231-7c20-4930-b2e7-b74f616dcfe4",
+  "event": "PostToolUse",
+  "toolName": "Edit",
+  "file": "C:\\Users\\haoshangyang\\.zcode\\cli\\memories\\projects\\winclipboard-503e423d78eb32d4\\memory\\winclipboard-fluentwindow-architecture.md",
+  "outcome": "clear",
+  "coverage": "complete",
+  "findingCount": 0,
+  "durationMs": 8,
+  "hostState": "hook_complete",
+  "reportHint": ".mimosa/reports/"
+}

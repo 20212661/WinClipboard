@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "mimosa-hook-status/v1",
+  "recordedAt": "2026-09-19T15:05:45.441Z",
+  "sessionId": "sess_87e07af1-9c63-407d-b380-7dcd8b86295c",
+  "event": "PostToolUse",
+  "toolName": "Edit",
+  "file": "C:\\Users\\haoshangyang\\.zcode\\cli\\memories\\projects\\winclipboard-503e423d78eb32d4\\memory\\winclipboard-translucent-window-bugs.md",
+  "outcome": "clear",
+  "coverage": "complete",
+  "findingCount": 0,
+  "durationMs": 11,
+  "hostState": "hook_complete",
+  "reportHint": ".mimosa/reports/"
+}

@@ -1,0 +1,1123 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20260917T030736453Z-21172-7d112b97c278",
+  "runId": "20260917T030736453Z-21172-7d112b97c278",
+  "runStatus": "inconclusive",
+  "coverage": {
+    "status": "partial",
+    "reasons": [
+      {
+        "code": "changed_file_unreadable",
+        "stage": "candidate-select",
+        "target": "_scan_probe.py",
+        "detail": "observed changed file no longer exists or cannot be read",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "pinboard/model.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "pinboard/storage.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "pinboard/layout.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "pinboard/items.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "pinboard/view.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "pinboard/loader.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "pinboard/window.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "pinboard/manager.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "pinboard/__init__.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "winclipboard_qt.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "clipboard_manager.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "_pinboard_test.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "_integration_test.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "_ui_preview.py",
+        "detail": "spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "candidate-select",
+        "target": "_scan_probe.py",
+        "detail": "changed_file_unreadable: observed changed file no longer exists or cannot be read",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "pinboard/model.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "pinboard/storage.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "pinboard/layout.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "pinboard/items.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "pinboard/view.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "pinboard/loader.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "pinboard/window.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "pinboard/manager.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "pinboard/__init__.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "winclipboard_qt.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "clipboard_manager.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "_pinboard_test.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "_integration_test.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "_ui_preview.py",
+        "detail": "scanner_failed: spawnSync D:\\nodejs\\node.exe ETIMEDOUT",
+        "affectsCompletion": true
+      }
+    ]
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "322786b2e3edfb245f0543cc9c437df4ea260b4f",
+  "diffHash": "8094f14cbe01f6085312671daaebc08d02cd25efa4e5b88fa2345ce1702d57f7",
+  "rulesVersion": "unavailable",
+  "sessionHash": "e334c76a190339ba3b5e8250ea17413cb95c6361ee563318733a5cfc1e158de7",
+  "reportRef": ".mimosa/reports/task-review-sess_abecd1bc-f2d6-4402-b356-c4933313a8a0-20260917T030736453Z-21172-7d112b97c278.json",
+  "events": [
+    {
+      "eventId": "hook-f627ec0ae834cfab67b7a27055adc9f7",
+      "findingId": "mimosa-bc8e08703640d7fad7a3eead",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:02:56.077Z",
+      "identity": {
+        "projectRelativeFile": "pinboard/storage.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "04bb3aecaae24c2f663f13590fc335ba97ed70aeab8000ba4e2d64ae24bb52df",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 56,
+      "endLine": 56,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "04bb3aecaae24c2f663f13590fc335ba97ed70aeab8000ba4e2d64ae24bb52df"
+      },
+      "sequence": 0
+    },
+    {
+      "eventId": "hook-a6a7010a17a2eb215eadcb505c4efd50",
+      "findingId": "mimosa-f2caa1d4c3352e834ac2de6e",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:02:56.077Z",
+      "identity": {
+        "projectRelativeFile": "pinboard/storage.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "15bbf8f1b41d9e09c5d9b1bddddec432384077faa5e1ecbbc259539ac41640fd",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 111,
+      "endLine": 111,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "15bbf8f1b41d9e09c5d9b1bddddec432384077faa5e1ecbbc259539ac41640fd"
+      },
+      "sequence": 1
+    },
+    {
+      "eventId": "hook-502ad6a99928a3f44a9c4a4ed7e60f88",
+      "findingId": "mimosa-bc8e08703640d7fad7a3eead",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:03:21.001Z",
+      "identity": {
+        "projectRelativeFile": "pinboard/storage.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "04bb3aecaae24c2f663f13590fc335ba97ed70aeab8000ba4e2d64ae24bb52df",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 34,
+      "endLine": 34,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "04bb3aecaae24c2f663f13590fc335ba97ed70aeab8000ba4e2d64ae24bb52df"
+      },
+      "sequence": 2
+    },
+    {
+      "eventId": "hook-46f6e8fe7129409f07ea4a38622fb069",
+      "findingId": "mimosa-708e52d1ee54d9d1467ad5ff",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:13:51.163Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "7c1a0e93f72024dca2200ef174b6c2629fc3144c8569c2c8eee581d4165a2810",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 111,
+      "endLine": 111,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "7c1a0e93f72024dca2200ef174b6c2629fc3144c8569c2c8eee581d4165a2810"
+      },
+      "sequence": 3
+    },
+    {
+      "eventId": "hook-1f874a410b709188d356c68128f8267e",
+      "findingId": "mimosa-a4ece92cbfcab10127780581",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:13:51.163Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "9de052fa21e4ce750e036748fe33a01cd65c3b417f7cab1477708c28c1d759c3",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 130,
+      "endLine": 130,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "9de052fa21e4ce750e036748fe33a01cd65c3b417f7cab1477708c28c1d759c3"
+      },
+      "sequence": 4
+    },
+    {
+      "eventId": "hook-ec7e7b042a1cb5bf683a11b27e82dd48",
+      "findingId": "mimosa-d06d4765164c8f15f36fb56e",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:13:51.163Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "3c90ad0840021703bc1b539cea0f126d3feacbbdd6439c18a9ba1f9da3b90eff",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 133,
+      "endLine": 133,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "3c90ad0840021703bc1b539cea0f126d3feacbbdd6439c18a9ba1f9da3b90eff"
+      },
+      "sequence": 5
+    },
+    {
+      "eventId": "hook-60befbc55c75f1dc4728198cdcbb5ed5",
+      "findingId": "mimosa-8a9081f697ab7bfa2d4c0e94",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:13:51.163Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "bceae2f50f93f19e86ed4f059d0fdc334cf5c8731f398b53f97ca17cb5dfa8c4",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 287,
+      "endLine": 287,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "bceae2f50f93f19e86ed4f059d0fdc334cf5c8731f398b53f97ca17cb5dfa8c4"
+      },
+      "sequence": 6
+    },
+    {
+      "eventId": "hook-4fcb97bca2c1205f6951fb9c5dc4419b",
+      "findingId": "mimosa-708e52d1ee54d9d1467ad5ff",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:14:39.419Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "7c1a0e93f72024dca2200ef174b6c2629fc3144c8569c2c8eee581d4165a2810",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 113,
+      "endLine": 113,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "7c1a0e93f72024dca2200ef174b6c2629fc3144c8569c2c8eee581d4165a2810"
+      },
+      "sequence": 7
+    },
+    {
+      "eventId": "hook-9c809261b33f2c257943bdb0389be589",
+      "findingId": "mimosa-a4ece92cbfcab10127780581",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:14:39.419Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "9de052fa21e4ce750e036748fe33a01cd65c3b417f7cab1477708c28c1d759c3",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 132,
+      "endLine": 132,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "9de052fa21e4ce750e036748fe33a01cd65c3b417f7cab1477708c28c1d759c3"
+      },
+      "sequence": 8
+    },
+    {
+      "eventId": "hook-facd1e0632ba88bccd6df80f4a4480de",
+      "findingId": "mimosa-d06d4765164c8f15f36fb56e",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:14:39.419Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "3c90ad0840021703bc1b539cea0f126d3feacbbdd6439c18a9ba1f9da3b90eff",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 135,
+      "endLine": 135,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "3c90ad0840021703bc1b539cea0f126d3feacbbdd6439c18a9ba1f9da3b90eff"
+      },
+      "sequence": 9
+    },
+    {
+      "eventId": "hook-4a20d6ccfd84acc77adaefe348e84874",
+      "findingId": "mimosa-8a9081f697ab7bfa2d4c0e94",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:14:39.419Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "bceae2f50f93f19e86ed4f059d0fdc334cf5c8731f398b53f97ca17cb5dfa8c4",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 287,
+      "endLine": 287,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "bceae2f50f93f19e86ed4f059d0fdc334cf5c8731f398b53f97ca17cb5dfa8c4"
+      },
+      "sequence": 10
+    },
+    {
+      "eventId": "hook-b60006af918a75f939dc23951876530f",
+      "findingId": "mimosa-708e52d1ee54d9d1467ad5ff",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:15:41.768Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "7c1a0e93f72024dca2200ef174b6c2629fc3144c8569c2c8eee581d4165a2810",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 114,
+      "endLine": 114,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "7c1a0e93f72024dca2200ef174b6c2629fc3144c8569c2c8eee581d4165a2810"
+      },
+      "sequence": 11
+    },
+    {
+      "eventId": "hook-9d3e47d3e2cbb1d11f1e210e4cdc3376",
+      "findingId": "mimosa-a4ece92cbfcab10127780581",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:15:41.768Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "9de052fa21e4ce750e036748fe33a01cd65c3b417f7cab1477708c28c1d759c3",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 140,
+      "endLine": 140,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "9de052fa21e4ce750e036748fe33a01cd65c3b417f7cab1477708c28c1d759c3"
+      },
+      "sequence": 12
+    },
+    {
+      "eventId": "hook-6971e7d53b883c5721c1e9e3154f7a2d",
+      "findingId": "mimosa-d06d4765164c8f15f36fb56e",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:15:41.768Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "3c90ad0840021703bc1b539cea0f126d3feacbbdd6439c18a9ba1f9da3b90eff",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 143,
+      "endLine": 143,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "3c90ad0840021703bc1b539cea0f126d3feacbbdd6439c18a9ba1f9da3b90eff"
+      },
+      "sequence": 13
+    },
+    {
+      "eventId": "hook-019f9bd14156b02e3a799756357a2368",
+      "findingId": "mimosa-8a9081f697ab7bfa2d4c0e94",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:15:41.768Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "bceae2f50f93f19e86ed4f059d0fdc334cf5c8731f398b53f97ca17cb5dfa8c4",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 295,
+      "endLine": 295,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "bceae2f50f93f19e86ed4f059d0fdc334cf5c8731f398b53f97ca17cb5dfa8c4"
+      },
+      "sequence": 14
+    },
+    {
+      "eventId": "hook-c94c7543331a8b06192835428c833d26",
+      "findingId": "mimosa-708e52d1ee54d9d1467ad5ff",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:51:48.815Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "7c1a0e93f72024dca2200ef174b6c2629fc3144c8569c2c8eee581d4165a2810",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 109,
+      "endLine": 109,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "7c1a0e93f72024dca2200ef174b6c2629fc3144c8569c2c8eee581d4165a2810"
+      },
+      "sequence": 15
+    },
+    {
+      "eventId": "hook-dffc4476598aa51671b5e46d6c553cc3",
+      "findingId": "mimosa-a4ece92cbfcab10127780581",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:51:48.815Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "9de052fa21e4ce750e036748fe33a01cd65c3b417f7cab1477708c28c1d759c3",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 145,
+      "endLine": 145,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "9de052fa21e4ce750e036748fe33a01cd65c3b417f7cab1477708c28c1d759c3"
+      },
+      "sequence": 16
+    },
+    {
+      "eventId": "hook-80d23a04873a180e9bea4198a2aaf726",
+      "findingId": "mimosa-d06d4765164c8f15f36fb56e",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:51:48.815Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "3c90ad0840021703bc1b539cea0f126d3feacbbdd6439c18a9ba1f9da3b90eff",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 148,
+      "endLine": 148,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "3c90ad0840021703bc1b539cea0f126d3feacbbdd6439c18a9ba1f9da3b90eff"
+      },
+      "sequence": 17
+    },
+    {
+      "eventId": "hook-bc2320ada0491d37c609b50a9881d412",
+      "findingId": "mimosa-8a9081f697ab7bfa2d4c0e94",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:51:48.815Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "bceae2f50f93f19e86ed4f059d0fdc334cf5c8731f398b53f97ca17cb5dfa8c4",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 300,
+      "endLine": 300,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "bceae2f50f93f19e86ed4f059d0fdc334cf5c8731f398b53f97ca17cb5dfa8c4"
+      },
+      "sequence": 18
+    },
+    {
+      "eventId": "hook-d1ef75fb75630838032415d87d6c5c02",
+      "findingId": "mimosa-dca2e951b80aaecb26215ee0",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:54:24.881Z",
+      "identity": {
+        "projectRelativeFile": "_scan_probe.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "bf17b9c94eaa443e459ff3c30db978f71fc1c787e82e18c0efb854ece101ea4f",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 9,
+      "endLine": 9,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "bf17b9c94eaa443e459ff3c30db978f71fc1c787e82e18c0efb854ece101ea4f"
+      },
+      "sequence": 19
+    },
+    {
+      "eventId": "hook-c1e57628d808bffabecc413b68976f0c",
+      "findingId": "mimosa-3da797ca0ff4086a09b3a1f8",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:54:24.881Z",
+      "identity": {
+        "projectRelativeFile": "_scan_probe.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "28f04b053b8f98d74d91164a26cb828ef171d86411d4fdbf5a80de63f19af1fd",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 14,
+      "endLine": 14,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "28f04b053b8f98d74d91164a26cb828ef171d86411d4fdbf5a80de63f19af1fd"
+      },
+      "sequence": 20
+    },
+    {
+      "eventId": "hook-8796329226e6891a10d4b8e4f8b6dc93",
+      "findingId": "mimosa-0962ac689f6d28f2b55fdebb",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:54:24.881Z",
+      "identity": {
+        "projectRelativeFile": "_scan_probe.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "1603210ab21fb7f0192d3b602b6c821bed3795353ea07cb6588395f4e5ab82a9",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 19,
+      "endLine": 19,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "1603210ab21fb7f0192d3b602b6c821bed3795353ea07cb6588395f4e5ab82a9"
+      },
+      "sequence": 21
+    },
+    {
+      "eventId": "hook-4873bb0b575358c0d3a8f4980baf6c9c",
+      "findingId": "mimosa-e8ab0e206994b9b4beba8288",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:54:24.881Z",
+      "identity": {
+        "projectRelativeFile": "_scan_probe.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "04bdee4f86e14219baae73eae41272fb7124a16dacca67ade53ae3442c2f1ba8",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 24,
+      "endLine": 24,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "04bdee4f86e14219baae73eae41272fb7124a16dacca67ade53ae3442c2f1ba8"
+      },
+      "sequence": 22
+    },
+    {
+      "eventId": "hook-6d49aba05f2ec720f5be4ee72d0f9245",
+      "findingId": "mimosa-ba5d5f8cffa66e2b6c080f16",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:55:29.505Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "5df7bdb6039a6845fd54a80942426ae4f29ffbf1776bdaf9d4bbdce684b2466a",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 80,
+      "endLine": 80,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "5df7bdb6039a6845fd54a80942426ae4f29ffbf1776bdaf9d4bbdce684b2466a"
+      },
+      "sequence": 23
+    },
+    {
+      "eventId": "hook-8dc27de6d75d51ef501c04e97a66b1ee",
+      "findingId": "mimosa-8b90c15fd97328ec4695257e",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:55:48.536Z",
+      "identity": {
+        "projectRelativeFile": "_scan_probe.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "5df7bdb6039a6845fd54a80942426ae4f29ffbf1776bdaf9d4bbdce684b2466a",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 16,
+      "endLine": 16,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "5df7bdb6039a6845fd54a80942426ae4f29ffbf1776bdaf9d4bbdce684b2466a"
+      },
+      "sequence": 24
+    },
+    {
+      "eventId": "hook-3227979619b488477b5a0eafad681cbd",
+      "findingId": "mimosa-539058c7c1a4c6485697e2c9",
+      "type": "finding_blocked",
+      "at": "2026-09-17T02:55:48.536Z",
+      "identity": {
+        "projectRelativeFile": "_scan_probe.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "e99bc5f99d5ca6807c2ce155e3a13779ad170c7c49e0290075fcb6cb27258808",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 26,
+      "endLine": 26,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "e99bc5f99d5ca6807c2ce155e3a13779ad170c7c49e0290075fcb6cb27258808"
+      },
+      "sequence": 25
+    },
+    {
+      "eventId": "hook-9d25a763a8d6b5cb7b2113fe8d77efdb",
+      "findingId": "mimosa-dca2e951b80aaecb26215ee0",
+      "type": "static_fix_verified",
+      "at": "2026-09-17T02:56:12.531Z",
+      "identity": {
+        "projectRelativeFile": "_scan_probe.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "bf17b9c94eaa443e459ff3c30db978f71fc1c787e82e18c0efb854ece101ea4f",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 9,
+      "endLine": 9,
+      "reasonCode": "static_rescan_passed",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "evidenceHash": "bf17b9c94eaa443e459ff3c30db978f71fc1c787e82e18c0efb854ece101ea4f"
+      },
+      "sequence": 26
+    },
+    {
+      "eventId": "hook-2025c34827dca8513331a2258661992f",
+      "findingId": "mimosa-3da797ca0ff4086a09b3a1f8",
+      "type": "static_fix_verified",
+      "at": "2026-09-17T02:56:12.531Z",
+      "identity": {
+        "projectRelativeFile": "_scan_probe.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "28f04b053b8f98d74d91164a26cb828ef171d86411d4fdbf5a80de63f19af1fd",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 14,
+      "endLine": 14,
+      "reasonCode": "static_rescan_passed",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "evidenceHash": "28f04b053b8f98d74d91164a26cb828ef171d86411d4fdbf5a80de63f19af1fd"
+      },
+      "sequence": 27
+    },
+    {
+      "eventId": "hook-180375cda8ba1e63b7bb4c90d90a6620",
+      "findingId": "mimosa-0962ac689f6d28f2b55fdebb",
+      "type": "static_fix_verified",
+      "at": "2026-09-17T02:56:12.531Z",
+      "identity": {
+        "projectRelativeFile": "_scan_probe.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "1603210ab21fb7f0192d3b602b6c821bed3795353ea07cb6588395f4e5ab82a9",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 19,
+      "endLine": 19,
+      "reasonCode": "static_rescan_passed",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "evidenceHash": "1603210ab21fb7f0192d3b602b6c821bed3795353ea07cb6588395f4e5ab82a9"
+      },
+      "sequence": 28
+    },
+    {
+      "eventId": "hook-fc236918482e98aa6641eb702c58b2b6",
+      "findingId": "mimosa-e8ab0e206994b9b4beba8288",
+      "type": "static_fix_verified",
+      "at": "2026-09-17T02:56:12.531Z",
+      "identity": {
+        "projectRelativeFile": "_scan_probe.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "04bdee4f86e14219baae73eae41272fb7124a16dacca67ade53ae3442c2f1ba8",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 24,
+      "endLine": 24,
+      "reasonCode": "static_rescan_passed",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "evidenceHash": "04bdee4f86e14219baae73eae41272fb7124a16dacca67ade53ae3442c2f1ba8"
+      },
+      "sequence": 29
+    },
+    {
+      "eventId": "hook-fb8294231a1b4382f3f901950b40bf62",
+      "findingId": "mimosa-8b90c15fd97328ec4695257e",
+      "type": "static_fix_verified",
+      "at": "2026-09-17T02:56:12.531Z",
+      "identity": {
+        "projectRelativeFile": "_scan_probe.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "5df7bdb6039a6845fd54a80942426ae4f29ffbf1776bdaf9d4bbdce684b2466a",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 16,
+      "endLine": 16,
+      "reasonCode": "static_rescan_passed",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "evidenceHash": "5df7bdb6039a6845fd54a80942426ae4f29ffbf1776bdaf9d4bbdce684b2466a"
+      },
+      "sequence": 30
+    },
+    {
+      "eventId": "hook-b52663a053746b64ccd5b10bf3b8f86b",
+      "findingId": "mimosa-539058c7c1a4c6485697e2c9",
+      "type": "static_fix_verified",
+      "at": "2026-09-17T02:56:12.531Z",
+      "identity": {
+        "projectRelativeFile": "_scan_probe.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "e99bc5f99d5ca6807c2ce155e3a13779ad170c7c49e0290075fcb6cb27258808",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 26,
+      "endLine": 26,
+      "reasonCode": "static_rescan_passed",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "evidenceHash": "e99bc5f99d5ca6807c2ce155e3a13779ad170c7c49e0290075fcb6cb27258808"
+      },
+      "sequence": 31
+    },
+    {
+      "eventId": "hook-f2c7ba9d1cb945e75837453131e6e623",
+      "findingId": "mimosa-708e52d1ee54d9d1467ad5ff",
+      "type": "static_fix_verified",
+      "at": "2026-09-17T02:57:05.236Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "7c1a0e93f72024dca2200ef174b6c2629fc3144c8569c2c8eee581d4165a2810",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 109,
+      "endLine": 109,
+      "reasonCode": "static_rescan_passed",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "evidenceHash": "7c1a0e93f72024dca2200ef174b6c2629fc3144c8569c2c8eee581d4165a2810"
+      },
+      "sequence": 32
+    },
+    {
+      "eventId": "hook-b5a079c4850858d4a19182e6904dd9f6",
+      "findingId": "mimosa-a4ece92cbfcab10127780581",
+      "type": "static_fix_verified",
+      "at": "2026-09-17T02:57:05.236Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "9de052fa21e4ce750e036748fe33a01cd65c3b417f7cab1477708c28c1d759c3",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 145,
+      "endLine": 145,
+      "reasonCode": "static_rescan_passed",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "evidenceHash": "9de052fa21e4ce750e036748fe33a01cd65c3b417f7cab1477708c28c1d759c3"
+      },
+      "sequence": 33
+    },
+    {
+      "eventId": "hook-7dbb04247873bdb2ce52e4c54a251480",
+      "findingId": "mimosa-d06d4765164c8f15f36fb56e",
+      "type": "static_fix_verified",
+      "at": "2026-09-17T02:57:05.236Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "3c90ad0840021703bc1b539cea0f126d3feacbbdd6439c18a9ba1f9da3b90eff",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 148,
+      "endLine": 148,
+      "reasonCode": "static_rescan_passed",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "evidenceHash": "3c90ad0840021703bc1b539cea0f126d3feacbbdd6439c18a9ba1f9da3b90eff"
+      },
+      "sequence": 34
+    },
+    {
+      "eventId": "hook-26b3f5c19d86baba9d1434fed9cef5e0",
+      "findingId": "mimosa-8a9081f697ab7bfa2d4c0e94",
+      "type": "static_fix_verified",
+      "at": "2026-09-17T02:57:05.236Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "bceae2f50f93f19e86ed4f059d0fdc334cf5c8731f398b53f97ca17cb5dfa8c4",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 300,
+      "endLine": 300,
+      "reasonCode": "static_rescan_passed",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "evidenceHash": "bceae2f50f93f19e86ed4f059d0fdc334cf5c8731f398b53f97ca17cb5dfa8c4"
+      },
+      "sequence": 35
+    },
+    {
+      "eventId": "hook-15e8278da67f0faf5a5a8ff80b63e2ae",
+      "findingId": "mimosa-ba5d5f8cffa66e2b6c080f16",
+      "type": "static_fix_verified",
+      "at": "2026-09-17T02:57:05.236Z",
+      "identity": {
+        "projectRelativeFile": "_pinboard_test.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "5df7bdb6039a6845fd54a80942426ae4f29ffbf1776bdaf9d4bbdce684b2466a",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 80,
+      "endLine": 80,
+      "reasonCode": "static_rescan_passed",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "evidenceHash": "5df7bdb6039a6845fd54a80942426ae4f29ffbf1776bdaf9d4bbdce684b2466a"
+      },
+      "sequence": 36
+    }
+  ],
+  "observedFindingIds": [],
+  "verifiedFiles": [],
+  "recordedAt": "2026-09-17T03:07:37.148Z"
+}

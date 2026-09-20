@@ -4,14 +4,14 @@
 WinClipboard - Windows 桌面剪贴板管理器
 =========================================
 功能:
-  - 后台常驻系统托盘,自动记录文本 / 图片剪贴历史
-  - 全局热键 Ctrl+Shift+V 弹出历史面板(鼠标处)
+  - 后台常驻系统托盘,自动记录文本 / 图片 / 文件剪贴历史
+  - 全局热键 Ctrl+Shift+V 显示/隐藏主窗口
   - 双击/回车 复制并自动粘贴到当前窗口
   - 关键词搜索(文本 + 图片尺寸)、图片缩略图预览
-  - 置顶(📌)、删除、清空,图片按内容 SHA-1 去重
+  - 置顶(📌)、删除、清空,图片按内容像素 SHA-256 去重
   - 图片简单处理:裁剪 / 旋转 / 缩放 / 标注(方框、箭头、文字、马赛克)/ 压缩导出
   - 历史持久化(原子写入,重启后保留),开机自启动
-依赖: pywin32, Pillow, tkinter(均为已安装)
+依赖: pywin32, Pillow(界面在 winclipboard_qt.py,基于 PySide6)
 
 作者: 自动生成   日期: 2026-06-29
 """
@@ -27,13 +27,15 @@ import base64
 import queue
 import ctypes
 import hashlib
+import subprocess
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
+from pathlib import Path
 
-import tkinter as tk
-import tkinter.font as tkfont
-from tkinter import ttk, filedialog, messagebox, simpledialog
+from perf_probe import PerfSpan          # 性能埋点(纯标准库,见 perf_probe.py)
+
 from urllib.parse import urlsplit
 
 try:
@@ -45,7 +47,7 @@ try:
 except ImportError:
     win32crypt = None
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageTk, ImageFilter, ImageOps, ImageChops
+    from PIL import Image, ImageDraw, ImageFont
 except ImportError:
     raise SystemExit("缺少 Pillow,请运行: pip install Pillow")
 
@@ -75,8 +77,12 @@ MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN = 0x0001, 0x0002, 0x0004, 0x0008
 
 # 托盘菜单项 ID
 M_SHOW, M_CLEAR, M_PRIVATE, M_AUTOSTART, M_ABOUT, M_QUIT = 1001, 1002, 1003, 1004, 1005, 1006
+M_CTT_OFF = 1007                # 退出图钉画布鼠标穿透(穿透中唯一可点入口之一)
 ID_TIMER = 2001
-ID_HOTKEY = 100
+ID_TIMER_CAPTURE = 2002      # 启动剪贴板捕获(单次)
+ID_HOTKEY = 100              # 主热键(Ctrl+Shift+V)
+ID_HOTKEY_PIN = 102          # 图钉画布:直接钉剪贴板图片(Ctrl+Shift+P)
+ID_HOTKEY_CTT = 103          # 图钉画布:鼠标穿透切换(Ctrl+Alt+T)
 
 # 部分 win32con 构建缺失的托盘常量,这里显式定义(避免 AttributeError)
 NIM_ADD = 0x00000000
@@ -264,8 +270,8 @@ def _migrate_config_file():
         if not changed:
             return
         tmp = CONFIG_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        Path(tmp).write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
         os.replace(tmp, CONFIG_FILE)
     except Exception:
         pass
@@ -306,8 +312,8 @@ def save_config(cfg):
     tmp = CONFIG_FILE + ".tmp"
     try:
         _rotate_config_backup()
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(out, f, ensure_ascii=False, indent=2)
+        Path(tmp).write_text(json.dumps(out, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
         os.replace(tmp, CONFIG_FILE)
     except Exception:
         log("配置写入失败:\n%s" % traceback.format_exc())
@@ -366,8 +372,8 @@ def save_history(hist):
     tmp = HISTORY_FILE + ".tmp"
     try:
         _rotate_history_backup()
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(hist, f, ensure_ascii=False)
+        Path(tmp).write_text(json.dumps(hist, ensure_ascii=False),
+                             encoding="utf-8")
         os.replace(tmp, HISTORY_FILE)
     except Exception:
         try:
@@ -440,8 +446,7 @@ def save_private(priv):
                "data": base64.b64encode(blob if blob is not None else data).decode("ascii")}
     tmp = PRIVATE_FILE + ".tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f)
+        Path(tmp).write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, PRIVATE_FILE)
     except Exception:
         try:
@@ -454,6 +459,18 @@ def single_instance():
     mutex = kernel32.CreateMutexW(None, False, "Global\\WinClipboard_Mutex_7hasj2k")
     already = ctypes.get_last_error() == 183  # ERROR_ALREADY_EXISTS
     return (not already), mutex
+
+
+def is_remote_session():
+    """当前是否在远程会话(RDP 等)——兼容性开关(如派发器 WM_NULL 保活)
+    的 auto 档依据。注意部分远控工具(网易UU等)不置 RDP 标志,测不出来,
+    那类环境靠 UiHealthMonitor 看门狗兜底,或用户手动把开关设为 on。"""
+    try:
+        if os.environ.get("SESSIONNAME", "").upper().startswith("RDP-"):
+            return True
+        return bool(user32.GetSystemMetrics(0x1000))   # SM_REMOTESESSION
+    except Exception:
+        return False
 
 
 # ============================================================
@@ -578,8 +595,8 @@ def make_icon(path):
 # ============================================================
 # DIB <-> PNG 转换(用于图片剪贴)
 # ============================================================
-def dib_to_png_bytes(dib):
-    """把剪贴板的 CF_DIB 原始字节转成 PNG 字节流。"""
+def _dib_to_bmp_bytes(dib):
+    """CF_DIB 前面补 14 字节 BITMAPFILEHEADER,拼成 PIL 可读的 BMP 字节流。"""
     bisize = struct.unpack("<I", dib[:4])[0]
     bitcount = struct.unpack("<H", dib[14:16])[0]
     compression = struct.unpack("<I", dib[16:20])[0] if len(dib) >= 20 else 0
@@ -589,10 +606,28 @@ def dib_to_png_bytes(dib):
         palette = (clrused if clrused else (1 << bitcount)) * 4
     masks = 12 if (compression == 3 and bisize == 40) else 0  # BI_BITFIELDS 的掩码
     pixel_offset = 14 + bisize + palette + masks
-    bmp = b"BM" + struct.pack("<IHHI", len(dib) + 14, 0, 0, pixel_offset) + dib
+    return b"BM" + struct.pack("<IHHI", len(dib) + 14, 0, 0, pixel_offset) + dib
+
+
+def dib_to_png_bytes(dib):
+    """把剪贴板的 CF_DIB 原始字节转成 PNG 字节流。"""
     buf = io.BytesIO()
-    Image.open(io.BytesIO(bmp)).save(buf, "PNG")
+    Image.open(io.BytesIO(_dib_to_bmp_bytes(dib))).save(buf, "PNG")
     return buf.getvalue()
+
+
+def pixel_sha256(img):
+    """对规范化像素字节做 SHA-256(内容寻址文件名用)。
+
+    输入是「宽 + 高 + 模式 + 原始像素」而非编码后的 PNG 字节:后者会随
+    PNG 编码器参数 / Pillow 版本 / 元数据漂移,同一张图重装环境后就对不上,
+    去重会静默失效。哈希在解码之后做,去重命中时可以完全跳过 PNG 编码。
+    """
+    h = hashlib.sha256()
+    h.update(struct.pack("<II", img.width, img.height))
+    h.update(img.mode.encode("ascii"))
+    h.update(img.tobytes())     # 触发懒解码;后续 save 复用已解码数据
+    return h.hexdigest()
 
 
 def png_to_dib(path):
@@ -618,6 +653,119 @@ def file_sha1(path):
         for chunk in iter(lambda: f.read(1 << 16), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+# ---- ShareX 集成(成熟截图标注工具;未安装时前端回退内置编辑器) ----
+def find_sharex():
+    """定位 ShareX.exe;未安装返回 None。优先级:环境变量 WCLB_SHAREX >
+    注册表 App Paths > 常见安装目录。"""
+    env = os.environ.get("WCLB_SHAREX")
+    if env and os.path.exists(env):
+        return env
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Windows\CurrentVersion"
+                            r"\App Paths\ShareX.exe") as k:
+            p, _ = winreg.QueryValueEx(k, None)
+            if p and os.path.exists(p):
+                return p
+    except OSError:
+        pass
+    except Exception:
+        pass
+    for p in (os.path.expandvars(r"%ProgramFiles%\ShareX\ShareX.exe"),
+              os.path.expandvars(r"%ProgramFiles(x86)%\ShareX\ShareX.exe"),
+              os.path.expandvars(r"%LocalAppData%\Programs\ShareX\ShareX.exe")):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def open_in_sharex(path):
+    """用 ShareX 编辑器打开图片(官方 CLI:-ImageEditor <文件>)。
+    用户在 ShareX 里保存/复制后,结果经系统剪贴板自动回流本工具历史。"""
+    exe = find_sharex()
+    if not exe or not os.path.exists(path):
+        return False
+    try:
+        subprocess.Popen([exe, "-ImageEditor", os.path.abspath(path)],
+                         shell=False)
+        return True
+    except Exception:
+        log("调起 ShareX 失败:\n%s" % traceback.format_exc())
+        return False
+
+
+def find_ksnip():
+    """定位 ksnip.exe(开源 Qt 截图标注器);未安装返回 None。
+    优先级:环境变量 WCLB_KSNIP > 常见安装目录 > PATH。"""
+    env = os.environ.get("WCLB_KSNIP")
+    if env and os.path.exists(env):
+        return env
+    for p in (os.path.expandvars(r"%ProgramFiles%\ksnip\ksnip.exe"),
+              os.path.expandvars(r"%ProgramFiles(x86)%\ksnip\ksnip.exe"),
+              os.path.expandvars(r"%LocalAppData%\Programs\ksnip\ksnip.exe")):
+        if os.path.exists(p):
+            return p
+    try:
+        import shutil
+        p = shutil.which("ksnip")
+        if p:
+            return p
+    except Exception:
+        pass
+    return None
+
+
+def open_in_ksnip(path):
+    """用 ksnip 编辑器打开图片(CLI:--editor <文件>;其 issue #103 起支持)。
+    未装 ksnip / 文件缺失返回 False。"""
+    exe = find_ksnip()
+    if not exe or not os.path.exists(path):
+        return False
+    try:
+        subprocess.Popen([exe, "--editor", os.path.abspath(path)],
+                         shell=False)
+        return True
+    except Exception:
+        log("调起 ksnip 失败:\n%s" % traceback.format_exc())
+        return False
+
+
+def open_file_default(path):
+    """用系统默认关联程序打开文件(Windows 原生体验,同资源管理器双击)。"""
+    try:
+        os.startfile(path)
+        return True
+    except Exception:
+        log("默认程序打开失败 %s:\n%s" % (path, traceback.format_exc()))
+        return False
+
+
+def open_url(url):
+    """系统默认浏览器打开链接(标准库 webbrowser,走 OS 关联)。"""
+    try:
+        import webbrowser
+        return bool(webbrowser.open(url))
+    except Exception:
+        log("打开链接失败 %s:\n%s" % (url, traceback.format_exc()))
+        return False
+
+
+def reveal_in_explorer(path):
+    """在资源管理器中定位该文件(选中显示)。
+    用 ShellExecuteW 原生 API;路径中的引号字符已剔除,参数不可被拆分。"""
+    try:
+        import ctypes
+        target = os.path.abspath(path).replace('"', "")
+        folder = os.path.dirname(target) or target
+        rc = ctypes.windll.shell32.ShellExecuteW(
+            None, "open", "explorer.exe", '/select,"%s"' % target, folder, 5)  # SW_SHOW
+        return int(rc) > 32
+    except Exception:
+        log("资源管理器定位失败 %s:\n%s" % (path, traceback.format_exc()))
+        return False
 
 
 def set_dib_to_clipboard(hwnd, dib):
@@ -754,8 +902,11 @@ class TrayWorker(threading.Thread):
         except win32gui.error:
             class_atom = wc.lpszClassName
 
+        # 标题不能叫 WinClipboard:否则 FindWindow 会先命中这个隐藏宿主窗口,
+        # 盖过真正的主窗口(外部诊断/_gui_test 全被误导)
         self.hwnd = win32gui.CreateWindowEx(
-            0, class_atom, "WinClipboard", 0, 0, 0, 0, 0, 0, 0, self.hinst, None)
+            0, class_atom, "WinClipboardTrayHost", 0, 0, 0, 0, 0, 0, 0,
+            self.hinst, None)
 
         # 托盘图标
         self._nid = (self.hwnd, 0,
@@ -775,17 +926,23 @@ class TrayWorker(threading.Thread):
                 win32gui.Shell_NotifyIcon(NIM_MODIFY, nid)
             except Exception:
                 pass
-            self.app.signal_q.put(("tray", "hotkey_fail"))
+            self.app._post(("tray", "hotkey_fail"))
             log("全局热键注册失败(hotkey_mod=%d key=%d)" % (cfg["hotkey_mod"], cfg["hotkey_key"]))
+        # 图钉画布热键:注册失败仅记日志/禁用对应功能,不弹模态
+        pin_ok = user32.RegisterHotKey(self.hwnd, ID_HOTKEY_PIN,
+                                       MOD_CONTROL | MOD_SHIFT, 0x50)   # 'P'
+        ctt_ok = user32.RegisterHotKey(self.hwnd, ID_HOTKEY_CTT,
+                                       MOD_CONTROL | MOD_ALT, 0x54)     # 'T'
+        if not pin_ok:
+            log("图钉热键(Ctrl+Shift+P)被占用,直钉剪贴板不可用")
+        if not ctt_ok:
+            log("穿透热键(Ctrl+Alt+T)被占用,鼠标穿透已禁用")
+        self.app._post(("ctt_hotkey_state", bool(ctt_ok)))
         user32.SetTimer(self.hwnd, ID_TIMER, 80, None)
 
-        # 启动时把当前剪贴板内容纳入历史
-        try:
-            item = self.app.read_clipboard_now()
-            if item:
-                self.app.signal_q.put(("clip", item))
-        except Exception:
-            pass
+        # 启动捕获延后到消息循环内:剪贴板里若是大图,PNG 编码可耗时数秒,
+        # 同步做会卡住 PumpMessages 进入循环,热键/托盘在启动初期全部失联
+        user32.SetTimer(self.hwnd, ID_TIMER_CAPTURE, 1, None)
 
         try:
             win32gui.PumpMessages()
@@ -798,6 +955,8 @@ class TrayWorker(threading.Thread):
     def _cleanup(self):
         for fn in (
             lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY),
+            lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_PIN),
+            lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_CTT),
             lambda: user32.RemoveClipboardFormatListener(self.hwnd),
         ):
             try:
@@ -822,7 +981,7 @@ class TrayWorker(threading.Thread):
             if now - self._last_toggle < 0.45:
                 return 1
             self._last_toggle = now
-            self.app.signal_q.put(("tray", "show"))
+            self.app._post(("tray", "show"))
         elif lp == win32con.WM_RBUTTONUP:
             self._popup_menu()
         return 1
@@ -831,19 +990,24 @@ class TrayWorker(threading.Thread):
         # 我们自己写入剪贴板时跳过(时间窗比一次性标志更抗竞态)
         if time.monotonic() < self.app._ignore_clip_until:
             return 0
-        try:
-            item = self.app.read_clipboard_now()
-            if item:
-                self.app.signal_q.put(("clip", item))
-        except Exception:
-            pass
+        self.app.submit_capture()
         return 0
 
     def on_hotkey(self, hwnd, msg, wp, lp):
-        self.app.signal_q.put(("hotkey",))
+        if wp == ID_HOTKEY_PIN:
+            self.app._post(("pin_hotkey",))
+        elif wp == ID_HOTKEY_CTT:
+            self.app._post(("ctt_hotkey",))
+        else:
+            self.app._post(("hotkey",))
         return 0
 
     def on_timer(self, hwnd, msg, wp, lp):
+        if wp == ID_TIMER_CAPTURE:
+            # 单次:进入消息循环后立刻提交启动捕获(编码在捕获线程做)
+            user32.KillTimer(hwnd, ID_TIMER_CAPTURE)
+            self.app.submit_capture()
+            return 0
         while True:
             try:
                 cmd = self.cmd_q.get_nowait()
@@ -855,10 +1019,11 @@ class TrayWorker(threading.Thread):
     def on_command(self, hwnd, msg, wp, lp):
         mid = wp & 0xFFFF
         actions = {M_SHOW: "show", M_CLEAR: "clear", M_PRIVATE: "private",
-                   M_AUTOSTART: "autostart", M_ABOUT: "about", M_QUIT: "quit"}
+                   M_AUTOSTART: "autostart", M_ABOUT: "about", M_QUIT: "quit",
+                   M_CTT_OFF: "ctt_off"}
         act = actions.get(mid)
         if act:
-            self.app.signal_q.put(("tray", act))
+            self.app._post(("tray", act))
         return 0
 
     # ---- 命令处理 ----
@@ -883,6 +1048,9 @@ class TrayWorker(threading.Thread):
                             "私密内容 (%d)" % len(self.app.private))
         flag = win32con.MF_CHECKED if self.app.is_autostart() else win32con.MF_UNCHECKED
         win32gui.AppendMenu(menu, win32con.MF_STRING | flag, M_AUTOSTART, "开机自启动")
+        # 穿透中的画布自身不收鼠标,托盘菜单是保底关闭入口之一(非穿透时点击无效无害)
+        win32gui.AppendMenu(menu, win32con.MF_STRING, M_CTT_OFF,
+                            "退出画布鼠标穿透")
         win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
         win32gui.AppendMenu(menu, win32con.MF_STRING, M_ABOUT, "关于 WinClipboard")
         win32gui.AppendMenu(menu, win32con.MF_STRING, M_QUIT, "退出")
@@ -895,7 +1063,7 @@ class TrayWorker(threading.Thread):
 
 
 # ============================================================
-# 核心后端(与 UI 无关;tkinter / Qt 两版前端共用同一实例)
+# 核心后端(与 UI 无关;由 winclipboard_qt.py 的 Qt 前端调用)
 # ============================================================
 class ClipboardCore:
     """剪贴板核心状态机:配置 / 历史 / 私密区 / 捕获 / 回写 / 淘汰 / 自启。
@@ -903,8 +1071,9 @@ class ClipboardCore:
     约定:
     - history / private / cfg 容器始终原地修改(不重新绑定),
       前端在初始化后可安全持有同名别名;
-    - 所有事件(剪贴捕获 / 历史变化 / 热键 / 托盘)一律经 signal_q 投递给前端,
-      由前端在自己的 UI 线程轮询处理;核心不会直接调用任何 UI 代码;
+    - 所有事件(剪贴捕获 / 历史变化 / 热键 / 托盘)一律经 _post 投递给前端
+      (queue 传数据,on_event 唤醒),由前端在自己的 UI 线程排空处理;
+      核心不会直接调用任何 UI 代码;
     - 托盘/热键/监听线程(worker)由本类创建并启动。
     """
 
@@ -915,8 +1084,22 @@ class ClipboardCore:
         self.history = load_history()
         self.private = load_private()   # 敏感内容隔离区(不进普通面板)
         self.signal_q = queue.Queue()
+        # 事件唤醒回调(前端注入):queue 只管数据,回调负责把"该排空了"
+        # 通知到 UI 线程(如 Qt Signal 的 emit);无 UI / 测试环境保持 None
+        self.on_event = None
+        # 剪贴板捕获线程(读板 + 大图 PNG 编码都放这):曾同步跑在托盘线程,
+        # 大图编码数秒期间热键/托盘消息全部排队失联(启动期尤其明显)
+        self._capture_exec = ThreadPoolExecutor(max_workers=1,
+                                                thread_name_prefix="capture")
+        # 防抖落盘:变更只置脏,由前端定时器调 flush_history 统一写盘
+        # (全量 JSON 落盘在大历史上可达几十毫秒,此前每次剪贴事件都同步执行)
+        self._dirty = False
+        self._gen = 0                 # 变更代数:落盘期间再有变更则不能算已持久化
+        self._search_cache = {}       # id(rec) → casefold 检索串(条目内容不可变)
+        self.on_dirty = None            # 前端回调(启动防抖定时器)
         self._ignore_clip_until = 0.0   # 抑制自写入剪贴板事件的截止时间(单调钟)
-        # 历史迁移:补齐哈希、合并重复图片、清理孤儿文件(须在后台线程启动前)
+        # 历史迁移:补齐哈希、合并重复图片条目(孤儿文件清理延迟到启动后,
+        # 见 cleanup_orphan_images;条目迁移仍须在后台线程启动前完成)
         self._migrate_images()
         # 旧版明文私密区/密钥自动升级为 DPAPI 加密
         self._migrate_private()
@@ -925,7 +1108,43 @@ class ClipboardCore:
         self.worker = TrayWorker(self)
         self.worker.start()
 
-    # ---- 剪贴板读取(在工作线程调用) ----
+    # ---- 事件投递(任意线程可调) ----
+    def _post(self, event):
+        """向后端事件队列投递一条:queue 负责数据,on_event 负责唤醒。
+
+        on_event 由前端注入(Qt Signal 的 emit,队列连接):托盘/捕获线程
+        emit 后 Qt 把排空任务排进主线程事件循环;主线程内 emit(如 add_item
+        触发的 change)同样只是排队不会重入。测试里可为 None。
+        """
+        self.signal_q.put(event)
+        cb = getattr(self, "on_event", None)
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                pass
+
+    # ---- 剪贴板读取(在捕获线程调用) ----
+    def submit_capture(self):
+        """把一次捕获(读板 + 可能的大图 PNG 编码)提交到后台线程。
+        托盘线程调用后立即返回,不再被编码耗时拖住消息循环。"""
+        exec_ = getattr(self, "_capture_exec", None)
+        if exec_ is None:                    # 兼容测试里 __new__ 构造的核心
+            self._capture_once()
+            return
+        try:
+            exec_.submit(self._capture_once)
+        except Exception:
+            pass
+
+    def _capture_once(self):
+        try:
+            item = self.read_clipboard_now()
+            if item:
+                self._post(("clip", item))
+        except Exception:
+            pass
+
     def read_clipboard_now(self):
         hwnd = self.worker.hwnd
         for _ in range(6):
@@ -956,12 +1175,17 @@ class ClipboardCore:
 
     def _store_image(self, dib):
         try:
-            data = dib_to_png_bytes(dib)
-            hsh = hashlib.sha1(data).hexdigest()
+            img = Image.open(io.BytesIO(_dib_to_bmp_bytes(dib)))
+            hsh = pixel_sha256(img)
             path = os.path.join(IMAGE_DIR, "img_%s.png" % hsh)
             if not os.path.exists(path):
-                with open(path, "wb") as f:
-                    f.write(data)
+                # 去重命中时完全跳过 PNG 编码(4K 图编码秒级,像素哈希只要百毫秒级)
+                with PerfSpan("png_encode"):
+                    buf = io.BytesIO()
+                    img.save(buf, "PNG")
+                # 原子落盘:崩溃不留半截文件(否则下次命中坏文件无法自愈)
+                Path(path + ".tmp").write_bytes(buf.getvalue())
+                os.replace(path + ".tmp", path)
             w = struct.unpack("<i", dib[4:8])[0]
             h = abs(struct.unpack("<i", dib[8:12])[0])
             return ("image", {"path": path, "w": w, "h": h, "hash": hsh})
@@ -969,7 +1193,10 @@ class ClipboardCore:
             return None
 
     def _migrate_images(self):
-        """图片历史迁移:补齐 SHA-1 哈希、合并重复内容、清理孤儿文件。"""
+        """图片历史迁移:补齐哈希、合并重复内容(只动条目,不碰磁盘文件)。
+
+        孤儿文件清理由 cleanup_orphan_images 延迟执行,不占启动关键路径。
+        """
         try:
             changed = False
             for h in self.history:
@@ -997,19 +1224,43 @@ class ClipboardCore:
             if len(keep) != len(self.history):
                 changed = True
             self.history[:] = keep      # 原地替换,保持前端别名有效
-            # 清理不被任何条目引用的孤儿图片文件
-            refs = {h["content"] for h in keep if h.get("type") == "image"}
-            if os.path.isdir(IMAGE_DIR):
-                for fn in os.listdir(IMAGE_DIR):
-                    fp = os.path.join(IMAGE_DIR, fn)
-                    if fn.lower().endswith(".png") and fp not in refs:
-                        try:
-                            os.remove(fp)
-                            changed = True
-                        except Exception:
-                            pass
             if changed:
                 save_history(self.history)
+        except Exception:
+            pass
+
+    def cleanup_orphan_images(self, min_age=120.0):
+        """删除不被任何历史条目引用的孤儿图片(前端延迟调度,不占启动路径)。
+
+        线程约定:与历史变更同线程(UI 线程)调用,引用快照才一致;
+        min_age 秒内新建的文件一律跳过——捕获线程刚落盘、事件尚未入史的
+        瞬间文件恰好"无引用",靠时间窗兜底而不是加锁。
+        """
+        try:
+            refs = {h.get("content") for h in self.history
+                    if h.get("type") == "image"}
+            now = time.time()
+            removed = 0
+            if os.path.isdir(IMAGE_DIR):
+                with os.scandir(IMAGE_DIR) as it:     # 扁平目录,无需 os.walk
+                    for e in it:
+                        if e.is_dir() or not e.name.lower().endswith((".png", ".tmp")):
+                            continue
+                        fp = os.path.join(IMAGE_DIR, e.name)
+                        if fp in refs:
+                            continue
+                        try:
+                            if now - e.stat().st_mtime < min_age:
+                                continue               # 可能正被捕获流程写入
+                        except OSError:
+                            continue
+                        try:
+                            os.remove(fp)
+                            removed += 1
+                        except Exception:
+                            pass
+            if removed:
+                log("孤儿图片清理:删除 %d 个未引用文件" % removed)
         except Exception:
             pass
 
@@ -1049,6 +1300,31 @@ class ClipboardCore:
             log("config.json 升级写入失败:\n%s" % traceback.format_exc())
 
     # ---- 历史维护 ----
+    def _mark_dirty(self):
+        """历史已变:置脏并通知前端(getattr 兜底兼容测试里 __new__ 构造的核心)。"""
+        self._dirty = True
+        self._gen = getattr(self, "_gen", 0) + 1
+        cb = getattr(self, "on_dirty", None)
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                pass
+
+    def flush_history(self):
+        """脏历史落盘(原子写);防抖到期 / 退出时调用。
+
+        generation 守卫:序列化/写盘期间若又有变更(_gen 前进),保持脏标记,
+        下一轮防抖再写——否则新状态会被误判为已持久化而丢失到下次变更。
+        """
+        if not getattr(self, "_dirty", False):
+            return
+        gen = getattr(self, "_gen", 0)
+        with PerfSpan("history_save"):
+            save_history(self.history)
+        if gen == getattr(self, "_gen", 0):
+            self._dirty = False
+
     def add_item(self, item):
         kind, content = item
         ts = time.time()
@@ -1084,16 +1360,17 @@ class ClipboardCore:
                 break
         self.history.insert(0, rec)
         self._evict()
-        save_history(self.history)
+        self._mark_dirty()
         self._notify_change()
 
     def _notify_change(self):
         """通知前端历史已变。
 
-        只投递队列信号,不在本方法内直接碰 UI:add_item 由前端的轮询回调触发,
-        而 TrayWorker 也会经 signal_q 投递,统一走队列可避免跨线程访问部件。
+        只走事件投递(_post),不在本方法内直接碰 UI:add_item 由前端的
+        排空回调触发,而 TrayWorker 也会经同一队列投递,统一走队列可避免
+        跨线程访问部件。
         """
-        self.signal_q.put(("change",))
+        self._post(("change",))
 
     def _evict(self):
         excess = len(self.history) - self.max_items
@@ -1130,9 +1407,32 @@ class ClipboardCore:
             log("私密区写入失败:\n%s" % traceback.format_exc())
 
     # ---- 列表过滤 ----
+    def _search_text(self, h):
+        """条目的检索串:casefold 一次后缓存,搜索每敲一个字符不再对全部
+        条目重复 str.lower/join(大文本条目尤甚;条目内容入史后不可变)。"""
+        cache = getattr(self, "_search_cache", None)
+        if cache is None:
+            cache = self._search_cache = {}
+        key = id(h)
+        blob = cache.get(key)
+        if blob is None:
+            t = h["type"]
+            if t == "files":
+                blob = os.path.basename(h["content"][0]) + " " \
+                    + " ".join(h["content"])
+            elif t == "image":
+                blob = "图片 截图 %s×%s" % (h.get("w", 0), h.get("h", 0))
+            else:
+                blob = h["content"]
+            blob = blob.casefold()
+            if len(cache) > 512:      # 条目淘汰后 id 不至于这么快复用,先整清
+                cache.clear()
+            cache[key] = blob
+        return blob
+
     def filter_view(self, category, query=""):
         """按分类 + 关键词过滤,返回命中条目在 history 中的索引列表。"""
-        q = (query or "").strip().lower()
+        q = (query or "").strip().casefold()
         view = []
         for i, h in enumerate(self.history):
             t = h["type"]
@@ -1145,21 +1445,22 @@ class ClipboardCore:
             if category == "link" and not (t == "text" and url_info(h["content"])):
                 continue
             if q:
-                if t == "text":
-                    if q not in h["content"].lower():
-                        continue
-                elif t == "files":
-                    blob = (os.path.basename(h["content"][0]).lower() + " "
-                            + " ".join(h["content"]).lower())
-                    if q not in blob:
-                        continue
-                elif t == "image":
-                    if q not in ("图片 截图 %s×%s" % (h.get("w", 0), h.get("h", 0))).lower():
-                        continue
+                if q not in self._search_text(h):
+                    continue
             view.append(i)
         return view
 
     # ---- 回写 / 粘贴 ----
+    def copy_record(self, rec):
+        """仅复制原始内容,不模拟粘贴、不移动历史条目。"""
+        if rec["type"] == "files":
+            existing = [p for p in rec["content"] if os.path.exists(p)]
+            if not existing:
+                return False
+            rec = dict(rec, content=existing)
+        self._ignore_clip_until = time.monotonic() + 0.5
+        return self._set_clipboard(rec)
+
     def paste_record(self, rec):
         """写回剪贴板 + 自动粘贴排队 + 置顶到最近。文件全部丢失时返回 False。"""
         if rec["type"] == "files":
@@ -1175,7 +1476,7 @@ class ClipboardCore:
         try:
             self.history.remove(rec)
             self.history.insert(0, rec)
-            save_history(self.history)
+            self._mark_dirty()
         except Exception:
             pass
         return True
@@ -1188,7 +1489,7 @@ class ClipboardCore:
             self.worker.cmd_q.put(("paste",))
 
     def _set_clipboard(self, rec):
-        for _ in range(6):
+        for _ in range(12):
             try:
                 win32clipboard.OpenClipboard(self.worker.hwnd)
                 try:
@@ -1204,14 +1505,15 @@ class ClipboardCore:
                             win32clipboard.CF_DIB, png_to_dib(rec["content"]))
                 finally:
                     win32clipboard.CloseClipboard()
-                return
+                return True
             except Exception:
-                time.sleep(0.03)
+                time.sleep(0.06)
+        return False
 
     # ---- 条目状态操作 ----
     def toggle_pin_at(self, hi):
         self.history[hi]["pinned"] = not self.history[hi].get("pinned", False)
-        save_history(self.history)
+        self._mark_dirty()
 
     def delete_at(self, hi):
         rec = self.history.pop(hi)
@@ -1220,7 +1522,7 @@ class ClipboardCore:
                 os.remove(rec["content"])
             except Exception:
                 pass
-        save_history(self.history)
+        self._mark_dirty()
         return rec
 
     def clear_unpinned(self):
@@ -1232,10 +1534,10 @@ class ClipboardCore:
                 except Exception:
                     pass
         self.history[:] = [h for h in self.history if h.get("pinned")]
-        save_history(self.history)
+        self._mark_dirty()
 
     def save_all(self):
-        save_history(self.history)
+        self.flush_history()
         save_private(self.private)
 
     # ---- 开机自启 ----
@@ -1279,7 +1581,7 @@ class ClipboardCore:
 
 
 # ============================================================
-# 图片标注辅助(模块级函数,供 ImageEditor 使用)
+# 图片标注辅助(模块级函数,供 winclipboard_qt.py 的 Qt 版图片编辑器使用)
 # ============================================================
 def _load_font(size):
     for name in ("C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf",
@@ -1294,23 +1596,25 @@ def _load_font(size):
         return ImageFont.load_default()
 
 
-def _draw_text(img, pos, text, font):
+def _draw_text(img, pos, text, font, color=(255, 255, 255)):
+    # 光色配深描边、深色配浅描边,保证任何底图上可读
+    halo = (0, 0, 0) if sum(color[:3]) >= 384 else (255, 255, 255)
     d = ImageDraw.Draw(img)
     x, y = pos
     for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2), (-1, -1), (1, 1), (-1, 1), (1, -1)):
-        d.text((x + dx, y + dy), text, font=font, fill=(0, 0, 0))
-    d.text((x, y), text, font=font, fill=(255, 255, 255))
+        d.text((x + dx, y + dy), text, font=font, fill=halo)
+    d.text((x, y), text, font=font, fill=color)
 
 
-def _draw_arrow(img, p0, p1):
+def _draw_arrow(img, p0, p1, color=(255, 40, 40), width=4):
     d = ImageDraw.Draw(img)
-    d.line((p0, p1), fill=(255, 40, 40), width=4)
+    d.line((p0, p1), fill=color, width=width)
     ang = math.atan2(p1[1] - p0[1], p1[0] - p0[0])
-    L, a = 18, 0.5
+    L, a = max(12, width * 4), 0.5
     x1, y1 = p1
     p2 = (x1 - L * math.cos(ang - a), y1 - L * math.sin(ang - a))
     p3 = (x1 - L * math.cos(ang + a), y1 - L * math.sin(ang + a))
-    d.polygon((p1, p2, p3), fill=(255, 40, 40))
+    d.polygon((p1, p2, p3), fill=color)
 
 
 def _mosaic(img, box):
@@ -1323,315 +1627,8 @@ def _mosaic(img, box):
 
 
 # ============================================================
-# 图片编辑器(裁剪/旋转/缩放 + 标注 + 压缩导出, 主线程)
-# ============================================================
-class ImageEditor:
-    """图片简单处理:裁剪/旋转/缩放 + 标注(方框/箭头/文字/马赛克)+ 压缩导出。"""
-
-    def __init__(self, app, rec):
-        self.app = app
-        self.rec = rec
-        try:
-            src = Image.open(rec["content"])
-            if src.mode != "RGB":
-                bg = Image.new("RGB", src.size, (255, 255, 255))
-                if src.mode in ("RGBA", "LA"):
-                    bg.paste(src, mask=src.split()[-1])
-                else:
-                    bg.paste(src)
-                src = bg
-            self.base = src
-        except Exception:
-            messagebox.showerror("WinClipboard", "无法打开图片文件。", parent=app.root)
-            return
-
-        self.undo_stack = []      # 已提交操作前的快照(最多 10 张)
-        self.tool = None          # crop / rect / arrow / text / mosaic
-        self.pending_text = None
-        self.scale = 1.0
-        self.ox = self.oy = 0
-        self._drag_xy = None
-        self._photo = None
-        self._font = _load_font(26)
-
-        top = tk.Toplevel(app.root)
-        self.top = top
-        top.title("图片处理 — " + os.path.basename(rec["content"]))
-        top.configure(bg="#f7f9fc")
-        top.attributes("-topmost", True)
-        top.geometry("900x620")
-
-        bar = tk.Frame(top, bg="#f7f9fc")
-        bar.pack(fill="x", padx=6, pady=6)
-        self._tbtn = {}
-        for key, label in (("crop", "✂ 裁剪"), ("rotl", "⟲ 左旋"), ("rotr", "⟳ 右旋"),
-                           ("scale", "🔍 缩放"), ("_sep_", None),
-                           ("rect", "▭ 方框"), ("arrow", "➤ 箭头"),
-                           ("text", "🅃 文字"), ("mosaic", "◼ 马赛克")):
-            if key == "_sep_":
-                tk.Frame(bar, width=1, bg="#e3e7ee").pack(side="left", fill="y",
-                                                          padx=6, pady=2)
-                continue
-            b = tk.Button(bar, text=label, command=lambda k=key: self._on_tool(k),
-                          relief="flat", borderwidth=0, bg="#ffffff",
-                          fg="#1f2733", cursor="hand2",
-                          activebackground="#e8efff", activeforeground="#1f2733",
-                          highlightthickness=1, highlightbackground="#e3e7ee",
-                          font=("Segoe UI", 9), padx=7, pady=3)
-            b.pack(side="left", padx=2)
-            if key in ("crop", "rect", "arrow", "text", "mosaic"):
-                self._tbtn[key] = b
-        for key, label in (("undo", "↶ 撤销"), ("compress", "📦 压缩导出"),
-                           ("copy", "📋 复制"), ("save", "💾 保存")):
-            b = tk.Button(bar, text=label, command=getattr(self, "_on_" + key),
-                          relief="flat", borderwidth=0, bg="#ffffff",
-                          fg="#1f2733", cursor="hand2",
-                          activebackground="#e8efff", activeforeground="#1f2733",
-                          highlightthickness=1, highlightbackground="#e3e7ee",
-                          font=("Segoe UI", 9), padx=7, pady=3)
-            b.pack(side="right", padx=2)
-
-        self.canvas = tk.Canvas(top, bg="#3a3f47", highlightthickness=0,
-                                cursor="crosshair")
-        self.canvas.pack(fill="both", expand=True, padx=6, pady=(0, 4))
-        self.lbl_status = tk.Label(top, text="", bg="#f7f9fc", fg="#8a94a6",
-                                   anchor="w", font=("Segoe UI", 8))
-        self.lbl_status.pack(fill="x", padx=10, pady=(0, 6))
-
-        self.canvas.bind("<ButtonPress-1>", self._press)
-        self.canvas.bind("<B1-Motion>", self._drag)
-        self.canvas.bind("<ButtonRelease-1>", self._release)
-        self.canvas.bind("<Configure>", lambda e: self._redraw())
-        top.protocol("WM_DELETE_WINDOW", self.close)
-        self._redraw()
-
-    # ---- 工具 ----
-    def _on_tool(self, key):
-        if key == "crop":
-            self._set_tool("crop")
-        elif key == "rotl":
-            self._transform(lambda im: im.rotate(90, expand=True))
-        elif key == "rotr":
-            self._transform(lambda im: im.rotate(-90, expand=True))
-        elif key == "scale":
-            v = simpledialog.askinteger("缩放", "目标百分比(10–300):", parent=self.top,
-                                        initialvalue=100, minvalue=10, maxvalue=300)
-            if v and v != 100:
-                self._transform(lambda im: im.resize(
-                    (max(1, int(im.width * v / 100)), max(1, int(im.height * v / 100))),
-                    RESAMPLE))
-        elif key == "text":
-            s = simpledialog.askstring("文字标注", "输入标注文字:", parent=self.top)
-            if s:
-                self._set_tool("text")
-                self.pending_text = s
-        else:
-            self._set_tool(key)
-
-    def _set_tool(self, key):
-        self.tool = None if self.tool == key else key
-        for k, b in self._tbtn.items():
-            on = (k == self.tool)
-            b.config(bg=self.app.ACCENT_SOFT if on else "#ffffff",
-                     fg=self.app.ACCENT if on else "#1f2733",
-                     highlightbackground=self.app.ACCENT_SOFT if on else "#e3e7ee")
-        self._status()
-
-    def _transform(self, fn):
-        self._push()
-        self.base = fn(self.base)
-        self._redraw()
-
-    def _push(self):
-        self.undo_stack.append(self.base.copy())
-        if len(self.undo_stack) > 10:
-            self.undo_stack.pop(0)
-
-    # ---- 鼠标交互 ----
-    def _to_img(self, cx, cy):
-        return (int((cx - self.ox) / self.scale), int((cy - self.oy) / self.scale))
-
-    def _press(self, e):
-        if self.tool in ("crop", "rect", "arrow", "mosaic"):
-            self._drag_xy = (e.x, e.y)
-        elif self.tool == "text" and self.pending_text:
-            self._push()
-            x, y = self._to_img(e.x, e.y)
-            _draw_text(self.base, (max(0, x), max(0, y)), self.pending_text, self._font)
-            self.pending_text = None
-            self._set_tool("text")   # 放置一次后取消工具
-            self._redraw()
-
-    def _drag(self, e):
-        if self._drag_xy:
-            x0, y0 = self._drag_xy
-            self.canvas.delete("rubber")
-            self.canvas.create_rectangle(x0, y0, e.x, e.y, outline="#ff5252",
-                                         width=2, dash=(5, 3), tags="rubber")
-
-    def _release(self, e):
-        if not self._drag_xy:
-            return
-        x0, y0 = self._drag_xy
-        self._drag_xy = None
-        self.canvas.delete("rubber")
-        if abs(e.x - x0) < 4 or abs(e.y - y0) < 4:
-            return
-        (ix0, iy0), (ix1, iy1) = self._to_img(x0, y0), self._to_img(e.x, e.y)
-        ix0, ix1 = sorted((ix0, ix1))
-        iy0, iy1 = sorted((iy0, iy1))
-        ix0, iy0 = max(0, ix0), max(0, iy0)
-        ix1, iy1 = min(self.base.width, ix1), min(self.base.height, iy1)
-        if ix1 - ix0 < 2 or iy1 - iy0 < 2:
-            return
-        self._push()
-        if self.tool == "crop":
-            self.base = self.base.crop((ix0, iy0, ix1, iy1))
-        elif self.tool == "rect":
-            ImageDraw.Draw(self.base).rectangle((ix0, iy0, ix1, iy1),
-                                                outline=(255, 40, 40), width=4)
-        elif self.tool == "arrow":
-            _draw_arrow(self.base, (ix0, iy0), (ix1, iy1))
-        elif self.tool == "mosaic":
-            _mosaic(self.base, (ix0, iy0, ix1, iy1))
-        self._set_tool(self.tool)   # 完成一次标注后取消工具选中
-        self._redraw()
-
-    # ---- 渲染 ----
-    def _redraw(self):
-        cw = max(self.canvas.winfo_width(), 120)
-        ch = max(self.canvas.winfo_height(), 120)
-        w, h = self.base.size
-        self.scale = min(cw / w, ch / h, 2.0)
-        if self.scale <= 0:
-            self.scale = 0.05
-        dw, dh = int(w * self.scale), int(h * self.scale)
-        self.ox, self.oy = (cw - dw) // 2, (ch - dh) // 2
-        self._photo = ImageTk.PhotoImage(self.base.resize((dw, dh), RESAMPLE))
-        self.canvas.delete("all")
-        self.canvas.create_image(self.ox, self.oy, image=self._photo, anchor="nw")
-        self._status()
-
-    def _status(self):
-        w, h = self.base.size
-        tip = {"crop": "拖动框选裁剪区域", "rect": "拖动绘制红色方框",
-               "arrow": "拖动绘制箭头", "text": "点击放置文字",
-               "mosaic": "拖动框选区域打马赛克"}.get(self.tool, "就绪")
-        self.lbl_status.config(text="{}   |   尺寸: {}×{}   |   可撤销 {} 步".format(
-            tip, w, h, len(self.undo_stack)))
-
-    # ---- 操作 ----
-    def _on_undo(self):
-        if not self.undo_stack:
-            return
-        self.base = self.undo_stack.pop()
-        self._redraw()
-
-    def _on_copy(self):
-        if set_dib_to_clipboard(self.app.worker.hwnd, pil_to_dib(self.base)):
-            self.lbl_status.config(text="✅ 已复制到剪贴板")
-        else:
-            self.lbl_status.config(text="❌ 复制失败(剪贴板被占用)")
-
-    def _on_save(self):
-        p = filedialog.asksaveasfilename(
-            parent=self.top, defaultextension=".png",
-            filetypes=[("PNG 图片", "*.png"), ("JPEG 图片", "*.jpg")],
-            initialfile="clipboard_edit.png")
-        if not p:
-            return
-        try:
-            fmt = "JPEG" if p.lower().endswith((".jpg", ".jpeg")) else "PNG"
-            self.base.save(p, fmt)
-            self.lbl_status.config(text="✅ 已保存: " + p)
-        except Exception:
-            messagebox.showerror("WinClipboard", "保存失败。", parent=self.top)
-
-    def _on_compress(self):
-        dlg = tk.Toplevel(self.top)
-        dlg.title("压缩 / 格式转换")
-        dlg.configure(bg="white")
-        dlg.attributes("-topmost", True)
-        dlg.resizable(False, False)
-        dlg.transient(self.top)
-        var_q = tk.IntVar(value=80)
-        var_fmt = tk.StringVar(value="JPG")
-        tk.Label(dlg, text="质量:", bg="white", font=("Segoe UI", 9)
-                 ).grid(row=0, column=0, padx=(14, 6), pady=(14, 2), sticky="w")
-        ttk.Scale(dlg, from_=10, to=95, variable=var_q, length=220
-                  ).grid(row=0, column=1, pady=(14, 2))
-        tk.Label(dlg, textvariable=var_q, bg="white", width=3, font=("Segoe UI", 9)
-                 ).grid(row=0, column=2, padx=(6, 14))
-        tk.Radiobutton(dlg, text="JPG(体积小)", variable=var_fmt, value="JPG", bg="white"
-                       ).grid(row=1, column=0, columnspan=3, sticky="w", padx=14)
-        tk.Radiobutton(dlg, text="PNG(无损)", variable=var_fmt, value="PNG", bg="white"
-                       ).grid(row=2, column=0, columnspan=3, sticky="w", padx=14)
-        btns = tk.Frame(dlg, bg="white")
-        btns.grid(row=3, column=0, columnspan=3, pady=(8, 12))
-
-        def do_copy():
-            try:
-                b = io.BytesIO()
-                if var_fmt.get() == "JPG":
-                    self.base.save(b, "JPEG", quality=int(var_q.get()))
-                else:
-                    self.base.save(b, "PNG")
-                b.seek(0)
-                ok = set_dib_to_clipboard(self.app.worker.hwnd,
-                                          pil_to_dib(Image.open(b)))
-                self.lbl_status.config(text="✅ 已压缩并复制到剪贴板" if ok else "❌ 复制失败")
-                dlg.destroy()
-            except Exception:
-                messagebox.showerror("WinClipboard", "压缩失败。", parent=dlg)
-
-        def do_save():
-            ext = ".jpg" if var_fmt.get() == "JPG" else ".png"
-            p = filedialog.asksaveasfilename(
-                parent=dlg, defaultextension=ext,
-                filetypes=[("JPEG 图片", "*.jpg")] if ext == ".jpg" else [("PNG 图片", "*.png")],
-                initialfile="clipboard_compressed" + ext)
-            if not p:
-                return
-            try:
-                if ext == ".jpg":
-                    self.base.save(p, "JPEG", quality=int(var_q.get()))
-                else:
-                    self.base.save(p, "PNG")
-                self.lbl_status.config(text="✅ 已保存: " + p)
-                dlg.destroy()
-            except Exception:
-                messagebox.showerror("WinClipboard", "保存失败。", parent=dlg)
-
-        tk.Button(btns, text="复制到剪贴板", command=do_copy, bg=self.app.ACCENT,
-                  fg="white", relief="flat", padx=12, pady=4).pack(side="left", padx=4)
-        tk.Button(btns, text="保存文件", command=do_save, relief="flat",
-                  padx=12, pady=4).pack(side="left", padx=4)
-        tk.Button(btns, text="取消", command=dlg.destroy, relief="flat",
-                  padx=12, pady=4).pack(side="left", padx=4)
-
-    def close(self):
-        try:
-            self.top.destroy()
-        except Exception:
-            pass
-        try:
-            self.app._editors.remove(self)
-        except Exception:
-            pass
-
-
-# ============================================================
 # Apple 风格 UI 基础(圆角绘制 / 时间 / 面板底图 / 导航 / 底栏)
 # ============================================================
-def _rr(cv, x1, y1, x2, y2, r, **kw):
-    """在 Canvas 上画圆角矩形(smooth polygon)。"""
-    r = max(0, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
-    pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
-           x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
-           x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
-    return cv.create_polygon(pts, smooth=True, **kw)
-
-
 def _rel_time(ts):
     if not ts:
         return ""
@@ -1674,6 +1671,169 @@ def url_info(text):
 
 
 # ============================================================
+# 文本语言识别 + JSON 重排(查看器用;pygments 为可选依赖,缺失时退化为纯文本)
+# ============================================================
+try:
+    from pygments.lexers import guess_lexer as _pg_guess_lexer
+except Exception:
+    _pg_guess_lexer = None
+
+# 查看器语言菜单:key 兼容 pygments lexer 别名,直接用于 get_lexer_by_name
+VIEW_LANGS = [
+    ("auto", "自动识别"), ("text", "纯文本"), ("json", "JSON"),
+    ("python", "Python"), ("javascript", "JavaScript"), ("typescript", "TypeScript"),
+    ("html", "HTML"), ("xml", "XML"), ("css", "CSS"), ("sql", "SQL"),
+    ("markdown", "Markdown"), ("csv", "CSV 表格"), ("yaml", "YAML"), ("ini", "INI"),
+    ("shell", "Shell"), ("bat", "批处理"), ("java", "Java"), ("c", "C/C++"),
+    ("csharp", "C#"), ("go", "Go"), ("rust", "Rust"), ("php", "PHP"),
+    ("diff", "Diff"),
+]
+
+# pygments lexer 别名 → VIEW_LANGS key(guess_lexer 返回值归一化用)
+_LANG_ALIAS = {
+    "python": "python", "javascript": "javascript", "typescript": "typescript",
+    "json": "json", "json5": "json", "jsonc": "json",
+    "html": "html", "xml": "xml", "css": "css", "scss": "css", "less": "css",
+    "sql": "sql", "markdown": "markdown", "yaml": "yaml", "ini": "ini",
+    "shell": "shell", "bash": "shell", "powershell": "bat", "batch": "bat",
+    "java": "java", "c": "c", "cpp": "c", "csharp": "csharp", "go": "go",
+    "rust": "rust", "php": "php", "diff": "diff", "udiff": "diff",
+}
+
+
+def detect_lang(text):
+    """猜测文本语言,返回 VIEW_LANGS 中的 key(识别不出 → 'text')。
+
+    优先级:严格 JSON(查看器要为它提供 美化/紧凑)> 前缀强特征(XML/HTML)
+    > Markdown 围栏/标题 > pygments guess_lexer(截断采样控时)。
+    """
+    t = (text or "").lstrip()
+    if not t:
+        return "text"
+    try:
+        json.loads(t)
+        return "json"
+    except Exception:
+        pass
+    head = t[:4000]
+    if head[:5].lower() == "<?xml":
+        return "xml"
+    if re.match(r"<(!doctype|html)\b", head, re.I):
+        return "html"
+    if "\n```" in t or t.startswith("```") or re.search(r"(?m)^#{1,6} \S", head):
+        return "markdown"
+    if csv_sniff(text):
+        return "csv"
+    # 廉价强特征:剪贴板里多是短片段,pygments 对短文本置信度低,先用正则兜住
+    if t[:2] == "#!":
+        if "python" in t[:80]:
+            return "python"
+        if re.search(r"\b(bash|zsh|sh|dash)\b", t[:80]):
+            return "shell"
+    if re.search(r"(?m)^(import\s+[\w.]+|from\s+[\w.]+\s+import\b)", head) and \
+            not re.search(r"(?m)^import\s+[\w{}\s,]+\s+from\s+['\"]", head):
+        return "python"
+    if re.search(r"(?mi)\b(const|let|var)\s+[\w$]+\s*=|function\s*[\w$]*\s*\(|=>"
+                 r"|console\.(log|warn|error)\b|document\.getElement", head):
+        return "javascript"
+    if re.search(r"(?m)^[\w\s.,#>-]+\{[^{}]*[\w-]+\s*:[^{}]*;[^{}]*\}", head):
+        return "css"
+    if re.search(r"(?mi)\b(select\s+.+\s+from\b|insert\s+into\b|update\s+\w+\s+set\b"
+                 r"|delete\s+from\b|create\s+(table|database|index)\b|alter\s+table\b"
+                 r"|with\s+\w+\s+as\s*\()", head):
+        return "sql"
+    if re.search(r"(?m)^\s*(def\s+\w+\s*\(|class\s+\w+[:(]|@\w+(\.[\w.]+)?\s*$)",
+                 head):
+        return "python"
+    if _pg_guess_lexer is not None:
+        try:
+            # 采样 2000 字符:guess_lexer 对 20KB 输入需 ~36ms(预览面板每次
+            # 选中都会跑),语言判断只需开头特征,采样小窗足够
+            lex = _pg_guess_lexer(t[:2000])
+            for a in getattr(lex, "aliases", None) or []:
+                if a in _LANG_ALIAS:
+                    return _LANG_ALIAS[a]
+        except Exception:
+            pass
+    return "text"
+
+
+def json_reformat(text, compact=False):
+    """JSON 美化(2 空格缩进)/紧凑;不是合法 JSON 返回 None。"""
+    try:
+        obj = json.loads(text)
+        if compact:
+            return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+        return json.dumps(obj, ensure_ascii=False, indent=2)
+    except Exception:
+        return None
+
+
+def json_error(text):
+    """JSON 语法错误定位(查看器元信息用);合法或探测不出返回 None。"""
+    try:
+        json.loads(text)
+        return None
+    except json.JSONDecodeError as e:
+        return "第 %d 行第 %d 列 %s" % (e.lineno, e.colno, e.msg)
+    except Exception:
+        return None
+
+
+def csv_sniff(text):
+    """CSV/TSV 嗅探,返回分隔符(\\t / , / ;)或 None。
+
+    条件:≥3 个非空行、采样行分隔符数完全一致且 ≥1、至少 2 列;
+    护栏:含括号/花括号(代码特征)直接否决,防止把 Go/JS 等多行调用
+    误判成表格。带引号内嵌分隔符的 CSV 会因计数不一致退回纯文本,
+    宁可漏判不误判。
+    """
+    lines = [ln.rstrip() for ln in (text or "").splitlines()]
+    lines = [ln for ln in lines if ln.strip()]
+    if len(lines) < 3:
+        return None
+    sample = "\n".join(lines[:200])
+    if re.search(r"[(){}]", sample):
+        return None
+    for delim in ("\t", ",", ";"):
+        counts = [ln.count(delim) for ln in lines[:200]]
+        if counts[0] >= 1 and len(set(counts)) == 1:
+            if len(lines[0].split(delim)) >= 2:
+                return delim
+    return None
+
+
+def parse_csv_rows(text, delim, max_rows=2001):
+    """按分隔符解析 CSV(支持引号字段),最多返回 max_rows 行(查看器防爆)。"""
+    import csv as _csv
+    import io as _io
+    rows = []
+    try:
+        for i, row in enumerate(_csv.reader(_io.StringIO(text), delimiter=delim)):
+            if i >= max_rows:
+                break
+            rows.append(row)
+    except Exception:
+        return []
+    return rows
+
+
+def xml_pretty(text):
+    """XML 美化(2 空格缩进);含 DOCTYPE/ENTITY(XXE 面)或解析失败返回 None。"""
+    if not text or re.search(r"(?i)<!DOCTYPE|<!ENTITY", text):
+        return None
+    try:
+        import xml.dom.minidom as _md
+        out = _md.parseString(text.strip()).toprettyxml(indent="  ")
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        if lines and lines[0].startswith("<?xml"):
+            lines = lines[1:]           # toprettyxml 自加的声明,原文视图另有留底
+        return "\n".join(lines)
+    except Exception:
+        return None
+
+
+# ============================================================
 # AI 工作流(OpenAI 兼容 /chat/completions;标准库 urllib,零新依赖)
 # 服务:  {"name","base_url","model","api_key"}
 # 工作流:{"name","steps":[{"service","prompt"}]}  prompt 中 {input} 为上一步输出
@@ -1690,41 +1850,194 @@ def render_prompt(prompt, content):
     return str(prompt or "").replace("{input}", str(content or ""))
 
 
+# ---- AI 调用引擎:openai SDK 优先(统一 OpenAI 兼容端点的标准客户端),
+# 标准库 urllib 零依赖兜底(裸环境/测试同样可用)。 ----
+_openai_sdk_cache = []
+
+
+def _openai_sdk():
+    """惰性探测 openai SDK;结果缓存(单次 import 开销)。"""
+    if not _openai_sdk_cache:
+        try:
+            from openai import OpenAI as _OAI
+            _openai_sdk_cache.append(_OAI)
+        except Exception:
+            _openai_sdk_cache.append(None)
+    return _openai_sdk_cache[0]
+
+
+def _fmt_ai_error(e):
+    code = getattr(e, "status_code", None)
+    msg = str(getattr(e, "message", None) or e)
+    return ("HTTP %s %s" % (code, msg)) if code else ("%s: %s" % (type(e).__name__, msg))
+
+
 def ai_chat(service, prompt, timeout=90):
     """调用 OpenAI 兼容接口,返回 (ok, 回复文本或错误信息)。阻塞函数,请在后台线程调用。"""
-    import urllib.request
-    import urllib.error
-    base = str(service.get("base_url") or "").rstrip("/")
-    if not base:
+    if not str(service.get("base_url") or "").rstrip("/"):
         return False, "该服务未配置 base_url"
-    url = base + "/chat/completions"
+    OpenAI = _openai_sdk()
+    if OpenAI is not None:
+        return _chat_via_sdk(OpenAI, service, prompt, timeout)
+    return _chat_via_urllib(service, prompt, timeout)
+
+
+def _chat_via_sdk(OpenAI, service, prompt, timeout):
+    try:
+        client = OpenAI(
+            base_url=str(service.get("base_url")).rstrip("/") + "/",
+            api_key=str(service.get("api_key") or "") or "EMPTY",  # Ollama 等无密钥端点
+            timeout=timeout,
+            max_retries=1,
+        )
+        resp = client.chat.completions.create(
+            model=str(service.get("model") or ""),
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = ""
+        if getattr(resp, "choices", None):
+            text = (resp.choices[0].message.content or "").strip()
+        if not text:
+            return False, "AI 返回为空(响应格式异常)"
+        return True, text
+    except Exception as e:
+        return False, _fmt_ai_error(e)
+
+
+def _endpoint_url(base, path):
+    """拼接用户自配 AI 端点;仅放行 http(s) 且带主机名,防误配 file:/c: 等本地
+    协议被发起请求。非法返回 None,调用方按配置错误处理。"""
+    try:
+        parts = urlsplit(str(base or ""))
+    except Exception:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return None
+    return parts.geturl().rstrip("/") + path
+
+
+def _http_json(service, method, path, body, timeout):
+    """按用户自配端点发一次 JSON 请求,返回 (ok, 解析后的 dict 或 错误信息)。
+
+    走 http.client 直连(不跟随重定向;OpenAI 兼容端点不重定向),URL 一律经
+    _endpoint_url 校验,仅 http(s) 可达。"""
+    import http.client
+    url = _endpoint_url(service.get("base_url"), path)
+    if url is None:
+        return False, "接口地址无效(仅支持 http:// 或 https://)"
+    parts = urlsplit(url)
+    headers = {"Content-Type": "application/json"}
+    if service.get("api_key"):
+        headers["Authorization"] = "Bearer " + str(service["api_key"])
+    cls = (http.client.HTTPSConnection if parts.scheme == "https"
+           else http.client.HTTPConnection)
+    conn = cls(parts.netloc, timeout=timeout)
+    try:
+        conn.request(method, parts.path or "/", body=body, headers=headers)
+        r = conn.getresponse()
+        raw = r.read()
+        if r.status >= 400:
+            detail = raw.decode("utf-8", "replace")[:300]
+            return False, "HTTP %s %s" % (r.status, detail or r.reason)
+        return True, json.loads(raw.decode("utf-8", "replace"))
+    except Exception as e:
+        return False, "%s: %s" % (type(e).__name__, e)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _chat_via_urllib(service, prompt, timeout):
     body = json.dumps({
         "model": service.get("model") or "",
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
     }).encode("utf-8")
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + str(service.get("api_key") or ""),
-    }
-    try:
-        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = json.loads(r.read().decode("utf-8", "replace"))
-        choices = data.get("choices") or [{}]
-        text = ((choices[0].get("message") or {}).get("content") or "").strip()
-        if not text:
-            return False, "AI 返回为空(响应格式异常)"
-        return True, text
-    except urllib.error.HTTPError as e:
-        try:
-            detail = e.read().decode("utf-8", "replace")[:300]
-        except Exception:
-            detail = ""
-        return False, "HTTP %s %s" % (e.code, detail or e.reason)
-    except Exception as e:
-        return False, "%s: %s" % (type(e).__name__, e)
+    ok, data = _http_json(service, "POST", "/chat/completions", body, timeout)
+    if not ok:
+        return False, data
+    choices = data.get("choices") or [{}]
+    text = ((choices[0].get("message") or {}).get("content") or "").strip()
+    if not text:
+        return False, "AI 返回为空(响应格式异常)"
+    return True, text
 
+
+def list_models(service, timeout=15):
+    """模型发现:GET base_url + /models(OpenAI 标准端点,Ollama / 各家兼容网关均支持)。
+    返回 (ok, [模型 id 列表](小写排序) 或 错误信息);供配置表单「发现模型」使用。"""
+    base = str(service.get("base_url") or "").rstrip("/")
+    if not base:
+        return False, "请先填写接口地址"
+    ok, data = _http_json(service, "GET", "/models", None, timeout)
+    if not ok:
+        return False, data
+    ids = []
+    for m in data.get("data") or []:
+        mid = m.get("id") if isinstance(m, dict) else None
+        if mid:
+            ids.append(str(mid))
+    if not ids:
+        return False, "端点未返回模型清单(响应缺少 data[].id)"
+    ids.sort(key=str.lower)
+    return True, ids
+
+
+# 常用 AI 供应商预设(均为 OpenAI 兼容接口;「添加提供方」菜单与配置表单共用)。
+# models 为配置表单的模型下拉清单,note 是模型下方的信息行(上下文/特性;
+# 价格随时会变,只写稳定的特性描述,免费档除外)。
+AI_PRESET_SERVICES = [
+    {"name": "GLM", "base_url": "https://open.bigmodel.cn/api/paas/v4",
+     "model": "glm-4-flash", "api_key": "",
+     "models": [
+         {"id": "glm-4-flash", "note": "免费 · 128K 上下文"},
+         {"id": "glm-4-air", "note": "轻量快速 · 128K 上下文"},
+         {"id": "glm-4-plus", "note": "旗舰 · 128K 上下文"}]},
+    {"name": "DeepSeek", "base_url": "https://api.deepseek.com/v1",
+     "model": "deepseek-chat", "api_key": "",
+     "models": [
+         {"id": "deepseek-chat", "note": "通用对话 V3 · 64K 上下文"},
+         {"id": "deepseek-reasoner", "note": "深度思考 R1 · 64K 上下文"}]},
+    {"name": "Kimi", "base_url": "https://api.moonshot.cn/v1",
+     "model": "moonshot-v1-8k", "api_key": "",
+     "models": [
+         {"id": "moonshot-v1-8k", "note": "8K 上下文"},
+         {"id": "moonshot-v1-32k", "note": "32K 上下文"},
+         {"id": "moonshot-v1-128k", "note": "128K 长文"},
+         {"id": "kimi-latest", "note": "最新版模型"}]},
+    {"name": "通义千问", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+     "model": "qwen-plus", "api_key": "",
+     "models": [
+         {"id": "qwen-turbo", "note": "快速 · 128K 上下文"},
+         {"id": "qwen-plus", "note": "均衡 · 128K 上下文"},
+         {"id": "qwen-max", "note": "旗舰 · 32K 上下文"}]},
+    {"name": "豆包", "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+     "model": "doubao-pro-32k", "api_key": "",
+     "models": [
+         {"id": "doubao-pro-32k", "note": "Pro · 32K 上下文"},
+         {"id": "doubao-pro-128k", "note": "Pro · 128K 上下文"},
+         {"id": "doubao-lite-32k", "note": "Lite · 32K 上下文"}]},
+    {"name": "SiliconFlow", "base_url": "https://api.siliconflow.cn/v1",
+     "model": "Qwen/Qwen2.5-7B-Instruct", "api_key": "",
+     "models": [
+         {"id": "Qwen/Qwen2.5-7B-Instruct", "note": "免费"},
+         {"id": "deepseek-ai/DeepSeek-V3", "note": "旗舰开源"},
+         {"id": "THUDM/glm-4-9b-chat", "note": "轻量开源"}]},
+    {"name": "OpenAI", "base_url": "https://api.openai.com/v1",
+     "model": "gpt-4o-mini", "api_key": "",
+     "models": [
+         {"id": "gpt-4o-mini", "note": "便宜快速"},
+         {"id": "gpt-4o", "note": "旗舰"},
+         {"id": "gpt-4.1-mini", "note": "新一代轻量"}]},
+    {"name": "Ollama 本地", "base_url": "http://localhost:11434/v1",
+     "model": "qwen2.5", "api_key": "",
+     "models": [
+         {"id": "qwen2.5", "note": "本地运行,无需密钥"},
+         {"id": "llama3.1", "note": "本地运行,无需密钥"},
+         {"id": "deepseek-r1", "note": "本地运行,无需密钥"}]},
+]
 
 # 内置示例工作流(首次"填入示例"时写入 config)
 # 步骤类型 kind:web=网页 AI(复制提示词/打开网页) / human=人工确认 / ai=本地 API(可选)
@@ -1757,1126 +2070,8 @@ AI_SEED_WORKFLOWS = [
 ]
 
 
-def make_panel_face(win_w, win_h):
-    """生成窗口底图:浅灰面板 + 圆角发丝边框(圆角由窗口区域裁剪实现)。"""
-    img = Image.new("RGB", (win_w, win_h), BG_RGB)
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle((SHD + 1, SHD + 1, win_w - SHD - 2, win_h - SHD - 2),
-                        radius=PANEL_R, outline=(232, 232, 237), width=2)
-    return img
-
-
-def apply_round_region(hwnd, w, h, r=PANEL_R):
-    """用 SetWindowRgn 裁剪窗口为圆角矩形(普通窗口,定位可靠)。"""
-    try:
-        gdi = ctypes.WinDLL("gdi32")
-        user32 = ctypes.WinDLL("user32")
-        rgn = gdi.CreateRoundRectRgn(0, 0, w + 1, h + 1, r * 2, r * 2)
-        user32.SetWindowRgn(hwnd, rgn, True)
-    except Exception:
-        pass
-
-
-def env_scale():
-    """检测环境 DWM 位图缩放倍率(无感知进程的窗口会被系统放大)。
-
-    正常桌面返回 1.0;虚拟化会话(如 RDP 缩放)返回 >1,用于坐标补偿。
-    """
-    try:
-        a, b = wintypes.POINT(), wintypes.POINT()
-        user32.GetCursorPos(ctypes.byref(a))
-        user32.GetPhysicalCursorPos(ctypes.byref(b))
-        if b.x > 0 and abs(a.x - b.x) > 4:
-            return max(1.0, a.x / float(b.x))
-    except Exception:
-        pass
-    return 1.0
-
-
-_measure_cache = {}
-
-
-def _mmeasure(font, text):
-    """带缓存的文本像素宽度测量(CJK 测量慢,避免重复)。"""
-    key = (font, text)
-    v = _measure_cache.get(key)
-    if v is None:
-        v = tkfont.Font(font=font).measure(text)
-        if len(_measure_cache) > 3000:
-            _measure_cache.clear()
-        _measure_cache[key] = v
-    return v
-
-
-class SegNav(tk.Canvas):
-    """分类导航:Apple 风格分段文字,选中项浅灰胶囊。"""
-
-    ITEMS = ("全部", "文本", "图片", "链接", "文件")
-    CATS = ("all", "text", "image", "link", "files")
-
-    def __init__(self, parent, app):
-        super().__init__(parent, bg=app.BG, highlightthickness=0, bd=0, height=30)
-        self.app = app
-        self._xpos = []
-        self.bind("<Configure>", lambda e: self._redraw())
-        self.bind("<Button-1>", self._click)
-
-    def _redraw(self):
-        self.delete("all")
-        self._xpos = []
-        x = 0
-        for i, label in enumerate(self.ITEMS):
-            active = (self.app.category == self.CATS[i])
-            font = (self.app.F_FAMILY, 12, "bold") if active else ("Segoe UI", 12)
-            w = _mmeasure(font, label) + 26
-            if active:
-                _rr(self, x, 3, x + w, 27, 9, fill="#E8E8ED", outline="")
-            self.create_text(x + w / 2, 15, text=label,
-                             fill=self.app.TEXT if active else self.app.TER,
-                             font=font)
-            self._xpos.append((x, x + w, self.CATS[i]))
-            x += w + 6
-
-    def _click(self, e):
-        for x1, x2, cat in self._xpos:
-            if x1 <= e.x <= x2:
-                self.app.set_category(cat)
-                return
-
-
-class FootBar(tk.Canvas):
-    """极简底栏:左侧计数,右侧 Apple 键盘徽章。"""
-
-    def __init__(self, parent, app):
-        super().__init__(parent, bg=app.BG, highlightthickness=0, bd=0, height=34)
-        self.app = app
-        self._n = 0
-        self._f = tkfont.Font(font=("Segoe UI", 10))
-        self.bind("<Configure>", lambda e: self._redraw())
-
-    def set_count(self, total, shown):
-        self._n = total
-        self._redraw()
-
-    def _redraw(self):
-        self.delete("all")
-        w, h = self.winfo_width(), self.winfo_height()
-        self.create_text(2, h / 2, text="%d 个项目" % self._n, anchor="w",
-                         fill=self.app.TER, font=("Segoe UI", 11))
-        self.create_line(0, 0, w, 0, fill="#ECECEF")
-        x = w - 2
-        for b in ("Esc", "Enter", "↑ ↓"):
-            bw = _mmeasure(("Segoe UI", 10), b) + 14
-            x -= bw
-            _rr(self, x, h / 2 - 9, x + bw, h / 2 + 9, 5, fill="#ECECEF", outline="")
-            self.create_text(x + bw / 2, h / 2, text=b, fill=self.app.SEC,
-                             font=("Segoe UI", 10))
-            x -= 8
-
-
-def make_thumb(path, size=(92, 68)):
-    """生成圆角缩略图 PhotoImage(供卡片与预热共用)。"""
-    try:
-        im = Image.open(path).convert("RGB")
-        im = ImageOps.fit(im, size, RESAMPLE, centering=(0.5, 0.5))
-        mask = Image.new("L", size, 0)
-        ImageDraw.Draw(mask).rounded_rectangle(
-            (0, 0, size[0] - 1, size[1] - 1), radius=10, fill=255)
-        rgba = Image.new("RGBA", size, (0, 0, 0, 0))
-        rgba.paste(im, (0, 0), mask)
-        return ImageTk.PhotoImage(rgba)
-    except Exception:
-        return None
-
-
 # ============================================================
-# 卡片流(自绘滚动列表,替换 Treeview)
+# 入口(tkinter 前端已移除:本项目只保留 Qt + Fluent 版界面)
 # ============================================================
-class CardList(tk.Canvas):
-    """Apple 风格卡片流:分区标签 + 圆角卡片 + 悬停操作。"""
-
-    R = 14                 # 卡片圆角
-    GAP = 10               # 卡片间距
-    THUMB = (92, 68)       # 图片缩略图尺寸
-
-    def __init__(self, parent, app):
-        super().__init__(parent, bg=app.BG, highlightthickness=0, bd=0,
-                         yscrollincrement=1, confine=True)
-        self.app = app
-        self._view = []            # 过滤后的 history 索引
-        self._rows = []            # [("label",y,text) | ("card",y,h,idx,vi)]
-        self._total = 1
-        self._sel = None
-        self._hover = None
-        self._btn_hover = None
-        self._btn_rects = []
-        self._thumbs = {}
-        self._fobjs = {}
-        self.bind("<Configure>", lambda e: self._redraw())
-        self.bind("<MouseWheel>", self._on_wheel)
-        self.bind("<Button-1>", self._on_click)
-        self.bind("<Double-1>", self._on_dclick)
-        self.bind("<Button-3>", self._on_rclick)
-        self.bind("<Motion>", self._on_motion)
-        self.bind("<Leave>", lambda e: self._set_hover(None))
-        self.bind("<Up>", lambda e: self.app._move_sel(-1))
-        self.bind("<Down>", lambda e: self.app._move_sel(1))
-        self.bind("<Home>", lambda e: self.app._move_sel(-10 ** 6))
-        self.bind("<End>", lambda e: self.app._move_sel(10 ** 6))
-        self.bind("<Return>", lambda e: self.app.activate_selected())
-
-    # ---- 外部接口 ----
-    def set_view(self, view):
-        self._view = list(view)
-        self._sel = 0 if self._view else None
-        self._hover = None
-        self._btn_hover = None
-        self.yview_moveto(0)
-        self._redraw()
-
-    def selected(self):
-        return self._sel
-
-    def select(self, vi):
-        if vi is None or 0 <= vi < len(self._view):
-            if vi != self._sel:
-                self._sel = vi
-                self._redraw()
-
-    def view_index(self, vi):
-        if vi is None or not (0 <= vi < len(self._view)):
-            return None
-        return self._view[vi]
-
-    def move_sel(self, delta):
-        if not self._view:
-            return
-        cur = self._sel if self._sel is not None else (0 if delta > 0 else -1)
-        cur = max(0, min(len(self._view) - 1, cur + delta))
-        if cur != self._sel:
-            self._sel = cur
-            self._redraw()
-        self.see(cur)
-
-    def see(self, vi):
-        for r in self._rows:
-            if r[0] == "card" and r[4] == vi:
-                top = self.canvasy(0)
-                bot = top + self.winfo_height()
-                y, h = r[1], r[2]
-                if y < top + 4:
-                    self.yview_moveto(max(0, y - 4) / self._total)
-                elif y + h > bot - 4:
-                    self.yview_moveto((y + h - self.winfo_height() + 4) / self._total)
-                self._draw_scroll_indicator()
-                return
-
-    def content_height(self):
-        return self._total
-
-    # ---- 测量 ----
-    def _measure(self):
-        self._rows = []
-        y = 4
-        pinned = [i for i in self._view if self.app.history[i].get("pinned")]
-        rest = [i for i in self._view if not self.app.history[i].get("pinned")]
-        vi = 0
-        for label, idxs in (("已固定", pinned), ("最近项目", rest)):
-            if not idxs:
-                continue
-            self._rows.append(("label", y, label))
-            y += 26
-            for idx in idxs:
-                h = self._card_h(idx)
-                self._rows.append(("card", y, h, idx, vi))
-                y += h + self.GAP
-                vi += 1
-            y += 10
-        self._total = max(y, 1)
-        return self._total
-
-    def _card_h(self, idx):
-        h = self.app.history[idx]
-        t = h["type"]
-        if t == "image":
-            return self.THUMB[1] + 24          # 92
-        if t == "files":
-            return 70
-        if url_info(h["content"]):
-            return 80
-        lines = [l for l in h["content"].strip().splitlines() if l.strip()]
-        return 86 if len(lines) > 1 else 58
-
-    # ---- 渲染 ----
-    def _f(self, font):
-        f = self._fobjs.get(font)
-        if f is None:
-            f = tkfont.Font(font=font)
-            self._fobjs[font] = f
-        return f
-
-    def _el(self, text, maxw, font):
-        """按像素宽度截断文本(缓存测量 + 比例估算,避免慢速字体测量)。"""
-        if not text:
-            return ""
-        s = text.replace("\n", "  ")
-        full = _mmeasure(font, s)
-        if full <= maxw:
-            return s
-        # 粗略按比例估算截断点,再局部微调(通常 ±2 次测量)
-        n = max(1, int(len(s) * maxw / max(1, full)))
-        while n > 1 and _mmeasure(font, s[:n] + "…") > maxw:
-            n -= 1
-        while n < len(s) and _mmeasure(font, s[:n + 1] + "…") <= maxw:
-            n += 1
-        return s[:n] + "…"
-
-    def _redraw(self):
-        self.delete("all")
-        self._btn_rects = []
-        w = max(self.winfo_width(), 1)
-        if not self._view:
-            self.configure(scrollregion=(0, 0, 1, 1))
-            self.create_text(w / 2, 72, text="暂无剪贴内容",
-                             fill=self.app.TER, font=("Segoe UI", 13))
-            return
-        total = self._measure()
-        self.configure(scrollregion=(0, 0, w, total))
-        cw = w - 4
-        for r in self._rows:
-            if r[0] == "label":
-                self.create_text(6, r[1] + 12, text=r[2], anchor="w",
-                                 fill=self.app.TER, font=self.app.fonts["section"])
-            else:
-                self._draw_card(r[4], r[1], cw, r[2])
-        self._draw_scroll_indicator()
-
-    def _draw_card(self, vi, y, w, h):
-        app = self.app
-        idx = self._view[vi]
-        rec = app.history[idx]
-        sel = (vi == self._sel)
-        hov = (vi == self._hover)
-        yy = y - 1 if hov else y
-        x = 2
-        if sel:
-            _rr(self, x + 2, yy + 4, x + w - 2, yy + h + 2, self.R,
-                fill="#E3E3E7", outline="")
-        _rr(self, x, yy, x + w, yy + h, self.R,
-            fill="#FFFFFF" if (sel or hov) else "#FDFDFE",
-            outline=app.ACCENT if sel else ("#E4E4E9" if hov else ""),
-            width=1.5 if sel else 1)
-        if sel:
-            self.create_oval(x + 10, yy + h / 2 - 3, x + 16, yy + h / 2 + 3,
-                             fill=app.ACCENT, outline="")
-        cx = x + 24
-        if rec["type"] == "image":
-            cx = self._draw_thumb(idx, x + 14, yy + (h - self.THUMB[1]) / 2)
-            tx = cx + 14
-            self.create_text(tx, yy + 16, text="截图", anchor="w",
-                             fill=app.TEXT, font=app.fonts["title"])
-            self.create_text(tx, yy + 38, anchor="w", fill=app.SEC,
-                             font=app.fonts["body"],
-                             text="%s × %s" % (rec.get("w", 0), rec.get("h", 0)))
-            self.create_text(tx, yy + h - 16, text=self._meta(rec), anchor="w",
-                             fill=app.TER, font=app.fonts["meta"])
-        elif rec["type"] == "files":
-            names = rec["content"]
-            name = os.path.basename(names[0])
-            ext = os.path.splitext(name)[1].lstrip(".").upper()[:4] or "FILE"
-            bx, by = x + 14, yy + (h - 40) / 2
-            _rr(self, bx, by, bx + 40, by + 40, 9, fill="#EFF1F5", outline="")
-            self.create_text(bx + 20, by + 20, text=ext,
-                             fill=app.SEC, font=("Segoe UI", 9, "bold"))
-            tx = bx + 40 + 14
-            title = name + (" 等 %d 个" % len(names) if len(names) > 1 else "")
-            self.create_text(tx, yy + 18, anchor="w", fill=app.TEXT,
-                             font=app.fonts["title"],
-                             text=self._el(title, w - tx - 44, app.fonts["title"]))
-            size = ""
-            try:
-                total = sum(os.path.getsize(p) for p in names if os.path.exists(p))
-                size = _fmt_size(total)
-            except Exception:
-                pass
-            self.create_text(tx, yy + h - 16, anchor="w", fill=app.TER,
-                             font=app.fonts["meta"],
-                             text=self._meta(rec, extra=(ext, size)))
-        elif url_info(rec["content"]):
-            host = url_info(rec["content"])[0]
-            fx, fy = x + 14, yy + (h - 28) / 2
-            self.create_oval(fx, fy, fx + 28, fy + 28, fill="#EFF1F5", outline="")
-            self.create_text(fx + 14, fy + 14, text=host[0].upper(),
-                             fill=app.SEC, font=("Segoe UI", 12, "bold"))
-            tx = fx + 28 + 12
-            self.create_text(tx, yy + 16, anchor="w", fill=app.TEXT,
-                             font=app.fonts["title"],
-                             text=self._el(host, w - tx - 46, app.fonts["title"]))
-            self.create_text(tx, yy + 38, anchor="w", fill=app.SEC,
-                             font=app.fonts["body"],
-                             text=self._el(rec["content"].strip(), w - tx - 46,
-                                           app.fonts["body"]))
-            self.create_text(tx, yy + h - 15, anchor="w", fill=app.TER,
-                             font=app.fonts["meta"],
-                             text="链接 · " + _rel_time(rec.get("ts", 0)))
-        else:
-            lines = [l for l in rec["content"].strip().splitlines() if l.strip()]
-            self.create_text(cx, yy + 17, anchor="w", fill=app.TEXT,
-                             font=app.fonts["title"],
-                             text=self._el(lines[0], w - cx - 46, app.fonts["title"]))
-            if len(lines) > 1:
-                self.create_text(cx, yy + 38, anchor="w", fill=app.SEC,
-                                 font=app.fonts["body"],
-                                 text=self._el("\n".join(lines[1:3]),
-                                               w - cx - 46, app.fonts["body"]))
-            self.create_text(cx, yy + h - 15, anchor="w", fill=app.TER,
-                             font=app.fonts["meta"], text=self._meta(rec))
-        if hov:
-            self._draw_hover_btns(vi, x + w, yy + h / 2)
-
-    def _meta(self, rec, extra=None):
-        t = rec["type"]
-        label = {"text": "文本", "image": "PNG", "files": (extra[0] if extra else "文件")}[t]
-        parts = [label]
-        if extra and extra[1]:
-            parts.append(extra[1])
-        parts.append(_rel_time(rec.get("ts", 0)))
-        return " · ".join(p for p in parts if p)
-
-    def _draw_thumb(self, idx, x, y):
-        rec = self.app.history[idx]
-        p = rec["content"]
-        ph = self._thumbs.get(p)
-        if ph is None:
-            ph = make_thumb(p)
-            if ph is None:
-                return x + self.THUMB[0]
-            self._thumbs[p] = ph
-        self.create_image(x, y, image=ph, anchor="nw")
-        return x + self.THUMB[0]
-
-    def prewarm_thumbs(self):
-        """后台预热缩略图缓存(避免首次弹出时卡顿)。"""
-        for h in self.app.history:
-            if h.get("type") == "image":
-                p = h.get("content", "")
-                if p and os.path.exists(p) and p not in self._thumbs:
-                    ph = make_thumb(p)
-                    if ph is not None:
-                        self._thumbs[p] = ph
-
-    def _draw_hover_btns(self, vi, right, cy):
-        x = right - 18
-        for act, glyph in (("more", "⋯"), ("del", "删"), ("pin", "钉"), ("paste", "贴")):
-            hov = (self._btn_hover == act and self._hover == vi)
-            _rr(self, x - 15, cy - 15, x + 15, cy + 15, 15,
-                fill="#EDEFF3" if hov else "#FFFFFF", outline="#E4E4E9")
-            self.create_text(x, cy, text=glyph, fill=self.app.SEC,
-                             font=("Segoe UI", 10))
-            self._btn_rects.append((act, x - 15, cy - 15, x + 15, cy + 15))
-            x -= 36
-
-    def _draw_scroll_indicator(self):
-        self.delete("sb")
-        h = self.winfo_height()
-        if self._total <= h + 4:
-            return
-        frac = h / self._total
-        bar_h = max(30, h * frac)
-        span = self._total - h
-        pos = self.canvasy(0) / span if span else 0
-        x = self.winfo_width() - 5
-        y = (h - bar_h) * pos
-        _rr(self, x, y, x + 3, y + bar_h, 2, fill="#D9D9DE", outline="", tags=("sb",))
-
-    # ---- 交互 ----
-    def _hit(self, cx, cy):
-        for act, x1, y1, x2, y2 in self._btn_rects:
-            if x1 <= cx <= x2 and y1 <= cy <= y2:
-                return ("btn", act, self._hover)
-        for r in self._rows:
-            if r[0] != "card":
-                continue
-            y, h, vi = r[1], r[2], r[4]
-            if y - 1 <= cy <= y + h + 1 and 2 <= cx <= self.winfo_width() - 2:
-                return ("card", vi)
-        return (None,)
-
-    def _on_click(self, e):
-        self.focus_set()
-        hit = self._hit(e.x, e.y)
-        if hit[0] == "btn":
-            self.app.card_action(hit[1], hit[2])
-        elif hit[0] == "card":
-            if hit[1] != self._sel:
-                self._sel = hit[1]
-                self._redraw()
-        elif self._sel is not None:
-            self._sel = None
-            self._redraw()
-
-    def _on_dclick(self, e):
-        hit = self._hit(e.x, e.y)
-        if hit[0] == "card":
-            if hit[1] != self._sel:
-                self._sel = hit[1]
-                self._redraw()
-            self.app.activate_selected()
-
-    def _on_rclick(self, e):
-        hit = self._hit(e.x, e.y)
-        if hit[0] == "card":
-            if hit[1] != self._sel:
-                self._sel = hit[1]
-                self._redraw()
-        self.app.show_card_menu(e.x_root, e.y_root)
-
-    def _on_motion(self, e):
-        hit = self._hit(e.x, e.y)
-        hov = hit[1] if hit[0] == "card" else None
-        btn = hit[1] if hit[0] == "btn" else None
-        if hov != self._hover or btn != self._btn_hover:
-            self._hover = hov
-            self._btn_hover = btn
-            self._redraw()
-
-    def _set_hover(self, hv):
-        if hv != self._hover or self._btn_hover is not None:
-            self._hover = hv
-            self._btn_hover = None
-            self._redraw()
-
-    def _on_wheel(self, e):
-        self.yview_scroll(int(-e.delta / 120) * 3, "units")
-        self._draw_scroll_indicator()
-
-
-# ============================================================
-# 主界面(tkinter, 主线程)
-# ============================================================
-class ClipboardApp:
-    # ---- Apple 风格配色 ----
-    ACCENT = "#0071E3"
-    ACCENT_SOFT = "#E3EFFC"
-    BG = "#F5F5F7"
-    TEXT = "#1D1D1F"
-    SEC = "#6E6E73"
-    TER = "#86868B"
-    DIV = "#E8E8ED"
-    KEY = "#FE00FE"
-    PLACEHOLDER = "搜索剪贴板内容"
-    PANEL_W = 600
-    PANEL_H_MAX = 720
-    F_FAMILY = "Segoe UI"   # 实际字体在 __init__ 中按可用性解析(需根窗口)
-
-    # ---- 核心状态别名(只读代理到 self.core;容器原地修改,引用稳定) ----
-    @property
-    def cfg(self):
-        return self.core.cfg
-
-    @property
-    def history(self):
-        return self.core.history
-
-    @property
-    def private(self):
-        return self.core.private
-
-    @property
-    def worker(self):
-        return self.core.worker
-
-    @property
-    def signal_q(self):
-        return self.core.signal_q
-
-    def _on_history_change(self):
-        """核心投递的 "change" 信号:剪贴捕获入史后,面板可见时刷新列表。"""
-        if self._visible():
-            self.refresh_list(self._query())
-
-    def __init__(self):
-        self.category = "all"           # all/text/image/link/files
-        self._view = []          # 历史索引视图(由 CardList 维护)
-        self._editors = []       # 打开的图片编辑器
-        self._warned_hotkey = False
-        self._search_focused = False
-        # 环境 DWM 缩放补偿(正常桌面为 1.0)
-        self._scale = env_scale()
-
-        # 共享核心(状态加载 + 历史迁移 + 后台线程启动)
-        self.core = ClipboardCore()
-
-        # 主窗口
-        self.root = tk.Tk()
-        self.root.title("WinClipboard")
-        self.root.overrideredirect(True)
-        self.root.attributes("-topmost", True)
-        self.root.report_callback_exception = self._tk_exc
-        try:
-            if "Segoe UI Semibold" in set(tkfont.families(self.root)):
-                self.F_FAMILY = "Segoe UI Semibold"
-        except Exception:
-            pass
-        log("init: fonts done")
-        self._build_ui()
-        log("init: build ui done")
-        self.root.withdraw()
-
-        self.root.after(30, self._poll)
-        # 后台预热文本测量与缩略图(把首次弹出成本移出热键路径)
-        self.root.after(600, self._prewarm)
-        log("init: mainloop start")
-        self.root.mainloop()
-
-    def _prewarm(self):
-        try:
-            t0 = time.time()
-            for h in self.history:
-                t = h.get("type")
-                if t == "text":
-                    for s in [l for l in h["content"].strip().splitlines() if l.strip()][:3]:
-                        _mmeasure(self.fonts["title"], s)
-                        _mmeasure(self.fonts["body"], s)
-                    if url_info(h["content"]):
-                        _mmeasure(self.fonts["body"], h["content"].strip())
-                elif t == "files" and h.get("content"):
-                    _mmeasure(self.fonts["title"], os.path.basename(h["content"][0]))
-            self.cl.prewarm_thumbs()
-            log("prewarm done %.0fms" % ((time.time() - t0) * 1000))
-        except Exception:
-            log("prewarm failed:\n%s" % traceback.format_exc())
-
-    # ---- UI 构建 ----
-    def _build_ui(self):
-        self.root.configure(bg=self.BG)
-
-        self.fonts = {
-            "app": (self.F_FAMILY, 17),
-            "title": (self.F_FAMILY, 14),
-            "body": ("Segoe UI", 13),
-            "meta": ("Segoe UI", 11),
-            "section": (self.F_FAMILY, 12),
-        }
-
-        # 面板底图(发丝边框,圆角由窗口区域实现)
-        self.face = tk.Label(self.root, bg=self.BG, bd=0)
-
-        # 头部
-        self.hdr = tk.Frame(self.root, bg=self.BG)
-        tk.Label(self.hdr, text="WinClipboard", bg=self.BG, fg=self.TEXT,
-                 font=self.fonts["app"]).pack(side="left")
-        tk.Label(self.hdr, text="Ctrl + Shift + V", bg=self.BG, fg=self.TER,
-                 font=("Segoe UI", 11), padx=10).pack(side="right")
-        self.close_lbl = tk.Label(self.hdr, text="✕", bg=self.BG, fg=self.TER,
-                                  font=("Segoe UI", 11), cursor="hand2", padx=8)
-        self.close_lbl.pack(side="right")
-        self.close_lbl.bind("<Button-1>", lambda e: self.hide())
-        self.close_lbl.bind("<Enter>", lambda e: self.close_lbl.config(fg=self.TEXT))
-        self.close_lbl.bind("<Leave>", lambda e: self.close_lbl.config(fg=self.TER))
-        for w in (self.hdr,):
-            w.bind("<ButtonPress-1>", self._start_move)
-            w.bind("<B1-Motion>", self._do_move)
-
-        # 搜索框(Spotlight 风格白色圆角壳 + 真实输入框)
-        self.search_shell = tk.Frame(self.root, bg=self.BG)
-        self.search_cv = tk.Canvas(self.search_shell, bg=self.BG,
-                                   highlightthickness=0, bd=0)
-        self.search_cv.place(x=0, y=0, relwidth=1, relheight=1)
-        self.search_cv.bind("<Configure>", lambda e: self._draw_search())
-        self.search_icon = tk.Label(self.search_shell, text="⌕", bg="#FFFFFF",
-                                    fg=self.TER, font=("Segoe UI", 16))
-        self.var_search = tk.StringVar()
-        self.ent_search = tk.Entry(self.search_shell, textvariable=self.var_search,
-                                   font=("Segoe UI", 15), relief="flat", bd=0,
-                                   bg="#FFFFFF", fg=self.TER,
-                                   insertbackground=self.ACCENT,
-                                   highlightthickness=0)
-        self.ent_search.bind("<FocusIn>", self._search_in)
-        self.ent_search.bind("<FocusOut>", self._search_out)
-        self.ent_search.bind("<KeyRelease>", lambda e: self._on_search())
-        self.ent_search.bind("<Return>", lambda e: self.activate_selected())
-        self.ent_search.bind("<Escape>", lambda e: self.hide())
-        self.ent_search.bind("<Down>", lambda e: self._move_sel(1))
-        self.ent_search.bind("<Up>", lambda e: self._move_sel(-1))
-
-        # 分类导航 / 卡片流 / 底栏
-        self.nav = SegNav(self.root, self)
-        self.cl = CardList(self.root, self)
-        self.foot = FootBar(self.root, self)
-        self.menu = tk.Menu(self.root, tearoff=0)   # 内容在每次右键时动态重建
-
-        self.root.bind("<FocusOut>", self._on_focusout)
-        self.root.bind("<Escape>", lambda e: self.hide())
-        self._search_dirty = False
-        self._face_ph = None
-
-    def _layout(self):
-        """按窗口尺寸放置内容(窗口含阴影边距)。"""
-        w, h = self.root.winfo_width(), self.root.winfo_height()
-        pw = w - 2 * SHD
-        ph = h - 2 * SHD
-        pad = 20
-        self.face.place(x=0, y=0, relwidth=1, relheight=1)
-        self.face.lower()   # 底图置于所有内容之下
-        self.hdr.place(x=SHD + pad, y=SHD + 16, width=pw - pad * 2, height=26)
-        # 搜索子组件坐标相对 search_shell
-        self.search_icon.place(x=14, y=12)
-        self.ent_search.place(x=42, y=4, height=40, relwidth=1, width=-(42 + 14))
-        self.search_shell.place(x=SHD + pad, y=SHD + 56, width=pw - pad * 2, height=48)
-        self.nav.place(x=SHD + pad - 4, y=SHD + 116, width=pw - pad * 2, height=30)
-        self.cl.place(x=SHD + pad - 2, y=SHD + 150, width=pw - pad * 2 + 4,
-                      height=max(60, ph - 150 - 50))
-        self.foot.place(x=SHD + pad, y=SHD + ph - 40, width=pw - pad * 2, height=34)
-
-    def _draw_search(self):
-        cv = self.search_cv
-        cv.delete("all")
-        w, h = cv.winfo_width(), cv.winfo_height()
-        if w < 10 or h < 10:
-            return
-        focused = self._search_focused
-        if focused:
-            _rr(cv, 1.5, 1.5, w - 1.5, h - 1.5, 14, fill="#FFFFFF",
-                outline="#B7D4F5", width=3)
-        _rr(cv, 1, 1, w - 1, h - 1, 14, fill="#FFFFFF",
-            outline=self.ACCENT if focused else "#E8E8ED", width=1)
-
-    # ---- 搜索框行为 ----
-    def _search_in(self, _=None):
-        self._search_focused = True
-        self._draw_search()
-        if not self._search_dirty and self.var_search.get() == self.PLACEHOLDER:
-            self.var_search.set("")
-            self.ent_search.config(fg=self.TEXT)
-            self._search_dirty = True
-
-    def _search_out(self, _=None):
-        self._search_focused = False
-        self._draw_search()
-        if self.var_search.get() == "":
-            self.var_search.set(self.PLACEHOLDER)
-            self.ent_search.config(fg=self.TER)
-            self._search_dirty = False
-
-    def _on_search(self):
-        t = self.var_search.get()
-        if t == self.PLACEHOLDER or t == "":
-            if t == "" and self._search_dirty:
-                self.var_search.set(self.PLACEHOLDER)
-                self.ent_search.config(fg=self.TER)
-                self._search_dirty = False
-            self.refresh_list("")
-            return
-        self._search_dirty = True
-        self.ent_search.config(fg=self.TEXT)
-        self.refresh_list(t)
-
-    def _query(self):
-        t = self.var_search.get()
-        return "" if t == self.PLACEHOLDER else t
-
-    def set_category(self, cat):
-        if cat == self.category:
-            return
-        self.category = cat
-        self.refresh_list(self._query())
-
-    # ---- 窗口拖动 ----
-    def _start_move(self, e):
-        self._mx, self._my = e.x_root, e.y_root
-
-    def _do_move(self, e):
-        x = self.root.winfo_x() + (e.x_root - self._mx)
-        y = self.root.winfo_y() + (e.y_root - self._my)
-        self._mx, self._my = e.x_root, e.y_root
-        self.root.geometry(f"+{x}+{y}")
-
-    # ---- 信号循环 ----
-    def _poll(self):
-        if not getattr(self, "_poll_logged", False):
-            self._poll_logged = True
-            log("poll: first tick")
-        try:
-            while True:
-                kind, *rest = self.signal_q.get_nowait()
-                try:
-                    self._handle_signal(kind, rest)
-                except Exception:
-                    log("处理信号 %r 失败:\n%s" % (kind, traceback.format_exc()))
-        except queue.Empty:
-            pass
-        self.root.after(30, self._poll)
-
-    def _handle_signal(self, kind, rest):
-        if kind == "clip":
-            item = rest[0]
-            if item:
-                self.core.add_item(item)
-        elif kind == "change":
-            self._on_history_change()
-        elif kind == "hotkey":
-            self.toggle()
-        elif kind == "tray":
-            act = rest[0]
-            if act == "show":
-                self.toggle()
-            elif act == "clear":
-                self.clear_all()
-            elif act == "private":
-                self.show_private()
-            elif act == "autostart":
-                self.core.toggle_autostart()
-            elif act == "about":
-                self.about()
-            elif act == "hotkey_fail":
-                self._warn_hotkey()
-            elif act == "quit":
-                self.quit_app()
-
-    def _warn_hotkey(self):
-        if self._warned_hotkey:
-            return
-        self._warned_hotkey = True
-        messagebox.showwarning(
-            "WinClipboard",
-            "全局热键(Ctrl+Shift+V)注册失败,可能被其他软件占用。\n"
-            "可在 {} 中修改 hotkey_mod / hotkey_key 后重启。".format(CONFIG_FILE),
-            parent=self.root)
-
-    # ---- 剪贴板读取 / 历史维护:见 ClipboardCore(共享后端) ----
-
-    # ---- 列表显示 / 过滤 ----
-    def refresh_list(self, query=""):
-        view = self.core.filter_view(self.category, query)
-        self.cl.set_view(view)
-        self.foot.set_count(len(self.history), len(view))
-
-    # ---- 选择 / 粘贴 ----
-    def _selected_index(self):
-        return self.cl.view_index(self.cl.selected())
-
-    def _move_sel(self, delta):
-        self.cl.move_sel(delta)
-
-    def activate_selected(self):
-        vi = self.cl.selected()
-        hi = self.cl.view_index(vi)
-        if hi is None:
-            return
-        self._paste_record(self.history[hi])
-
-    def _paste_record(self, rec):
-        if not self.core.paste_record(rec):
-            messagebox.showwarning("WinClipboard", "文件已不存在,无法粘贴。",
-                                   parent=self.root)
-            return
-        self.hide()
-
-    def card_action(self, act, vi):
-        """卡片悬停操作按钮:粘贴 / 固定 / 删除 / 更多。"""
-        if vi is None:
-            return
-        self.cl.select(vi)
-        if act == "paste":
-            self.activate_selected()
-        elif act == "pin":
-            self.toggle_pin()
-        elif act == "del":
-            self.delete_selected()
-        elif act == "more":
-            self.show_card_menu(
-                self.cl.winfo_rootx() + self.cl.winfo_width() - 60,
-                self.cl.winfo_rooty() + 40)
-
-    def show_card_menu(self, xr, yr):
-        vi = self.cl.selected()
-        self.menu.delete(0, "end")
-        self.menu.add_command(label="粘贴", command=self.activate_selected)
-        hi = self.cl.view_index(vi)
-        if hi is not None:
-            rec = self.history[hi]
-            if rec["type"] == "image":
-                self.menu.add_command(label="图片处理…", command=self.open_editor)
-            self.menu.add_command(
-                label="取消固定" if rec.get("pinned") else "固定",
-                command=self.toggle_pin)
-            self.menu.add_command(label="删除", command=self.delete_selected)
-        try:
-            self.menu.tk_popup(xr, yr)
-        finally:
-            self.menu.grab_release()
-
-    def open_editor(self):
-        hi = self._selected_index()
-        if hi is None:
-            return
-        rec = self.history[hi]
-        if rec["type"] != "image":
-            return
-        if not os.path.exists(rec.get("content", "")):
-            messagebox.showwarning("WinClipboard", "图片文件不存在,可能已被清理。",
-                                   parent=self.root)
-            return
-        self._editors.append(ImageEditor(self, rec))
-
-    def toggle_pin(self):
-        hi = self._selected_index()
-        if hi is None:
-            return
-        self.core.toggle_pin_at(hi)
-        self.refresh_list(self._query())
-
-    def delete_selected(self):
-        hi = self._selected_index()
-        if hi is None:
-            return
-        self.core.delete_at(hi)
-        self.refresh_list(self._query())
-
-    # ---- 显隐 ----
-    def _visible(self):
-        # 分层透明窗口用 winfo_viewable 不可靠,以 Win32 IsWindowVisible 为准
-        try:
-            return bool(win32gui.IsWindowVisible(self.root.winfo_id()))
-        except Exception:
-            return False
-
-    @staticmethod
-    def _monitor_rect(x, y):
-        try:
-            mon = win32api.MonitorFromPoint((x, y), win32con.MONITOR_DEFAULTTONEAREST)
-            info = win32api.GetMonitorInfo(mon)
-            r = info["Monitor"]
-            return r[0], r[1], r[2], r[3]
-        except Exception:
-            sw = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
-            sh = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
-            return 0, 0, sw, sh
-
-    def show(self):
-        # 重置搜索框为占位符
-        if self._search_dirty:
-            self.var_search.set(self.PLACEHOLDER)
-            self.ent_search.config(fg=self.TER)
-            self._search_dirty = False
-        self.refresh_list("")
-        W = self.PANEL_W
-        # 按内容高度计算面板高度(上限 720)
-        H = min(max(420, 210 + self.cl.content_height()), self.PANEL_H_MAX)
-        x, y = win32gui.GetCursorPos()
-        scale = self._scale
-        if scale == 1.0:
-            ml, mt, mr, mb = self._monitor_rect(x, y)   # 按鼠标所在显示器 clamp(多屏)
-        else:
-            # 虚拟化环境:物理坐标计算,几何坐标按倍率换算补偿
-            try:
-                pt = wintypes.POINT()
-                user32.GetPhysicalCursorPos(ctypes.byref(pt))
-                x, y = pt.x, pt.y
-            except Exception:
-                pass
-            sw = int(win32api.GetSystemMetrics(win32con.SM_CXSCREEN) / scale)
-            sh = int(win32api.GetSystemMetrics(win32con.SM_CYSCREEN) / scale)
-            ml, mt, mr, mb = 0, 0, sw, sh
-        win_w, win_h = W + 2 * SHD, H + 2 * SHD
-        wx, wy = x - SHD, y - SHD
-        if wx + win_w > mr - 8:
-            wx = mr - win_w - 8
-        if wy + win_h > mb - 8:
-            wy = mb - win_h - 8
-        wx = max(ml, wx)
-        wy = max(mt, wy)
-        self.root.geometry("%dx%d+%d+%d" % (int(win_w / scale), int(win_h / scale),
-                                            int(wx * scale), int(wy * scale)))
-        # 面板底图(按实际窗口尺寸生成)
-        try:
-            fw = max(self.root.winfo_width(), win_w)
-            fh = max(self.root.winfo_height(), win_h)
-            self._face_ph = ImageTk.PhotoImage(make_panel_face(fw, fh))
-            self.face.config(image=self._face_ph)
-        except Exception:
-            pass
-        self._layout()
-        self.root.deiconify()
-        # 圆角窗口区域裁剪(普通窗口,定位可靠)
-        try:
-            apply_round_region(self.root.winfo_id(),
-                               self.root.winfo_width(), self.root.winfo_height())
-        except Exception:
-            pass
-        self.root.lift()
-        self.root.attributes("-topmost", True)
-        self.ent_search.focus_set()
-        self.cl.select(0)
-
-    def hide(self):
-        self.root.withdraw()
-
-    def toggle(self):
-        if self._visible():
-            self.hide()
-        else:
-            self.show()
-
-    def _on_focusout(self, _):
-        self.root.after(160, self._check_focus)
-
-    def _check_focus(self):
-        if not self._visible():
-            return
-        try:
-            f = self.root.focus_get()
-        except Exception:
-            f = None
-        if f is None:
-            self.hide()
-
-    # ---- 菜单动作 ----
-    def _flat_btn(self, parent, text, cmd, primary=False, side="left", padx=4):
-        """扁平按钮:白底发丝边框,主按钮为纯色填充。"""
-        b = tk.Button(parent, text=text, command=cmd, relief="flat",
-                      borderwidth=0, cursor="hand2",
-                      bg=self.ACCENT if primary else self.BG,
-                      fg="white" if primary else self.TEXT,
-                      activebackground=self.ACCENT if primary else self.ACCENT_SOFT,
-                      activeforeground="white" if primary else self.TEXT,
-                      highlightthickness=1,
-                      highlightbackground=self.ACCENT if primary else self.DIV,
-                      font=("Segoe UI", 9), padx=12, pady=4)
-        b.pack(side=side, padx=padx)
-        return b
-
-    def show_private(self):
-        """私密内容窗口:敏感信息隔离区,双击/回车复制并粘贴。"""
-        if not self.private:
-            messagebox.showinfo("私密内容", "暂无敏感内容。", parent=self.root)
-            return
-        top = tk.Toplevel(self.root)
-        top.title("私密内容(敏感信息隔离区)")
-        top.configure(bg=self.BG)
-        top.attributes("-topmost", True)
-        top.geometry("460x340")
-        tk.Label(top, text="以下内容保存在本机私密区,不出现在剪贴板历史面板中。",
-                 bg=self.BG, fg=self.TER, font=("Segoe UI", 8), anchor="w",
-                 justify="left").pack(fill="x", padx=12, pady=(10, 4))
-        body = tk.Frame(top, bg=self.BG)
-        body.pack(fill="both", expand=True, padx=12)
-        sb = tk.Scrollbar(body)
-        sb.pack(side="right", fill="y")
-        lb = tk.Listbox(body, font=("Segoe UI", 9), yscrollcommand=sb.set,
-                        bg="#fafbfd", fg=self.TEXT,
-                        selectbackground=self.ACCENT_SOFT, selectforeground=self.TEXT,
-                        relief="flat", highlightthickness=1,
-                        highlightbackground=self.DIV, borderwidth=0)
-        lb.pack(side="left", fill="both", expand=True)
-        sb.config(command=lb.yview)
-        for s in self.private:
-            one = s.replace("\n", " ").replace("\t", " ")
-            if len(one) > 60:
-                one = one[:60] + "…"
-            lb.insert("end", one)
-        foot = tk.Frame(top, bg=self.BG)
-        foot.pack(fill="x", padx=12, pady=(6, 12))
-
-        def sel():
-            c = lb.curselection()
-            return c[0] if c else None
-
-        def do_copy():
-            i = sel()
-            if i is None:
-                return
-            self.core.paste_text(self.private[i])
-            top.destroy()
-
-        def do_delete():
-            i = sel()
-            if i is None:
-                return
-            self.private.pop(i)
-            save_private(self.private)
-            lb.delete(i)
-
-        def do_clear():
-            if not messagebox.askyesno("私密内容", "确定清空全部私密内容?", parent=top):
-                return
-            self.private.clear()   # 原地清空,保持核心引用有效
-            save_private(self.private)
-            lb.delete(0, "end")
-
-        lb.bind("<Double-Button-1>", lambda e: do_copy())
-        lb.bind("<Return>", lambda e: do_copy())
-        self._flat_btn(foot, "复制并粘贴", do_copy, primary=True)
-        self._flat_btn(foot, "删除", do_delete)
-        self._flat_btn(foot, "清空", do_clear)
-        self._flat_btn(foot, "关闭", top.destroy, side="right")
-
-    def _tk_exc(self, exc, val, tb):
-        _log_exception("Tk 回调异常", exc, val, tb)
-        try:
-            sys.__stderr__.write("Exception in Tkinter callback: %s\n" % val)
-        except Exception:
-            pass
-
-    def clear_all(self):
-        self.core.clear_unpinned()
-        if self._visible():
-            self.refresh_list(self._query())
-
-    def about(self):
-        top = tk.Toplevel(self.root)
-        top.title("关于 WinClipboard")
-        top.configure(bg=self.BG)
-        top.attributes("-topmost", True)
-        tk.Label(top, text="●  WinClipboard", font=("Segoe UI", 14, "bold"),
-                 bg=self.BG, fg=self.ACCENT).pack(pady=(18, 0))
-        tk.Label(top, bg=self.BG, justify="left", anchor="w",
-                 fg=self.TEXT, font=("Segoe UI", 9),
-                 text=("Windows 桌面剪贴板管理器\n"
-                       "热键: Ctrl+Shift+V 弹出/隐藏\n"
-                       "左键托盘图标: 切换面板\n"
-                       "右键托盘图标: 菜单\n\n"
-                       "数据目录:\n" + APP_DIR)).pack(padx=30, pady=10)
-        foot = tk.Frame(top, bg=self.BG)
-        foot.pack(pady=(0, 16))
-        self._flat_btn(foot, "确定", top.destroy, primary=True, side="top")
-
-    # ---- 退出 ----
-    def quit_app(self):
-        self.core.save_all()
-        self.worker.cmd_q.put(("quit",))
-        try:
-            self.root.destroy()
-        except Exception:
-            pass
-
-
-# ============================================================
-# 入口
-# ============================================================
-def main():
-    install_excepthooks()
-    ensure_dirs()
-    ok, mutex = single_instance()
-    if not ok:
-        ctypes.windll.user32.MessageBoxW(
-            0, "WinClipboard 已经在运行中(检查系统托盘)。", APP_NAME, 0x40)
-        return
-    # 保持互斥量存活
-    globals()["_MUTEX"] = mutex
-    log("启动 pid=%d py=%s %s" % (os.getpid(), sys.executable, sys.version.split()[0]))
-    try:
-        ClipboardApp()
-    except Exception:
-        log("主线程异常退出:\n" + traceback.format_exc())
-        try:
-            ctypes.windll.user32.MessageBoxW(
-                0, "WinClipboard 发生错误,详情见:\n%s" % LOG_FILE, APP_NAME, 0x10)
-        except Exception:
-            pass
-    log("退出")
-
-
 if __name__ == "__main__":
-    main()
+    print("WinClipboard 后端模块:界面请运行 winclipboard_qt.py(需 PySide6 + PySide6-Fluent-Widgets)。")
