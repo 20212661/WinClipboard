@@ -486,7 +486,8 @@ class Card(CardWidget):
             lines = [l for l in rec["content"].strip().splitlines() if l.strip()]
             title = lines[0] if lines else ""
             sub = "\n".join(lines[1:3]) if len(lines) > 1 else ""
-            meta = "文本 · " + cm._rel_time(rec.get("ts", 0))
+            badge = self._badge_of(rec)
+            meta = (badge or "文本") + " · " + cm._rel_time(rec.get("ts", 0))
         self._set_text(self.title_lbl, elided(title, self.title_lbl.font(), 640))
         self._set_text(self.sub_lbl, elided(sub, self.sub_lbl.font(), 640) if sub else "")
         self.sub_lbl.setVisible(bool(sub))
@@ -498,6 +499,18 @@ class Card(CardWidget):
     def _set_text(lbl, txt):
         if lbl.text() != txt:           # setText 触发重排/重绘,不变则跳过
             lbl.setText(txt)
+
+    def _badge_of(self, rec):
+        """子类型徽章(JWT/Base64):带 id(rec) 缓存,同记录重复绑定零探测。"""
+        cache = self.app._badge_cache
+        key = id(rec)
+        got = cache.get(key)
+        if got is None:
+            got = cm.content_badge(rec.get("content") or "") or ""
+            if len(cache) > 512:
+                cache.clear()
+            cache[key] = got
+        return got or None
 
     def _ensure_btns(self):
         if self.act_btns is not None:
@@ -5430,6 +5443,7 @@ class WinClipboardApp(QObject):
         self._viewers = []
         self._diffs = []
         self._diff_base = None               # 对比基准记录(Ctrl+点击选定)
+        self._badge_cache = {}               # id(rec) → 卡片子类型徽章(JWT/Base64)
 
         # 图钉画布(置顶悬浮多图板):恢复上次钉住的图片与布局;
         # 独立于主窗口存在,程序退出才销毁

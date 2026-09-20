@@ -298,9 +298,17 @@ _ok, _ch = cm.json_semantic_diff('{"ok":true}', '{"ok":1}')
 check("布尔与数字不同型", ("$.ok", "change") in {(p, k) for p, k, *_ in _ch})
 _ok, _ch = cm.json_semantic_diff('{"n":1}', '{"n":1.0}')
 check("int/float 数值等价", _ok and _ch == [], str(_ch))
-check("非法 JSON 返回不可比", cm.json_semantic_diff("{bad", "{}")[0] is False)
 check("格式化差异语义相等",
       cm.json_semantic_diff('{"a":1,"b":[1, 2]}', '{\n  "a": 1,\n  "b": [1,2]\n}')[1] == [])
+check("非法 JSON 返回不可比", cm.json_semantic_diff("{bad", "{}")[0] is False)
+
+# ---- 卡片子类型徽章(轻量探测,不跑 pygments) ----
+check("徽章:JWT", cm.content_badge(_JWT) == "JWT")
+check("徽章:Base64", cm.content_badge(_b64e("足够长的一段文本用于触发 Base64 嗅探的下限要求")) == "Base64")
+check("徽章:普通文本无", cm.content_badge("今天天气不错") is None)
+check("徽章:JSON 不占用", cm.content_badge('{"a":1}') is None)
+check("徽章:URL 不占用(有 link 卡片)", cm.content_badge("https://a.com/b") is None)
+check("徽章:空文本无", cm.content_badge("") is None)
 
 print()
 print("RESULT:", "PASS" if not FAILS else "FAIL %d 项: %s" % (len(FAILS), ", ".join(FAILS)))

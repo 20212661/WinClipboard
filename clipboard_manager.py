@@ -1727,6 +1727,27 @@ def b64_decode_auto(text):
     return _sniff_base64((text or "").strip())
 
 
+def content_badge(text):
+    """卡片徽章轻量探测:只走廉价分支(JSON/JWT/Base64 嗅探),不跑
+    pygments 兜底——卡片绑定是每次刷新的全量路径,贵分支进不来。
+    返回 "JWT"/"Base64"/None(URL 已有 link 专属卡片,不在此列)。"""
+    if not isinstance(text, str):         # files 条目 content 是路径列表
+        return None
+    t = text.lstrip()
+    if not t:
+        return None
+    try:
+        json.loads(t)
+        return None                       # JSON 在卡片 meta 已有既有呈现路径
+    except Exception:
+        pass
+    if _sniff_jwt(t):
+        return "JWT"
+    if _sniff_base64(t):
+        return "Base64"
+    return None
+
+
 # ---- Diff(内容对比;纯逻辑,查看器渲染) ----
 def unified_diff_lines(a, b, n=3, cap=4000):
     """unified diff 行列表(difflib;含 @@ 头)。超 cap 行截断并标注,

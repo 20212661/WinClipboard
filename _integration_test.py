@@ -536,6 +536,25 @@ _tpair.close()
 pump(0.2)
 check("对比窗口关闭后清理", len(a._diffs) == 0)
 
+# ---- 卡片子类型徽章:JWT / Base64 在 meta 行显示 ----
+# JWT 属敏感内容默认进私密区(不进普通历史)——临时关护栏验证徽章路径
+_guard = a.core.cfg.get("sensitive_guard", True)
+a.core.cfg["sensitive_guard"] = False
+a.core._post(("clip", ("text", _jwt_txt)))
+a.core._post(("clip", ("text", _b64_txt)))
+pump(0.6)
+a.core.cfg["sensitive_guard"] = _guard
+a.refresh_view()
+pump(0.3)
+_jc = next((c for c in a._card_widgets if c._badge_of(c.rec) == "JWT"), None)
+_bc = next((c for c in a._card_widgets if c._badge_of(c.rec) == "Base64"), None)
+check("JWT 卡片徽章", _jc is not None and "JWT ·" in _jc.meta_lbl.text(),
+      _jc.meta_lbl.text() if _jc else "无卡片")
+check("Base64 卡片徽章", _bc is not None and "Base64 ·" in _bc.meta_lbl.text(),
+      _bc.meta_lbl.text() if _bc else "无卡片")
+check("徽章缓存生效", id(_jc.rec) in a._badge_cache
+      and a._badge_cache[id(_jc.rec)] == "JWT")
+
 # ---- 图片查看器:独立窗口 + 缩放/1:1/适应(小图不放大) ----
 img_rec = next((h for h in a.history if h.get("type") == "image"), None)
 check("存在图片条目(前置)", img_rec is not None)
