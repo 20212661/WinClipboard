@@ -52,6 +52,7 @@ from qfluentwidgets import (FluentIcon as FIF, setTheme, setThemeColor, Theme,
                             ToggleButton, Slider, RadioButton, SpinBox, LineEdit,
                             TextEdit, ComboBox, EditableComboBox,
                             RoundMenu, MessageBox, MessageBoxBase, InfoBar,
+                            CheckBox,
                             InfoBarPosition, BodyLabel, StrongBodyLabel,
                             CaptionLabel, TitleLabel,
                             SmoothScrollDelegate, ScrollBarHandleDisplayMode,
@@ -1496,6 +1497,13 @@ class SettingsPage(QWidget):
         group.addSettingCard(c_max)
         lay.addWidget(group)
 
+
+        # ---- 备份与迁移 ----
+        group4 = SettingCardGroup("备份与迁移", self)
+        c_exp = PushSettingCard(
+            "导出…", FIF.SAVE_AS, "导出历史",
+            "全部条目导出为 JSON(可选内嵌图片),用于备份或迁移到别的电脑",
+            parent=group4)
         group2 = SettingCardGroup("外观与系统", self)
         c_theme = SettingCard(FIF.BRUSH, "界面主题",
                               "跟随系统或固定浅色/深色(更改后立即生效)", parent=group2)
@@ -1627,6 +1635,43 @@ class SettingsPage(QWidget):
     def _refresh_excl_label(self):
         n = len(self.app.cfg.get("exclude_apps") or [])
         self.lbl_excl.setText("已排除 %d 个应用" % n if n else "未排除任何应用")
+
+    # ---- 备份与迁移 ----
+    def _export_history(self):
+        """导出历史:先选是否内嵌图片,再选保存路径。"""
+        dlg = MessageBoxBase(self)
+        ttl = StrongBodyLabel("导出历史")
+        dlg.viewLayout.addWidget(ttl)
+        sub = CaptionLabel("文本/文件条目始终导出(含富文本与来源应用)。")
+        sub.setWordWrap(True)
+        sub.setStyleSheet("color: %s;" % TER)
+        dlg.viewLayout.addWidget(sub)
+        chk_img = CheckBox("内嵌图片(base64,文件明显变大)")
+        dlg.viewLayout.addWidget(chk_img)
+        dlg.yesButton.setText("选择保存位置…")
+        dlg.cancelButton.setText("取消")
+        dlg.widget.setFixedWidth(400)
+        if not dlg.exec():
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出历史",
+            os.path.join(os.path.expanduser("~"), "Desktop",
+                         "winclipboard_export.json"),
+            "JSON (*.json)")
+        if not path:
+            return
+        try:
+            payload = self.app.core.export_payload(bool(chk_img.isChecked()))
+            Path(path).write_text(json.dumps(payload, ensure_ascii=False),
+                                  encoding="utf-8")
+        except Exception:
+            cm.log("导出历史失败:\n%s" % traceback.format_exc())
+            InfoBar.error("导出失败", "详情见日志(%s)" % cm.LOG_FILE, parent=self,
+                          position=InfoBarPosition.TOP_RIGHT)
+            return
+        InfoBar.success("导出完成",
+                        "%d 条 → %s" % (len(payload["items"]), path),
+                        parent=self, position=InfoBarPosition.TOP_RIGHT)
 
     def _edit_exclusions(self):
         ExcludeAppsDialog(self, self.app).exec()

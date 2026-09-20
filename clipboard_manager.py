@@ -1791,6 +1791,41 @@ class ClipboardCore:
         self._trash_push(removed)
         return len(removed)
 
+    # ---- 导出 / 导入(备份与迁移) ----
+    def export_payload(self, include_images=False):
+        """历史导出为可 JSON 序列化的载荷。图片默认跳过(勾选则 base64 内嵌);
+        文件条目只导出仍存在的路径。"""
+        items = []
+        for h in self.history:
+            it = {"type": h["type"], "ts": h.get("ts", 0),
+                  "src": h.get("src", ""), "pinned": bool(h.get("pinned"))}
+            if h["type"] == "image":
+                if not include_images:
+                    continue
+                try:
+                    blob = Path(h["content"]).read_bytes()
+                except Exception:
+                    continue
+                it["name"] = os.path.basename(h["content"])
+                it["image_b64"] = base64.b64encode(blob).decode("ascii")
+                it["w"], it["h"] = h.get("w", 0), h.get("h", 0)
+            elif h["type"] == "files":
+                live = [p for p in (h.get("content") or []) if os.path.exists(p)]
+                if not live:
+                    continue
+                it["content"] = live
+            else:
+                if not str(h.get("content") or "").strip():
+                    continue
+                it["content"] = h["content"]
+                for k in ("html", "rtf"):
+                    if h.get(k):
+                        it[k] = h[k]
+            items.append(it)
+        return {"app": "WinClipboard", "version": 1,
+                "exported_at": time.time(), "include_images": include_images,
+                "items": items}
+
     def soft_clear_unpinned(self):
         """可撤销的清空(置顶保留,不删图片文件);返回被移除的条目。"""
         removed = [h for h in self.history if not h.get("pinned")]
