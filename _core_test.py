@@ -618,6 +618,8 @@ import store as _st
 _sdir = tempfile.mkdtemp(prefix="wclb_store_")
 _sdb = os.path.join(_sdir, "clipboard.db")
 st = _st.ClipboardStore(_sdb)
+check("schema:全新库建表即打版本戳",
+      st.db.execute("PRAGMA user_version").fetchone()[0] == _st.SCHEMA_VERSION)
 st.insert({"type": "text", "content": "hello sqlite world", "pinned": True,
            "ts": 1.0, "src": "a.exe", "html": "<b>x</b>"})
 st.insert({"type": "text", "content": "你好剪贴板数据库", "pinned": False,
@@ -727,6 +729,8 @@ _cx.execute("INSERT INTO clipboard_items (seq, created_at, updated_at, "
 _cx.commit()
 _cx.close()
 stv = _st.ClipboardStore(_v1)
+check("schema:v1 逐级迁到当前版本",
+      stv.db.execute("PRAGMA user_version").fetchone()[0] == _st.SCHEMA_VERSION)
 _v1_ids = stv.query(q="hello")
 check("v1 库自动升级+回填(search_text 命中)", _v1_ids == [1], str(_v1_ids))
 with _sq3.connect(_v1) as _cx1:
@@ -846,7 +850,24 @@ _st_old = _st.ClipboardStore(_olddb)
 _cols = {r["name"] for r in _st_old.db.execute("PRAGMA table_info(clipboard_items)")}
 check("旧库自动加 state/deleted_at 列", "state" in _cols and "deleted_at" in _cols)
 check("旧行视为 active", _st_old.count() == 1)
+check("schema:v2 形状存量库补戳",
+      _st_old.db.execute("PRAGMA user_version").fetchone()[0]
+      == _st.SCHEMA_VERSION)
 _st_old.close()
+
+# 高于当前支持的版本:拒绝打开(旧代码写新库 = 数据损坏路径)
+_fut = os.path.join(_sdir, "future.db")
+_fx = _sql.connect(_fut)
+_fx.execute("CREATE TABLE clipboard_items (id INTEGER PRIMARY KEY)")
+_fx.execute("PRAGMA user_version = 99")
+_fx.commit()
+_fx.close()
+try:
+    _st.ClipboardStore(_fut)
+    _refused = False
+except ValueError:
+    _refused = True
+check("schema:拒绝高于当前版本的库", _refused)
 
 # ---- state 原语:mark_deleted / restore / collect_garbage / blob_refcount ----
 _tdb = os.path.join(_sdir, "txn.db")

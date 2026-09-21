@@ -12,6 +12,8 @@
 - 安全约定:所有 SQL 为调用点内联字面量,动态值一律参数绑定;
   组合过滤用固定语句 + 空参数(? IS NULL OR col = ?),不拼接 SQL 文本。
 - 写入策略:单写者(GUI 线程)逐操作写透,WAL 模式。
+- 版本迁移:PRAGMA user_version 阶梯;存量库(未打戳)按列形状探测起始
+  版本,先补戳再逐级 migrate_N_to_N+1,每级独立 commit,中断可续。
 
 兼容:敏感条目不入本表(私密区 private.json + DPAPI 独立存储);
 encrypt_history=True 时核心不启用本存储写透,继续走 JSON。
@@ -21,6 +23,8 @@ import os
 import sqlite3
 import threading
 import time
+
+SCHEMA_VERSION = 3   # v1 初版 / v2 +search_text+FTS / v3 +state+deleted_at
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS clipboard_items (
@@ -98,31 +102,81 @@ class ClipboardStore:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
-        self._ensure_v2()          # 旧库升级必须先于 schema(触发器引用新列)
+        self._migrate_schema()     # 版本阶梯:旧库逐级迁到当前(先于建触发器)
         self.db.executescript(_SCHEMA)
-        self._upgrade_schema()     # state/deleted_at:带默认值,ALTER 即生效
         if self._upgraded:
             # 既有行的 FTS 索引重建(外容表只能用 rebuild,不能手工插行)
             self.db.execute("INSERT INTO items_fts(items_fts) VALUES ('rebuild')")
+        if self._user_version() == 0:
+            self._stamp_version(SCHEMA_VERSION)   # 全新库:建表后打当前版本戳
         self.db.commit()
         self._seq = int(self.db.execute(
             "SELECT COALESCE(MAX(seq), 0) AS m FROM clipboard_items"
         ).fetchone()["m"])
 
-    def _ensure_v2(self):
-        """v1 库(无 search_text)就地升级:加列、回填。
-        必须在 executescript(_SCHEMA) 之前执行——schema 里的触发器引用
-        search_text,而外容 FTS 绝不能经触发器手工回填(索引会损坏)。"""
-        self._upgraded = False
-        names = [r["name"] for r in self.db.execute(
+    def _user_version(self):
+        r = self.db.execute("PRAGMA user_version").fetchone()
+        return int(r[0]) if r else 0
+
+    def _stamp_version(self, v):
+        """打版本戳。PRAGMA 不支持参数绑定,版本号是封闭集合的整型,
+        逐版本写死为字面量(不拼接);新增版本时在此追加一个分支。"""
+        if v == 1:
+            self.db.execute("PRAGMA user_version = 1")
+        elif v == 2:
+            self.db.execute("PRAGMA user_version = 2")
+        elif v == 3:
+            self.db.execute("PRAGMA user_version = 3")
+        else:
+            raise ValueError("版本 %r 无预写字面量语句" % (v,))
+        self.db.commit()
+
+    def _sniff_legacy_version(self):
+        """未打戳的存量库按列形状定起始版本(v1 无 search_text;v2 无 state)。"""
+        names = self.db.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' "
-            "AND name = 'clipboard_items'").fetchall()]
+            "AND name = 'clipboard_items'").fetchall()
         if not names:
-            return                                  # 全新库,直接建 v2
+            return 0                                  # 全新库
+        cols = {r["name"] for r in self.db.execute(
+            "PRAGMA table_info(clipboard_items)").fetchall()}
+        if "search_text" not in cols:
+            return 1
+        if "state" not in cols:
+            return 2
+        return SCHEMA_VERSION
+
+    def _migrate_schema(self):
+        """版本阶梯迁移(PRAGMA user_version 随事务原子落盘)。
+
+        存量库未打戳(user_version=0)→先按列形状探测起始版本并补戳,
+        再逐级 migrate;每级迁移独立 commit+版本戳,中断后重开从戳处继续。
+        高于当前支持的版本直接拒绝打开——旧代码写新库是数据损坏路径。"""
+        self._upgraded = False
+        v = self._user_version()
+        if v == 0:
+            v = self._sniff_legacy_version()
+            if v == 0:
+                return                                # 全新库:建表后统一打戳
+            self._stamp_version(v)                    # 先补起始戳再逐级升
+        if v > SCHEMA_VERSION:
+            raise ValueError(
+                "clipboard.db schema v%d 高于本版本支持的 v%d,请先升级应用"
+                % (v, SCHEMA_VERSION))
+        while v < SCHEMA_VERSION:
+            self._MIGRATIONS[v](self)
+            v += 1
+            self._stamp_version(v)
+
+    def _migrate_1_to_2(self):
+        """v1→v2:加 search_text 列并回填。必须在 executescript(_SCHEMA)之前
+        ——schema 里的触发器引用 search_text,而外容 FTS 绝不能经触发器
+        手工回填(索引会损坏)。v1 可能带着按 text_content 建的旧 FTS/触发器:
+        清场,稍后由 _SCHEMA 重建。"""
         cols = [r["name"] for r in self.db.execute(
             "PRAGMA table_info(clipboard_items)").fetchall()]
         if "search_text" in cols:
-            return                                  # 已是 v2
+            return
         self.db.execute("ALTER TABLE clipboard_items ADD COLUMN search_text TEXT")
         rows = self.db.execute(
             "SELECT id, content_type, text_content, files_json, "
@@ -140,16 +194,14 @@ class ClipboardStore:
             self.db.execute(
                 "UPDATE clipboard_items SET search_text = ? WHERE id = ?",
                 (st, r["id"]))
-        # v1 可能带着按 text_content 建的旧 FTS/触发器:清场,稍后重建
         self.db.execute("DROP TRIGGER IF EXISTS items_fts_ai")
         self.db.execute("DROP TRIGGER IF EXISTS items_fts_ad")
         self.db.execute("DROP TRIGGER IF EXISTS items_fts_au")
         self.db.execute("DROP TABLE IF EXISTS items_fts")
         self._upgraded = True
 
-    def _upgrade_schema(self):
-        """CREATE TABLE IF NOT EXISTS 不改已存在的表,缺列在此补
-        (state/deleted_at;带默认值,老行视为 active)。"""
+    def _migrate_2_to_3(self):
+        """v2→v3:补 state/deleted_at 列(带默认值,老行视为 active)。"""
         cols = {r["name"] for r in self.db.execute(
             "PRAGMA table_info(clipboard_items)").fetchall()}
         if "state" not in cols:
@@ -158,6 +210,9 @@ class ClipboardStore:
         if "deleted_at" not in cols:
             self.db.execute("ALTER TABLE clipboard_items "
                             "ADD COLUMN deleted_at REAL")
+
+    # 版本阶梯:v→v+1 迁移函数表;新版本 = 追加一级 + SCHEMA_VERSION 递增
+    _MIGRATIONS = {1: _migrate_1_to_2, 2: _migrate_2_to_3}
 
     def close(self):
         with self._lock:
