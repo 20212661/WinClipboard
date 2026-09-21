@@ -26,6 +26,7 @@ from perf_probe import PerfSpan, since, stamp   # 关键路径性能埋点
 from pinboard import PinBoardManager   # 图钉画布(置顶多图板)子包
 from pinboard import annotations as _anno_layer   # 标注层(非破坏模型)
 import workflow_steps as wfs   # AI 工作流 Step Contract(步骤统一契约)
+import workflow_runlog as wrl  # 工作流运行记录(Run Inspector 数据层)
 import diagnostics as diag     # 诊断快照 + 数据健康检查(纯数据层,无 UI)
 from quickpaste import QuickPasteWindow  # 快捷粘贴浮层(默认 Alt+`)
 from urllib.parse import unquote as _unquote, quote as _quote, urlsplit
@@ -5920,19 +5921,32 @@ class WorkflowPage(QWidget):
         b_del.setIcon(FIF.DELETE.icon())
         b_seed = PushButton("填入示例模板", self)
         b_seed.setIcon(FIF.LIBRARY.icon())
+        b_hist = PushButton("运行记录", self)
+        b_hist.setIcon(FIF.HISTORY.icon())
         b_svc = PushButton("AI 服务…", self)
         b_svc.setIcon(FIF.CLOUD.icon())
         b_new.clicked.connect(self._new)
         b_edit.clicked.connect(self._edit_current)
         b_del.clicked.connect(self._del_current)
         b_seed.clicked.connect(self._seed)
+        b_hist.clicked.connect(self._open_runs)
         b_svc.clicked.connect(self.app.show_services)
-        for b in (b_new, b_edit, b_del, b_seed, b_svc):
+        for b in (b_new, b_edit, b_del, b_seed, b_hist, b_svc):
             row.addWidget(b)
         row.addStretch(1)
         v.addLayout(row)
         self._editors = []
+        self._runs_dlg = None
         self.refresh()
+
+    def _open_runs(self):
+        """运行记录(Run Inspector):每步大小/耗时/状态 + 运行历史。"""
+        if self._runs_dlg is None:
+            self._runs_dlg = WorkflowRunInspector(self.app)
+        self._runs_dlg._reload()
+        self._runs_dlg.show()
+        self._runs_dlg.raise_()
+        self._runs_dlg.activateWindow()
 
 
     def refresh(self):
@@ -6029,6 +6043,11 @@ class WorkflowRunner(QWidget):
         self._auto = False
         self._ctx = None                   # WorkflowContext(惰性,宿主回调注入)
         self._cur_step = None              # 当前步骤实例(取消用)
+        # 运行记录(Run Inspector):只记大小/耗时/状态,正文不落盘;
+        # 关闭窗口或跑完全程时收尾保存(见 _maybe_finish_runlog/closeEvent)
+        self._runlog = wrl.RunRecorder(wf.get("name", ""), content,
+                                       len(self.steps))
+        self._runlog_saved = False
 
         self.setWindowTitle("工作流 — " + wf.get("name", ""))
         self.setWindowIcon(app.icon)
@@ -6235,6 +6254,7 @@ class WorkflowRunner(QWidget):
             self.results.append(text)
             self.cur = text
             self.step_idx += 1
+            self._runlog.step_ok(idx, text)
             self._waiting = None
             self._wait_body = None
             self._wait_confirm = None
@@ -6242,6 +6262,7 @@ class WorkflowRunner(QWidget):
                 self._set_busy(False, "全部 %d 步完成,结果可复制" % len(self.steps))
                 InfoBar.success("工作流完成", "共 %d 步,最新结果已可复制" % len(self.steps),
                                 parent=self, position=InfoBarPosition.TOP_RIGHT)
+                self._maybe_finish_runlog()
             else:
                 self._set_busy(False, "步骤 %d 完成;可继续下一步" % idx)
 
@@ -6346,10 +6367,12 @@ class WorkflowRunner(QWidget):
         self._ctx.previous = self.cur
         step = wfs.deserialize(self.steps[idx])
         self._cur_step = step
+        self._runlog.step_start(idx, step.kind, step.describe(), self.cur)
 
         err = step.validate(self._ctx)          # 契约:运行前检查
         if err is not None:
             self._auto = False
+            self._runlog.step_error(idx, "配置无效: " + err)
             InfoBar.error("无法运行", err, parent=self,
                           position=InfoBarPosition.TOP_RIGHT, duration=-1)
             self._set_busy(False, "步骤 %d 配置无效,已停止" % (idx + 1))
@@ -6358,6 +6381,7 @@ class WorkflowRunner(QWidget):
         res = step.execute(self._ctx)           # 契约:执行
         if isinstance(res, wfs.Cancelled):
             self._auto = False
+            self._runlog.step_cancelled(idx, res.reason)
             self._set_busy(False, "步骤 %d 已取消(%s)" % (idx + 1, res.reason))
             return
         if isinstance(res, wfs.Wait):
@@ -6383,17 +6407,29 @@ class WorkflowRunner(QWidget):
         self.results.append(text)
         self.cur = text
         self.step_idx = idx + 1
+        self._runlog.step_ok(idx, text, halt=halt)
         self._add_block("步骤 %d · %s" % (idx + 1, self._step_label(self.steps[idx])),
                         text, "result", idx)
         if self.step_idx >= len(self.steps):
             self._set_busy(False, "全部 %d 步完成,结果可复制" % len(self.steps))
             InfoBar.success("工作流完成", "共 %d 步,最新结果已可复制" % len(self.steps),
                             parent=self, position=InfoBarPosition.TOP_RIGHT)
+            self._maybe_finish_runlog()
         elif halt:
             self._auto = False
             self._set_busy(False, "步骤 %d 条件不满足,自动串联已停(可手动继续)" % (idx + 1))
         elif not self._auto:
             self._set_busy(False, "步骤 %d 完成;可编辑结果或直接继续" % idx)
+
+    def _maybe_finish_runlog(self):
+        """全部步骤走完:收尾运行记录并落盘(只记大小/耗时/状态)。"""
+        if self._runlog_saved:
+            return
+        self._runlog_saved = True
+        try:
+            wrl.save_run(self._runlog.finish())
+        except Exception:
+            cm.log("运行记录保存失败:\n%s" % traceback.format_exc())
 
     def _privacy_gate(self, prompt, svc):
         """AI 发送前隐私门:命中敏感内容弹三选一(遮盖/原样/取消);
@@ -6416,6 +6452,7 @@ class WorkflowRunner(QWidget):
             return
         if not ok:
             self._auto = False
+            self._runlog.step_error(idx, text)
             self._set_busy(False, "步骤 %d 失败,可重试" % (idx + 1))
             InfoBar.error("调用失败", text[:220], parent=self,
                           position=InfoBarPosition.TOP_RIGHT, duration=-1)
@@ -6453,8 +6490,180 @@ class WorkflowRunner(QWidget):
                 self.app._ai_runners.remove(self)
             except ValueError:
                 pass
+            # 中途关闭:运行记录以 partial 落盘(至少跑过一步才记,
+            # 零步关闭不污染历史)
+            if not self._runlog_saved and self._runlog.steps:
+                try:
+                    wrl.save_run(self._runlog.abort())
+                except Exception:
+                    cm.log("运行记录保存失败:\n%s" % traceback.format_exc())
             self.deleteLater()
             e.accept()
+
+
+# ============================================================
+# Workflow Run Inspector(运行记录查看,建议 18)
+# ============================================================
+class WorkflowRunInspector(QWidget):
+    """工作流运行历史:左列运行(最近在前),右侧选中运行的每步明细
+    (大小/耗时/状态)。数据来自 workflow_runlog——只记大小不记内容。"""
+
+    _STATUS_TXT = {"ok": "✓ 完成", "halt": "⛔ 停链(条件)", "error": "✗ 失败",
+                   "cancelled": "已取消", "running": "—"}
+    _RUN_TXT = {"done": "完成", "failed": "失败", "cancelled": "已取消",
+                "partial": "未跑完", "running": "进行中"}
+
+    def __init__(self, app):
+        super().__init__(None)
+        self.app = app
+        self.setWindowTitle("工作流运行记录")
+        self.setWindowIcon(app.icon)
+        self.setWindowFlags(Qt.Window)
+        self.setStyleSheet("QWidget { background: %s; }" % BG)
+        self.resize(780, 520)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(28, 20, 28, 14)
+        v.setSpacing(10)
+        head = QHBoxLayout()
+        icon = QLabel("🧾")
+        icon.setFont(font(16))
+        ttl = StrongBodyLabel("运行记录(Run Inspector)")
+        ttl.setFont(font(15, QFont.DemiBold))
+        ttl.setStyleSheet("color: %s;" % TEXT)
+        head.addWidget(icon)
+        head.addSpacing(6)
+        head.addWidget(ttl)
+        head.addStretch(1)
+        v.addLayout(head)
+        hint = CaptionLabel("每次运行只记录每步的输入/输出大小、耗时与状态,不记录任何内容;"
+                            "错误文案已脱敏。最多保留 %d 条,超出丢最旧。" % wrl.KEEP_RUNS)
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: %s;" % TER)
+        v.addWidget(hint)
+
+        body = QHBoxLayout()
+        body.setSpacing(10)
+        self.lst = QListWidget()
+        self.lst.setFont(font(12))
+        self.lst.setFixedWidth(290)
+        self.lst.setStyleSheet(
+            "QListWidget { background: %s; border-radius: 12px;"
+            " border: 1px solid %s; outline: none; padding: 4px; }"
+            "QListWidget::item { color: %s; border-radius: 8px; padding: 8px 10px; }"
+            "QListWidget::item:selected { background: %s; color: %s; }"
+            % (FIELD_BG, FIELD_BORDER, TEXT, ACCENT_SOFT, ACCENT))
+        body.addWidget(self.lst)
+
+        right = QVBoxLayout()
+        right.setSpacing(8)
+        self.lbl_sum = CaptionLabel("选择左侧一条运行查看明细")
+        self.lbl_sum.setWordWrap(True)
+        self.lbl_sum.setStyleSheet("color: %s; font-weight: 600;" % SEC)
+        right.addWidget(self.lbl_sum)
+        self.tbl = TableWidget(self)
+        self.tbl.setColumnCount(6)
+        self.tbl.setHorizontalHeaderLabels(
+            ["步骤", "类型", "状态", "输入→输出", "耗时", "说明"])
+        self.tbl.verticalHeader().hide()
+        self.tbl.setEditTriggers(TableWidget.NoEditTriggers)
+        self.tbl.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        right.addWidget(self.tbl, 1)
+        body.addLayout(right, 1)
+        v.addLayout(body, 1)
+
+        foot = QHBoxLayout()
+        b_clear = PushButton("清空记录", self)
+        b_clear.setIcon(FIF.DELETE.icon())
+        b_clear.clicked.connect(self._clear)
+        foot.addWidget(b_clear)
+        foot.addStretch(1)
+        b_close = PushButton("关闭", self)
+        b_close.clicked.connect(self.close)
+        foot.addWidget(b_close)
+        v.addLayout(foot)
+
+        self.lst.currentRowChanged.connect(self._show_run)
+        self._runs = []
+        self._reload()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        ensure_onscreen(self)
+
+    def _reload(self):
+        self._runs = wrl.load_runs()
+        self.lst.blockSignals(True)
+        self.lst.clear()
+        for r in self._runs:
+            self.lst.addItem(self._run_line(r))
+        self.lst.blockSignals(False)
+        if self._runs:
+            self.lst.setCurrentRow(0)
+        else:
+            self._show_run(-1)
+
+    @staticmethod
+    def _run_line(r):
+        t = time.strftime("%m-%d %H:%M",
+                          time.localtime(r.get("started_at") or 0))
+        status = WorkflowRunInspector._RUN_TXT.get(
+            r.get("status"), str(r.get("status")))
+        return "#%s · %s\n%s · %d 步 · %s" % (
+            r.get("id") or "?", r.get("workflow") or "?", t,
+            r.get("total_steps") or 0, status)
+
+    def _show_run(self, row):
+        self.tbl.setRowCount(0)
+        if not (0 <= row < len(self._runs)):
+            self.lbl_sum.setText("暂无运行记录" if not self._runs
+                                 else "选择左侧一条运行查看明细")
+            return
+        r = self._runs[row]
+        dur = float(r.get("finished_at") or 0) - float(r.get("started_at") or 0)
+        self.lbl_sum.setText(
+            "「%s」 输入 %s 字符 → 输出 %s 字符 · 总耗时 %s"
+            % (r.get("workflow") or "?", r.get("input_chars", 0),
+               r.get("output_chars", 0), self._fmt_sec(dur)))
+        for s in r.get("steps") or []:
+            i = self.tbl.rowCount()
+            self.tbl.insertRow(i)
+            vals = (str((s.get("idx") or 0) + 1),
+                    s.get("label") or s.get("kind") or "?",
+                    self._STATUS_TXT.get(s.get("status"),
+                                         str(s.get("status"))),
+                    "%s → %s 字符" % (s.get("input_chars", 0),
+                                      s.get("output_chars", 0)),
+                    self._fmt_ms(s.get("ms")),
+                    s.get("error") or "")
+            for c, txt in enumerate(vals):
+                self.tbl.setItem(i, c, QTableWidgetItem(str(txt)))
+
+    @staticmethod
+    def _fmt_ms(ms):
+        if ms is None:
+            return "—"
+        return "%.1f s" % (ms / 1000.0) if ms >= 1000 else "%.0f ms" % ms
+
+    @staticmethod
+    def _fmt_sec(sec):
+        if sec < 0:
+            return "—"
+        if sec >= 60:
+            return "%d 分 %.0f 秒" % (sec // 60, sec % 60)
+        return "%.1f 秒" % sec
+
+    def _clear(self):
+        if not self._runs:
+            return
+        if MessageBox("清空运行记录",
+                      "确定删除全部 %d 条运行记录?此操作不可撤销。"
+                      % len(self._runs), self).exec():
+            try:
+                wrl.clear_runs()
+            except Exception:
+                cm.log("清空运行记录失败:\n%s" % traceback.format_exc())
+            self._reload()
 
 
 # ============================================================

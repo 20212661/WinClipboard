@@ -1056,6 +1056,45 @@ check("SafeMode:快照监听状态如实标记",
 if _core_safe.store is not None:
     _core_safe.store.close()
 
+# ---- 工作流运行记录(Run Inspector 数据层,建议 18)----
+import json as _rj_json
+import workflow_runlog as _wrl
+_rlp = os.path.join(_sdir, "runs.json")
+_rec = _wrl.RunRecorder("翻译", "a" * 100, total_steps=3)
+_rec.step_start(0, "ai", "DeepSeek", "a" * 100)
+_rec.step_ok(0, "b" * 200)
+_rec.step_start(1, "human", "人工", "b" * 200)
+_rec.step_error(1, "连接超时 sk-AbCdEf1234567890AbCdEf1234567890")
+_r = _rec.finish()
+check("runlog:步骤大小/状态如实", _r["steps"][0]["output_chars"] == 200
+      and _r["steps"][1]["status"] == "error"
+      and _r["steps"][0]["ms"] is not None)
+_rj = _rj_json.dumps(_r, ensure_ascii=False)
+check("runlog:只记大小不记内容",
+      "a" * 50 not in _rj and "b" * 50 not in _rj)
+check("runlog:错误文案脱敏", "sk-AbCdEf" not in _rj)
+check("runlog:失败状态推导", _r["status"] == "failed")
+_id1 = _wrl.save_run(_r, _rlp)
+# 全部成功 → done;id 自增;最近在前
+_rec2 = _wrl.RunRecorder("总结", "x" * 10, total_steps=1)
+_rec2.step_start(0, "transform", "变换·去空白", "x" * 10)
+_rec2.step_ok(0, "y" * 5)
+_id2 = _wrl.save_run(_rec2.finish(), _rlp)
+_runs = _wrl.load_runs(_rlp)
+check("runlog:落盘往返+自增 id+最近在前",
+      _id2 == _id1 + 1 and [r["id"] for r in _runs] == [_id2, _id1]
+      and _runs[0]["status"] == "done")
+_rec3 = _wrl.RunRecorder("草稿", "z", total_steps=2)
+_rec3.step_start(0, "web", "网页", "z")
+_rec3.step_cancelled(0, "隐私门拦截")
+check("runlog:取消状态推导", _rec3.finish()["status"] == "cancelled")
+_rec4 = _wrl.RunRecorder("草稿2", "z", total_steps=2)
+_rec4.step_start(0, "if", "条件", "z")
+_rec4.step_ok(0, "z", halt=True)
+check("runlog:中途关闭=partial", _rec4.abort()["status"] == "partial")
+check("runlog:keep 截断", _wrl.save_run(_rec4.abort(), _rlp, keep=2) == 3
+      and len(_wrl.load_runs(_rlp)) == 2)
+
 # ---- 诊断快照 + 数据健康检查(diagnostics.py,建议 19/29) ----
 import diagnostics as _diag
 _dcore = make_core()
