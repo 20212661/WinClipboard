@@ -902,6 +902,92 @@ check("GC 后撤销仍可重建(内存数据兜底)",
       and core.store.count() == 2)
 core.store.close()
 
+# ---- 系统不变量(建议 34):捕获循环抑制 / 撤销窗 blob 保留 / commit 失败不删 blob ----
+# 不变量 6:应用自身写入剪贴板不得形成捕获循环(_ignore_clip_until 抑制窗)
+core = make_core()
+core._ignore_clip_until = 0.0
+_wk2 = cm.TrayWorker.__new__(cm.TrayWorker)
+_wk2.app = core
+_seen6 = []
+_o_submit6, _o_fg6 = core.submit_capture, cm.foreground_app_exe
+core.submit_capture = lambda src=None: _seen6.append(src)
+cm.foreground_app_exe = lambda: "notepad.exe"
+try:
+    _wk2.on_clip(0, 0, 0, 0)
+    check("不变量6:常态剪贴板事件正常入捕获", _seen6 == ["notepad.exe"],
+          str(_seen6))
+    core.paste_text("应用自写入文本")          # 写回剪贴板(桩),先武装抑制窗
+    _seen6.clear()
+    _wk2.on_clip(0, 0, 0, 0)
+    check("不变量6:自写剪贴板事件被抑制(不形成捕获循环)",
+          _seen6 == [] and core._ignore_clip_until > time.monotonic())
+finally:
+    core.submit_capture = _o_submit6
+    cm.foreground_app_exe = _o_fg6
+
+# 不变量 4:删除后撤销窗口内 blob 不得物理删除;宽限过后才由 GC 释放
+import hashlib as _hl6
+core = make_core()
+core.store = _st.ClipboardStore(os.path.join(_sdir, "inv_blob.db"))
+_png6 = b"\x89PNG\r\n\x1a\n" + b"inv" * 64
+_bh6 = _hl6.sha256(_png6).hexdigest()
+_bp6 = _P(cm.blob_path(_bh6))
+_bp6.parent.mkdir(parents=True, exist_ok=True)
+_bp6.write_bytes(_png6)
+core.history[:] = [{"type": "image", "content": str(_bp6), "hash": _bh6,
+                    "w": 8, "h": 8, "ts": 1.0}]
+core.store.insert(core.history[0])
+_img6 = core.history[0]
+core.soft_delete_at(0)
+core._collect_garbage()                       # 宽限未到:行在、文件必须在
+check("不变量4:撤销窗内 GC 不删 blob",
+      _bp6.exists() and core.store.blob_refcount(_bh6) == 1)
+core.undo_delete()
+check("不变量4:撤销后引用完整", _bp6.exists()
+      and core.store.blob_refcount(_bh6) == 1 and core.store.count() == 1)
+core.soft_delete_at(0)
+core.store.mark_deleted([_img6["_db"]], now=time.time() - 9999.0)
+core._collect_garbage()
+check("宽限过后 GC 才释放 blob",
+      not _bp6.exists() and core.store.blob_refcount(_bh6) == 0)
+core.store.close()
+
+# 不变量 7:数据库 commit 成功前不得删除旧 blob(故障注入:commit 模拟磁盘满)
+class _CommitBomb:
+    """让 store.db.commit() 抛 OSError,其余调用透传真实连接。"""
+    def __init__(self, inner):
+        self._inner = inner
+
+    def commit(self):
+        raise OSError("simulated disk full")
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+core = make_core()
+core.store = _st.ClipboardStore(os.path.join(_sdir, "inv_commit.db"))
+_png7 = b"\x89PNG\r\n\x1a\n" + b"inv7" * 64
+_bh7 = _hl6.sha256(_png7).hexdigest()
+_bp7 = _P(cm.blob_path(_bh7))
+_bp7.parent.mkdir(parents=True, exist_ok=True)
+_bp7.write_bytes(_png7)
+core.history[:] = [{"type": "image", "content": str(_bp7), "hash": _bh7,
+                    "w": 8, "h": 8, "ts": 1.0}]
+core.store.insert(core.history[0])
+_real7 = core.store.db
+core.store.db = _CommitBomb(_real7)
+_bombed7 = False
+try:
+    core.delete_at(0)                         # _store_del → commit 抛 → 中断
+except OSError:
+    _bombed7 = True
+_real7.rollback()                             # 丢弃未提交的 DELETE
+core.store.db = _real7
+check("不变量7:commit 失败时行与 blob 俱在",
+      _bombed7 and _bp7.exists() and core.store.blob_refcount(_bh7) == 1)
+core.store.close()
+
 # ---- Transaction:JSON 模式(无库)删除→撤销 ----
 core = make_core(history=[
     {"type": "text", "content": "j-1", "pinned": False, "ts": 2},
