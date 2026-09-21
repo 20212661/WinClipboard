@@ -3474,7 +3474,19 @@ def pygments_runs(text, lang, force=False):
     def fmt_of(tok):
         hit = fmt_cache.get(tok)
         if hit is None:
-            st = style.style_for_token(tok)
+            # 部分 token(如 YAML 的 Literal.Scalar.Plain)在样式表无映射,
+            # 本版 pygments 的 style_for_token 会直接 KeyError(soak 实捕)——
+            # 沿 Token 父链回退到最近的有样式祖先,全链缺失则按无样式。
+            st = None
+            t = tok
+            while t is not None:
+                try:
+                    st = style.style_for_token(t)
+                    break
+                except KeyError:
+                    t = t.parent
+            if st is None:
+                st = {}
             f = QTextCharFormat()
             if st.get("color"):
                 f.setForeground(QColor("#" + st["color"]))
