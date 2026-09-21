@@ -5,12 +5,14 @@
 条目显示的可能是降采样 preview(见 manager.PinImageLoader),此时 Qt 缩放
 需要换算,对外统一走 set_scale_value / scale_value,调用方无需关心。
 """
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import Qt, QRect, QRectF
 from PySide6.QtGui import QPen, QColor, QPainterPath, QFont
-from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsTextItem
+from PySide6.QtWidgets import (QGraphicsItem, QGraphicsItemGroup,
+                               QGraphicsPixmapItem, QGraphicsTextItem)
 
 from qfluentwidgets import isDarkTheme
 
+from . import annotations as _anno
 from .model import MIN_SCALE, MAX_SCALE
 
 # 选中/占位虚线画笔缓存:paint 每帧每项都会用到,按主题色名缓存避免反复构造
@@ -43,6 +45,7 @@ class PinImageItem(QGraphicsPixmapItem):
         self._fit_scale = None       # 记住「适应」比例,双击两态可预测
         self._grp_start = None       # 组拖动前各选中项位置快照
         self._note_item = None       # 单图备注(QGraphicsTextItem 子项)
+        self._anno_root = None       # 标注层根(坐标适配,QGraphicsItem 子项)
         self.setOpacity(rec.opacity)
         self.setRotation(rec.rotation)
         self.setZValue(rec.z)
@@ -50,6 +53,7 @@ class PinImageItem(QGraphicsPixmapItem):
         self._apply_scale(rec.scale)
         if rec.note:
             self.set_note(rec.note)
+        self.rebuild_annos()
 
     # ---- 锁定 ----
     @property
@@ -90,6 +94,8 @@ class PinImageItem(QGraphicsPixmapItem):
         self.setPixmap(pm)
         self._full = False
         self._apply_scale(self.rec.scale)
+        if self.rec.annos:
+            self.rebuild_annos()      # pixmap 从空到有:马赛克子项需要像素源
         self._layout_note()
 
     def set_full(self, pm):
@@ -97,6 +103,8 @@ class PinImageItem(QGraphicsPixmapItem):
         self.setPixmap(pm)
         self._full = True
         self._apply_scale(self.rec.scale)
+        if self.rec.annos:
+            self.rebuild_annos()      # 全图马赛克用更高清的像素重生成
         self._layout_note()
 
     def use_preview(self):
@@ -157,6 +165,65 @@ class PinImageItem(QGraphicsPixmapItem):
             return
         b = self.boundingRect()
         n.setPos(0, b.bottom() + 8)
+
+    # ---- 标注层(非破坏:矢量子项覆盖在图上,原图文件永不改写) ----
+    def rebuild_annos(self):
+        """按 rec.annos 重建覆盖层;空层只清理。子项在图像像素坐标系,
+        经 _anno_root 的缩放换算到当前 pixmap(preview 降采样)坐标。"""
+        if self._anno_root is not None:
+            root, self._anno_root = self._anno_root, None
+            sc = root.scene()
+            if sc is not None:
+                sc.removeItem(root)   # 连同全部子项一起离场
+            root.setParentItem(None)
+        clean = _anno.sanitize(self.rec.annos)
+        self.rec.annos = clean
+        if not clean:
+            return
+        root = QGraphicsItemGroup()   # 仅作坐标适配层:children 直接 setParentItem
+        root.setFlag(QGraphicsItem.ItemIsSelectable, False)
+        root.setParentItem(self)
+        self._anno_root = root
+        for it in _anno.build_items(clean, mosaic_patch=self._anno_mosaic):
+            it.setParentItem(root)
+        self._apply_anno_scale()
+
+    def _anno_ratio(self):
+        """图像像素 → 当前 pixmap 像素的比例(full 时 1:1)。"""
+        pm = self.pixmap()
+        rw = float(self.rec.w or 0)
+        if pm.isNull() or rw <= 0 or self._full:
+            return 1.0
+        return pm.width() / rw
+
+    def _apply_anno_scale(self):
+        if self._anno_root is not None:
+            self._anno_root.setScale(self._anno_ratio())
+
+    def _anno_mosaic(self, d):
+        """从当前显示像素(可能是 preview)生成马赛克贴片;展示近似,
+        复制/导出走 annotations.compose 用原图重算。"""
+        pm = self.pixmap()
+        if pm.isNull():
+            return None
+        k = self._anno_ratio()
+        r = QRect(int(d["x"] * k), int(d["y"] * k),
+                  max(1, int(d["w"] * k)), max(1, int(d["h"] * k)))
+        r = r.intersected(QRect(0, 0, pm.width(), pm.height()))
+        if r.width() < 2 or r.height() < 2:
+            return None
+        f = max(2, int(d.get("f", 12)))
+        part = pm.copy(r)
+        small = part.scaled(max(1, r.width() // f), max(1, r.height() // f),
+                            Qt.IgnoreAspectRatio, Qt.FastTransformation)
+        return small.scaled(r.width(), r.height(),
+                            Qt.IgnoreAspectRatio, Qt.FastTransformation)
+
+    def anno_items(self):
+        """覆盖层子项(测试/调试用)。"""
+        if self._anno_root is None:
+            return []
+        return list(self._anno_root.childItems())
 
     # ---- 占位框(图片未解码完成时可见可点) ----
     def boundingRect(self):

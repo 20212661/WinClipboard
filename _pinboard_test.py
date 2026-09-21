@@ -466,6 +466,157 @@ check("清空即删除备注", mgrN2.records[0].note == ""
 mgrN.window.close()
 mgrN2.window.close()
 
+# ============ 11. 非破坏标注层(Original + Annotations + Transform) ============
+from pinboard import annotations as ann_mod
+
+_sa = ann_mod.sanitize([
+    {"t": "rect", "x": 1, "y": 2, "w": 10, "h": 5, "c": "#00FF00", "pw": 4},
+    {"t": "rect", "x": 1, "y": 2, "w": 0, "h": 5},               # 零宽丢弃
+    {"t": "junk"},                                                # 未知类型
+    {"t": "mosaic", "x": 0, "y": 0, "w": 30, "h": 30, "f": 999},  # 因子夹紧
+    {"t": "text", "x": 5, "y": 5, "s": "  "},                     # 空文本丢弃
+    {"t": "pen", "pts": [[1, 1]]},                                # 点数不足
+    "junk-str",                                                   # 非 dict
+    {"t": "arrow", "x1": 0, "y1": 0, "x2": 9, "y2": 9,
+     "c": "red", "pw": 4},                                        # 非法色回退
+])
+check("标注:sanitize 结构过滤", len(_sa) == 3 and _sa[0]["t"] == "rect"
+      and _sa[1]["f"] == 64 and _sa[2]["t"] == "arrow"
+      and _sa[2]["c"] == ann_mod.DEFAULT_COLOR, str(_sa))
+
+_rA = PinRecord(asset="a.png", annos=[
+    {"t": "text", "x": 1, "y": 1, "s": "hi", "c": "#FFFFFF", "px": 20}])
+check("标注:record 往返", PinRecord.from_dict(_rA.to_dict()).annos == _rA.annos)
+check("标注:record 坏数据容错",
+      PinRecord.from_dict({"path": "a.png", "annos": "junk"}).annos == []
+      and PinRecord.from_dict({"path": "a.png"}).annos == [])
+
+cm.APP_DIR = os.path.join(TMP, "anno_a")
+mgrA = PinBoardManager(FakeApp())
+itA = mgrA.pin_path(make_png("a1.png", color=(4, 200, 100), size=(300, 200)),
+                    show=False)
+check("覆盖层:初始为空", itA._anno_root is None and itA.rec.annos == [])
+wait_previews(mgrA)
+_asset0 = itA.rec.asset
+_bytes0 = read_bytes(os.path.join(cm.APP_DIR, "pins", "images", _asset0))
+_annos5 = [
+    {"t": "rect", "x": 10, "y": 10, "w": 100, "h": 60,
+     "c": "#FF4040", "pw": 4},
+    {"t": "arrow", "x1": 5, "y1": 5, "x2": 80, "y2": 90,
+     "c": "#007AFF", "pw": 4},
+    {"t": "text", "x": 20, "y": 120, "s": "标注文字", "c": "#000000", "px": 26},
+    {"t": "pen", "pts": [[0, 0], [10, 20], [30, 5]], "c": "#34C759", "pw": 8},
+    {"t": "mosaic", "x": 50, "y": 50, "w": 60, "h": 40, "f": 12},
+]
+check("标注:set_annotations 成功", mgrA.set_annotations(itA, _annos5))
+check("覆盖层:5 个子项(马赛克有像素源)", len(itA.anno_items()) == 5,
+      str(len(itA.anno_items())))
+check("覆盖层:preview 换算比例 1:1(小图)",
+      abs(itA._anno_root.scale() - 1.0) < 1e-9)
+check("非破坏:资产文件字节零改动",
+      itA.rec.asset == _asset0
+      and read_bytes(os.path.join(cm.APP_DIR, "pins", "images",
+                                  _asset0)) == _bytes0)
+mgrA.save_now()
+dataA = read_json(os.path.join(cm.APP_DIR, "pins", "board.json"))
+check("标注:board.json v2 落盘", dataA.get("version") == 2
+      and len(dataA["items"][0].get("annos") or []) == 5)
+mgrA2 = PinBoardManager(FakeApp())
+check("标注:重启恢复(rec)", len(mgrA2.records[0].annos) == 5)
+itA2 = next(i for i in mgrA2.window.pin_items()
+            if i.rec is mgrA2.records[0])
+wait_previews(mgrA2)
+check("标注:重启恢复(覆盖层含马赛克)", len(itA2.anno_items()) == 5,
+      str(len(itA2.anno_items())))
+from PIL import ImageChops
+_im0 = mgrA2.composed_image(mgrA2.records[0])
+_plain = cm.Image.open(os.path.join(cm.APP_DIR, "pins", "images",
+                                    _asset0)).convert("RGB")
+check("合成:尺寸一致且标注改变像素",
+      _im0.size == (300, 200)
+      and ImageChops.difference(_im0, _plain).getbbox() is not None)
+check("合成:原图对象不被改写",
+      read_bytes(os.path.join(cm.APP_DIR, "pins", "images",
+                              _asset0)) == _bytes0)
+mgrA.window.close()
+mgrA2.window.close()
+
+
+# ---- 编辑器层流端到端(替身 open_editor) ----
+class EditorHub(FakeApp):
+    """替身 open_editor:捕获 edit_item 传出的回调与标注层参数。"""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def open_editor(self, rec, on_result=None, annos=None, layer_mode=False):
+        self.calls.append((rec, on_result, annos, layer_mode))
+
+
+cm.APP_DIR = os.path.join(TMP, "anno_edit")
+mgrE = PinBoardManager(EditorHub())
+itE = mgrE.pin_path(make_png("e1.png", color=(60, 60, 60), size=(200, 150)),
+                    show=False)
+mgrE.set_annotations(itE, [{"t": "rect", "x": 1, "y": 1, "w": 9, "h": 9,
+                            "c": "#FF4040", "pw": 4}])
+mgrE.window.edit_item(itE)
+_recE, _cb, _annosE, _layerE = mgrE.app.calls[-1]
+check("编辑流:带标注层参数", _layerE is True and _annosE == itE.rec.annos)
+_before = itE.rec.asset
+_cb({"kind": "layers", "image": "ignored", "base": None,
+     "annotations": _annos5})
+check("编辑流:纯标注编辑不动资产", itE.rec.asset == _before
+      and len(itE.rec.annos) == 5)
+img2 = Image.new("RGB", (120, 90), (250, 0, 0))
+_cb({"kind": "layers", "image": "ignored", "base": img2, "annotations": []})
+check("编辑流:底图操作才替换资产", itE.rec.asset != _before
+      and itE.rec.w == 120 and itE.rec.h == 90 and itE.rec.annos == [])
+mgrE.save_now()
+check("编辑流:旧资产清扫", not os.path.exists(os.path.join(
+    cm.APP_DIR, "pins", "images", _before)))
+mgrE.window.close()
+
+# ---- 真实编辑器:标注层恢复 / 序列化往返 / 底图置脏 ----
+import winclipboard_qt as wq
+from PySide6.QtWidgets import QWidget
+
+
+class _MiniWorker:
+    hwnd = 0
+
+
+class _EditorApp:
+    icon = None
+    worker = _MiniWorker()
+
+
+_ed_png = make_png("ed.png", color=(120, 140, 160), size=(300, 200))
+_host = QWidget()
+_got = []
+_ed = wq.ImageEditor(_EditorApp(), {"type": "image", "content": _ed_png},
+                     on_result=_got.append, parent=_host,
+                     annos=_annos5, layer_mode=True)
+check("编辑器:标注层恢复为可编辑项", len(_ed.annos) == 5)
+check("编辑器:序列化往返", ann_mod.sanitize(_ed.annotations())
+      == ann_mod.sanitize(_annos5))
+_ed.annos[0].setPos(40, 40)               # 拖动矩形标注
+check("编辑器:移动反映到序列化", _ed.annotations()[0]["x"] == 50.0
+      and _ed.annotations()[0]["y"] == 50.0)
+check("编辑器:纯标注不置脏底图", _ed._base_dirty is False)
+_ed._transform(lambda im: im.rotate(90, expand=True))
+check("编辑器:底图操作置脏并栅格化旧标注",
+      _ed._base_dirty is True and _ed.annos == []
+      and _ed.base.size == (200, 300))
+_ed._emit_layers()
+check("编辑器:层载荷(脏底图带像素)", len(_got) == 1
+      and _got[0]["kind"] == "layers" and _got[0]["base"] is not None
+      and _got[0]["base"].size == (200, 300)
+      and _got[0]["image"] == _ed_png
+      and _got[0]["annotations"] == [])
+_ed.deleteLater()
+_host.deleteLater()
+
 # ============ 结果 ============
 print()
 if FAILS:

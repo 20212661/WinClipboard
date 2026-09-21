@@ -39,6 +39,7 @@ class PinRecord:
     locked: bool = False
     visible: bool = True
     note: str = ""               # 单图备注(空串=无)
+    annos: list = field(default_factory=list)   # 标注层(dict 列表,见 annotations.py)
     w: int = 0                 # 原始像素宽高(占位框/适应/1:1 计算用)
     h: int = 0
     id: str = field(default_factory=new_id)
@@ -48,6 +49,7 @@ class PinRecord:
                 "scale": self.scale, "rotation": self.rotation,
                 "opacity": self.opacity, "z": self.z, "locked": self.locked,
                 "visible": self.visible, "note": self.note,
+                "annos": list(self.annos),
                 "w": self.w, "h": self.h}
 
     @classmethod
@@ -66,10 +68,13 @@ class PinRecord:
         scale = _f(d.get("scale"), 1.0) or 1.0
         opacity = _f(d.get("opacity"), 1.0) or 1.0
         rid = str(d.get("id") or "").strip() or new_id()
+        raw_annos = d.get("annos")
+        annos = [a for a in raw_annos[:2000]
+                 if isinstance(a, dict)] if isinstance(raw_annos, list) else []
         return cls(asset=asset, x=_f(d.get("x")), y=_f(d.get("y")),
                    scale=max(MIN_SCALE, min(MAX_SCALE, scale)),
                    rotation=_f(d.get("rotation")) % 360.0,
                    opacity=max(MIN_OPACITY, min(MAX_OPACITY, opacity)),
                    z=_f(d.get("z")), locked=bool(d.get("locked")),
                    visible=bool(d.get("visible", True)), w=w, h=h, id=rid,
-                   note=str(d.get("note") or ""))
+                   note=str(d.get("note") or ""), annos=annos)

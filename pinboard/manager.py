@@ -19,6 +19,7 @@ from perf_probe import PerfSpan
 
 from .loader import PinImageLoader
 from .model import PinRecord, MIN_SCALE
+from . import annotations as _anno
 from .storage import PinBoardStorage, IMG_EXTS
 from .window import PinBoardWindow
 
@@ -407,6 +408,25 @@ class PinBoardManager(QObject):
         self._previews[name] = pm
         it.set_preview(pm)
 
+    # ---- 非破坏标注层 ----
+    def set_annotations(self, it, annos):
+        """写标注层:只改 rec.annos + 画布覆盖显示,资产文件不动。"""
+        try:
+            clean = _anno.sanitize(annos)
+            it.rec.annos = clean
+            it.rebuild_annos()
+            self.schedule_save()
+            return True
+        except Exception:
+            cm.log("图钉画布标注层写入失败:\n%s" % traceback.format_exc())
+            return False
+
+    def composed_image(self, rec):
+        """复制/导出用合成图:原图 + 标注层(无标注即原图)。"""
+        with cm.Image.open(self.asset_full(rec.asset)) as im:
+            base = im.convert("RGB")
+        return _anno.compose(base, rec.annos)
+
     # ---- 持久化 ----
     def schedule_save(self):
         if self.persist:
@@ -421,7 +441,7 @@ class PinBoardManager(QObject):
             ctr = w.view.mapToScene(w.view.viewport().rect().center())
             z = w.view.transform().m11() or 1.0
             self.storage.save_state({
-                "version": 1,
+                "version": 2,          # v2:items[] 增加 annos 标注层(非破坏模型)
                 "geo": [w.x(), w.y(), w.width(), w.height()],
                 "open": w.isVisible() if open_ is None else bool(open_),
                 "view": [round(z, 4), round(ctr.x(), 2), round(ctr.y(), 2)],

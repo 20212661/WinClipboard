@@ -617,9 +617,8 @@ class PinBoardWindow(QWidget):
         worker = getattr(self.mgr.app, "worker", None)
         hwnd = worker.hwnd if worker is not None else 0
         try:
-            ok = cm.set_dib_to_clipboard(
-                hwnd, cm.pil_to_dib(cm.Image.open(
-                    self.mgr.asset_full(it.rec.asset))))
+            ok = cm.set_dib_to_clipboard(hwnd, cm.pil_to_dib(
+                self.mgr.composed_image(it.rec)))   # 原图+标注层现场合成
         except Exception:
             cm.log("图钉画布复制失败:\n%s" % traceback.format_exc())
             ok = False
@@ -637,13 +636,25 @@ class PinBoardWindow(QWidget):
            "w": it.rec.w, "h": it.rec.h})
 
     def edit_item(self, it):
-        """编辑标注:内置编辑器(方框/箭头/文字/马赛克/裁剪),完成
-        复制/保存后画布原地替换。不走 ShareX(需要结果回调回路)。"""
+        """编辑标注:内置编辑器(方框/箭头/文字/马赛克/裁剪),非破坏模型——
+        纯标注编辑只回写标注层(原图不动);裁剪/旋转等底图操作才替换资产。"""
         f = getattr(self.mgr.app, "open_editor", None)
         if f is None:
             return
 
         def done(result):
+            if isinstance(result, dict) and result.get("kind") == "layers":
+                ok = True
+                if result.get("base") is not None:
+                    ok = self.mgr.replace_asset_from(it, result["base"])
+                if ok:
+                    ok = self.mgr.set_annotations(
+                        it, result.get("annotations") or [])
+                (InfoBar.success if ok else InfoBar.error)(
+                    "标注已更新" if ok else "更新失败",
+                    "标注层已保存(原图未改动)" if ok else "标注层写入失败",
+                    parent=self, position=InfoBarPosition.TOP, duration=1800)
+                return
             ok = self.mgr.replace_asset_from(it, result)
             (InfoBar.success if ok else InfoBar.error)(
                 "画布已更新" if ok else "更新失败",
@@ -651,7 +662,8 @@ class PinBoardWindow(QWidget):
                 parent=self, position=InfoBarPosition.TOP, duration=1800)
 
         f({"type": "image", "content": self.mgr.asset_full(it.rec.asset),
-           "w": it.rec.w, "h": it.rec.h}, on_result=done)
+           "w": it.rec.w, "h": it.rec.h}, on_result=done,
+          annos=it.rec.annos, layer_mode=True)
 
     def edit_note(self, it):
         """单图备注:独立于其他图片,随图移动/缩放/置顶跟随(子项继承变换)。"""

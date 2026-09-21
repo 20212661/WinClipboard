@@ -3309,7 +3309,8 @@ def effective_subtype(rec):
 
 
 # ============================================================
-# Search DSL:source:vscode type:json after:2026-09-01 is:pinned 关键词
+# Search DSL:source:vscode type:json after:2026-09-01
+# before:2026-09-10 is:pinned 关键词
 # ============================================================
 DSL_TYPE_VALUES = {
     "text", "link", "image", "files",           # 分类
@@ -3348,7 +3349,8 @@ def parse_search_query(q):
         if low == "is:unpinned":
             out["pinned"] = False
             continue
-        m = re.fullmatch(r"(source|src|type|kind|after|since):(.+)", low)
+        m = re.fullmatch(r"(source|src|type|kind|after|since|before|until)"
+                         r":(.+)", low)
         if m:
             key, val = m.group(1), m.group(2)
             if key in ("source", "src"):

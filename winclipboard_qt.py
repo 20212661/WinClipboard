@@ -24,6 +24,7 @@ import clipboard_manager as cm   # 后端复用
 import perf_probe
 from perf_probe import PerfSpan, since, stamp   # 关键路径性能埋点
 from pinboard import PinBoardManager   # 图钉画布(置顶多图板)子包
+from pinboard import annotations as _anno_layer   # 标注层(非破坏模型)
 import workflow_steps as wfs   # AI 工作流 Step Contract(步骤统一契约)
 from quickpaste import QuickPasteWindow  # 快捷粘贴浮层(默认 Alt+`)
 from urllib.parse import unquote as _unquote, quote as _quote, urlsplit
@@ -2237,7 +2238,11 @@ class CompressDialog(MessageBoxBase):
             return False
         if ok:
             self.editor.lbl_status.setText("✅ 已压缩并复制到剪贴板")
-            self.editor._emit_result(img)   # 画布回写走压缩后的版本
+            if self.editor._layer_mode:
+                # 压缩产物是整图重编码:以新底图回写,标注层清空(已含在像素里)
+                self.editor._emit_layers(base_override=img, annos_override=[])
+            else:
+                self.editor._emit_result(img)   # 画布回写走压缩后的版本
             return True
         InfoBar.error("复制失败", "剪贴板被占用,请稍后重试", parent=self.editor,
                       position=InfoBarPosition.BOTTOM_LEFT)
@@ -2463,11 +2468,15 @@ class ImageEditor(QWidget):
 
     finished = Signal()            # 内嵌形态:编辑结束(完成/Esc),容器收回
 
-    def __init__(self, app, rec, on_result=None, parent=None):
+    def __init__(self, app, rec, on_result=None, parent=None,
+                 annos=None, layer_mode=False):
         super().__init__(parent)
         self.app = app
         self.rec = rec
         self._on_result = on_result     # 编辑产出回调(图钉画布回写用);None=普通编辑
+        self._layer_mode = layer_mode   # 非破坏层回写(emit annotations 而非像素)
+        self._src_path = str(rec.get("content") or "")
+        self._base_dirty = False        # 裁剪/旋转/缩放等底图操作(需替换资产)
         self._embedded = parent is not None
         if not self._embedded:
             self.setWindowTitle("图片处理%s — %s" % (
@@ -2538,6 +2547,8 @@ class ImageEditor(QWidget):
         self.view.mouseMoveEvent = self._move
         self.view.mouseReleaseEvent = self._release
         self._redraw()
+        if annos:
+            self.load_annotations(annos)   # 图钉画布回编:标注层原样恢复
 
     # ---- 工具条(底部居中悬浮药丸) ----
     COLORS = ("#000000", "#FFFFFF", "#FF4040", "#FF9500",
@@ -2941,8 +2952,10 @@ class ImageEditor(QWidget):
             it = AnnoMosaic(pm)
             it.setTransformationMode(Qt.FastTransformation)
             it.setPos(r.topLeft())
+            it._factor = 12              # 块状因子(序列化用,重生成靠原图)
         else:
             return
+        it._kind = kind                  # 序列化标记(annotations.serialize_items)
         self.scene.addItem(it)
         it._anno_init(self)
         self._z += 1
@@ -2953,32 +2966,99 @@ class ImageEditor(QWidget):
 
     @staticmethod
     def _arrow_path(p0, p1):
-        import math as _m
-        path = QPainterPath(p0)
-        path.lineTo(p1)
-        ang = _m.atan2(p1.y() - p0.y(), p1.x() - p0.x())
-        L = 14.0
-        a = 0.45
-        head = QPolygonF([
-            p1,
-            QPointF(p1.x() - L * _m.cos(ang - a), p1.y() - L * _m.sin(ang - a)),
-            QPointF(p1.x() - L * _m.cos(ang + a), p1.y() - L * _m.sin(ang + a))])
-        path.addPolygon(head)
-        path.closeSubpath()
-        return path
+        return _anno_layer.arrow_path(p0, p1)
 
-    def _mosaic_patch(self, r):
-        """区域马赛克:从原图裁剪 → 缩小 → 放大(块状),返回像素化贴片。"""
+    def _mosaic_patch(self, r, factor=12):
+        """区域马赛克:从原图裁剪 → 缩小 → 放大(块状),返回像素化贴片。
+        只存区域+因子(见 annotations),贴片每次从底图现算。"""
         rect = r.toAlignedRect().intersected(
             QRect(0, 0, self.base.width, self.base.height))
         if rect.width() < 2 or rect.height() < 2:
             return None
         region = self.base.crop((rect.x(), rect.y(),
                                  rect.right() + 1, rect.bottom() + 1))
-        small = region.resize((max(1, region.width // 12),
-                               max(1, region.height // 12)), cm.RESAMPLE)
+        small = region.resize((max(1, region.width // factor),
+                               max(1, region.height // factor)), cm.RESAMPLE)
         pix = small.resize(region.size, cm.Image.NEAREST)
         return QPixmap.fromImage(pil_to_qimage(pix))
+
+    # ---- 标注层序列化(非破坏模型:矢量参数,不含派生像素) ----
+    def annotations(self):
+        """当前标注 → 可持久化 dict 列表(图像像素坐标)。"""
+        return _anno_layer.serialize_items(self.annos)
+
+    def load_annotations(self, lst):
+        """恢复标注层(图钉画布回编):逐条重建为可交互编辑项。"""
+        loaded = []
+        for d in _anno_layer.sanitize(lst):
+            it = self._restore_anno(d)
+            if it is not None:
+                self.annos.append(it)
+                loaded.append(it)
+        if loaded:
+            self._status()
+        return loaded
+
+    def _restore_anno(self, d):
+        t = d.get("t")
+        col = QColor(d.get("c") or "#FF4040")
+        pw = float(d.get("pw") or 4.0)
+
+        def pen():
+            p = QPen(col, pw)
+            p.setCapStyle(Qt.RoundCap)
+            p.setJoinStyle(Qt.RoundJoin)
+            return p
+
+        if t in ("rect", "ellipse"):
+            r = QRectF(d["x"], d["y"], d["w"], d["h"])
+            it = AnnoRect(r) if t == "rect" else AnnoEllipse(r)
+            it.setPen(pen())
+            it.setBrush(Qt.NoBrush)
+        elif t == "arrow":
+            it = AnnoPath(self._arrow_path(
+                QPointF(0, 0),
+                QPointF(d["x2"] - d["x1"], d["y2"] - d["y1"])))
+            it.setPos(d["x1"], d["y1"])
+            p = pen()
+            p.setCosmetic(False)
+            it.setPen(p)
+            it.setBrush(col)
+        elif t == "pen":
+            pts = d["pts"]
+            path = QPainterPath(QPointF(0, 0))
+            for p in pts[1:]:
+                path.lineTo(p[0] - pts[0][0], p[1] - pts[0][1])
+            it = AnnoPath(path)
+            it.setPos(pts[0][0], pts[0][1])
+            it.setPen(pen())
+            it.setBrush(Qt.NoBrush)
+        elif t == "text":
+            it = AnnoText(str(d.get("s") or ""))
+            f = QFont(self.font())
+            f.setPixelSize(int(d.get("px") or 26))
+            f.setBold(True)
+            it.setFont(f)
+            it.setDefaultTextColor(col)
+            it.setPos(d["x"], d["y"])
+            it.setTextInteractionFlags(Qt.NoTextInteraction)
+        elif t == "mosaic":
+            pm = self._mosaic_patch(
+                QRectF(d["x"], d["y"], d["w"], d["h"]), int(d.get("f") or 12))
+            if pm is None:
+                return None
+            it = AnnoMosaic(pm)
+            it.setTransformationMode(Qt.FastTransformation)
+            it.setPos(d["x"], d["y"])
+            it._factor = int(d.get("f") or 12)
+        else:
+            return None
+        it._kind = t
+        self.scene.addItem(it)
+        it._anno_init(self)
+        self._z += 1
+        it.setZValue(self._z)
+        return it
 
     # ---- 标注管理 / 撤销 ----
     def _record(self, rec):
@@ -3010,7 +3090,8 @@ class ImageEditor(QWidget):
         self._status()
 
     def _flatten(self):
-        """把全部标注栅格化进位图(变换/裁剪前),返回旧 (base, annos) 供撤销。"""
+        """把全部标注栅格化进位图(变换/裁剪前),返回旧 (base, annos) 供撤销。
+        栅格化即底图变更:非破坏层回写时需替换资产。"""
         old = (self.base, list(self.annos))
         if self.annos:
             self._clear_preview()
@@ -3018,6 +3099,7 @@ class ImageEditor(QWidget):
             for it in self.annos:
                 self.scene.removeItem(it)
             self.annos = []
+        self._base_dirty = True
         return old
 
     def _final_image(self):
@@ -3042,6 +3124,7 @@ class ImageEditor(QWidget):
     def _transform(self, fn):
         old_base, old_annos = self._flatten()
         self.base = fn(self.base)
+        self._base_dirty = True
         self._record({"type": "img", "base": old_base, "annos": old_annos})
         self._redraw()
 
@@ -3113,6 +3196,18 @@ class ImageEditor(QWidget):
         except Exception:
             cm.log("编辑结果回写失败:\n%s" % traceback.format_exc())
 
+    def _emit_layers(self, base_override=None, annos_override=None):
+        """非破坏层回写(图钉画布):标注层 + 原图引用;只有底图被
+        裁剪/旋转等破坏性操作改写过时才携带新底图像素。"""
+        if not self._layer_mode or self._on_result is None:
+            return
+        base = base_override
+        if base is None and self._base_dirty:
+            base = self.base               # 现底图(此前的标注已在破坏性操作时栅格化)
+        annos = self.annotations() if annos_override is None else annos_override
+        self._emit_result({"kind": "layers", "image": self._src_path,
+                           "annotations": annos, "base": base})
+
     def _on_done(self):
         """✓ 完成:复制到剪贴板(画布模式同时回写画布)并关闭编辑器。"""
         self._clear_preview()
@@ -3123,7 +3218,10 @@ class ImageEditor(QWidget):
             InfoBar.error("复制失败", "剪贴板被占用,可改用「更多 → 保存到文件」",
                           parent=self, position=InfoBarPosition.TOP)
             return
-        self._emit_result(final)
+        if self._layer_mode:
+            self._emit_layers()
+        else:
+            self._emit_result(final)
         if self._embedded:
             self.finished.emit()
         else:
@@ -3139,7 +3237,10 @@ class ImageEditor(QWidget):
                 self._final_image().save(p, fmt)
                 self.lbl_status.setText("✅ 已保存: " + p)
                 self.lbl_status.adjustSize()
-                self._emit_result(p)
+                if self._layer_mode:
+                    self._emit_layers()    # 画布走非破坏层;文件是合成导出
+                else:
+                    self._emit_result(p)
             except Exception:
                 MessageBox("WinClipboard", "保存失败。", self).exec()
 
@@ -4526,11 +4627,14 @@ class ImageViewerWindow(QWidget):
     拖拽平移;双击在 适应↔原始 间切换。「编辑标注」在本窗口内切换到内嵌
     编辑器(不另开窗口),完成/Esc 自动回到查看态。"""
 
-    def __init__(self, app, rec, edit=False, on_result=None):
+    def __init__(self, app, rec, edit=False, on_result=None,
+                 annos=None, layer_mode=False):
         super().__init__(None)
         self.app = app
         self.rec = rec
         self._on_result = on_result       # 编辑产物直通回调(图钉画布回写)
+        self._init_annos = annos          # 初始标注层(图钉画布回编继续编辑)
+        self._layer_mode = layer_mode     # 非破坏回写(emit 标注层而非像素)
         self._editor = None               # 内嵌编辑器(编辑态非 None)
         path = str(rec.get("content") or "")
         pm = QPixmap(path)
@@ -4636,7 +4740,8 @@ class ImageViewerWindow(QWidget):
             return
         ed = ImageEditor(self.app, {"type": "image", "content": self.rec["content"],
                                     "w": self._pm.width(), "h": self._pm.height()},
-                         on_result=self._edited, parent=self)
+                         on_result=self._edited, parent=self,
+                         annos=self._init_annos, layer_mode=self._layer_mode)
         ed.finished.connect(self._exit_edit)
         self._editor = ed
         self.v.replaceWidget(self.view, ed)
@@ -5801,6 +5906,7 @@ class WorkflowRunner(QWidget):
         self.wf = wf
         self.steps = wf.get("steps") or []
         self.step_idx = 0
+        self._origin = content          # 工作流原始输入({origin})
         self.cur = content                 # 链上当前内容(可能是人工编辑后的)
         self.results = []                  # 每步产出的文本
         self._worker = None
@@ -6813,13 +6919,14 @@ class WinClipboardApp(QObject):
         btn.clicked.connect(self.undo_delete)
         bar.addWidget(btn)
 
-    def open_editor(self, rec, on_result=None):
+    def open_editor(self, rec, on_result=None, annos=None, layer_mode=False):
         """图片编辑入口(内置):查看器内嵌编辑模式——单窗口看图+标注,
-        不再另开编辑器窗口。"""
+        不再另开编辑器窗口。annos/layer_mode 供图钉画布非破坏标注层回编。"""
         if not os.path.exists(rec.get("content", "")):
             MessageBox("WinClipboard", "图片文件不存在,可能已被清理。", self.panel).exec()
             return
-        self.open_image_viewer(rec, edit=True, on_result=on_result)
+        self.open_image_viewer(rec, edit=True, on_result=on_result,
+                               annos=annos, layer_mode=layer_mode)
 
     def edit_image(self, rec):
         """图片编辑统一入口:优先成熟外部工具 ShareX → ksnip(编辑结果经
@@ -6920,11 +7027,14 @@ class WinClipboardApp(QObject):
         InfoBar.error("定位失败", "文件不存在或无法打开资源管理器",
                       parent=self.win, position=InfoBarPosition.TOP_RIGHT)
 
-    def open_image_viewer(self, rec, edit=False, on_result=None):
+    def open_image_viewer(self, rec, edit=False, on_result=None,
+                          annos=None, layer_mode=False):
         """打开图片查看器(缩放/平移;与文本查看器同入 _viewers 统一清理)。
-        edit=True 直接进入内嵌编辑模式;on_result 为编辑产物直通回调。"""
+        edit=True 直接进入内嵌编辑模式;on_result 为编辑产物直通回调;
+        annos/layer_mode 见 ImageEditor(图钉画布非破坏标注层)。"""
         try:
-            v = ImageViewerWindow(self, rec, edit=edit, on_result=on_result)
+            v = ImageViewerWindow(self, rec, edit=edit, on_result=on_result,
+                                  annos=annos, layer_mode=layer_mode)
             _pop_to_front(v)
             self._viewers.append(v)
             return v
