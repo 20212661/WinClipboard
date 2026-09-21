@@ -1243,6 +1243,59 @@ check("纯文本条目构造剥离 html/rtf",
                      "rtf": r"{\rtf}", "ts": 1})
       == {"type": "text", "content": "x", "ts": 1})
 
+# ---- 粘贴变换 / 类型纠正 / 窗口化虚拟化 ----
+a.core.add_item(("text", '{"k": 1, "arr": [2]}', {}, "vscode.exe"))
+pump(0.3)
+a.category = "all"; a.query = ""
+a.refresh_view(); pump(0.2)
+a.selected = 0
+_orig_send2 = cm.send_ctrl_v
+cm.send_ctrl_v = lambda: None
+_captured2 = []
+_orig_set2 = a.core._set_clipboard
+a.core._set_clipboard = lambda rec: (_captured2.append(rec), True)[1]
+try:
+    a.paste_variant("json_format")
+    check("变换粘贴:JSON 格式化入剪贴板并强制回贴",
+          _captured2 and _captured2[-1]["content"].startswith("{\n")
+          and a.core.worker.cmd_q.get_nowait()[0] == "paste"
+          and not a.win.isVisible())
+    a.win.show(); pump(0.05)
+    a.selected = 0
+    a.paste_plain()
+    check("Shift+Enter 纯文本粘贴(无富格式)",
+          _captured2[-1]["content"] == '{"k": 1, "arr": [2]}'
+          and a.core.worker.cmd_q.get_nowait()[0] == "paste")
+finally:
+    a.core._set_clipboard = _orig_set2
+    cm.send_ctrl_v = _orig_send2
+# 类型纠正:core + 生效子类型
+_trec = next((h for h in a.history if h.get("type") == "text"
+              and h.get("content", "").startswith("{")), None)
+check("前置:存在 JSON 文本条目", _trec is not None)
+if _trec is not None:
+    a.core.set_type_override(_trec, "text")
+    check("类型纠正生效与清除",
+          cm.effective_subtype(_trec) == "text")
+    a.core.set_type_override(_trec, None)
+    check("清除纠正", "type_override" not in _trec)
+# 窗口化虚拟化:注入 150 条 → 只物化 ~60;扩展后增长
+a.win.show()
+pump(0.1)
+_n0 = len(a.history)
+for _i in range(150):
+    a.history.append({"type": "text", "content": "virt-%03d" % _i,
+                      "pinned": False, "ts": time.time() + _i})
+a.query = "virt-"; a.refresh_view(); pump(0.2)
+check("虚拟化:大视图只物化窗口(≤80)",
+      len(a.panel._cards) <= 80 and a.panel._btn_more.isVisible(),
+      "cards=%d" % len(a.panel._cards))
+a.panel._extend_window()
+check("虚拟化:扩展窗口后卡片增长",
+      len(a.panel._cards) > 80, "cards=%d" % len(a.panel._cards))
+a.query = ""; a.history[:] = a.history[:_n0]
+a.refresh_view(); pump(0.1)
+
 log = open(cm.LOG_FILE, encoding="utf-8").read()
 # 「全局热键注册失败」是预期内的:测试与正在运行的真实实例抢同一个热键,
 # 且已在上方屏蔽其模态告警。其余任何异常/失败都算问题。

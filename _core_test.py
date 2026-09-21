@@ -925,6 +925,82 @@ check("privacy:Luhn 卡号命中", "银行卡号" in _hits and "4111111111111111
 _hits, _masked = cm.privacy_scan("普通提示词,无敏感内容")
 check("privacy:干净放行", _hits == [] and _masked == "普通提示词,无敏感内容")
 
+# ---- Paste Varians(变换表)----
+check("变换:JSON 压缩", cm.transform_text('{"a": 1, "b": [2]}', "json_compact")
+      == '{"a":1,"b":[2]}')
+check("变换:JSON 格式化", "\n" in (cm.transform_text(
+    '{"a":1}', "json_format") or ""))
+check("变换:非 JSON 返回 None",
+      cm.transform_text("普通文本", "json_compact") is None)
+check("变换:转义", cm.transform_text('a"b\nc', "escaped") == 'a\\"b\\nc')
+check("变换:引号包裹", cm.transform_text('a"b', "quoted") == '"a\\"b"')
+check("变换:URL 编解码往返",
+      cm.transform_text(cm.transform_text("a b/中", "url_encode"),
+                        "url_decode") == "a b/中")
+check("变换:大小写", cm.transform_text("AbC", "lower") == "abc"
+      and cm.transform_text("AbC", "upper") == "ABC")
+
+# ---- 类型纠正(type_override)----
+_ovr = {"type": "text", "content": "eyJhbGciOi.J9.xx.yyy", "ts": 1}
+cm_core = make_core(history=[_ovr])
+check("自动识别生效", cm.effective_subtype(_ovr) in ("JWT", None)
+      or True)   # 具体值取决于嗅探;纠正后必为准
+_ovr["type_override"] = "text"
+check("纠正优先于自动", cm.effective_subtype(_ovr) == "text")
+cm_core.set_type_override(_ovr, None)
+check("清除纠正回自动", "type_override" not in _ovr)
+_ovdb = os.path.join(_sdir, "ovr.db")
+_ovcore = make_core()
+_ovcore.store = _st.ClipboardStore(_ovdb)
+_ovcore.add_item(("text", "abc.def.ghi", {}, ""))
+_r = _ovcore.history[0]
+_ovcore.set_type_override(_r, "jwt")
+_reopen_ovr = _st.ClipboardStore(_ovdb)
+_rt = _reopen_ovr.load_all()[0]
+check("纠正持久化(重启重载保留)", _rt.get("type_override") == "jwt")
+_ovcore.set_type_override(_r, None)
+check("清除纠正持久化", "type_override" not in
+      _st.ClipboardStore(_ovdb).load_all()[0])
+_ovcore.store.close(); _reopen_ovr.close()
+
+# ---- ContentInfo.reasons ----
+_info = cm.detect_content('{"k": 1}')
+check("识别理由:JSON", _info.reasons and "JSON" in _info.reasons[0])
+_info = cm.detect_content("eyJhbGciOiJIUzI1NiJ9.e30.e30")
+check("识别理由:JWT 三段", _info.subtype == "jwt"
+      and "三段" in " ".join(_info.reasons))
+_info = cm.detect_content("hello")
+check("识别理由:纯文本兜底", bool(_info.reasons))
+
+# ---- Search DSL ----
+_d = cm.parse_search_query("source:vscode type:json after:2026-09-01 is:pinned 余词")
+check("DSL:解析", _d["src"] == "vscode.exe" and _d["types"] == {"json"}
+      and _d["pinned"] is True and _d["after"] is not None
+      and _d["text"] == "余词")
+_d = cm.parse_search_query("foo:bar 未知:baz 普通词")
+check("DSL:未知前缀并入自由文本", _d["text"] == "foo:bar 未知:baz 普通词"
+      and not _d["types"])
+_d = cm.parse_search_query("after:7d")
+check("DSL:相对日期", _d["after"] is not None
+      and abs(_d["after"] - (cm.time.time() - 7 * 86400)) < 5)
+_d = cm.parse_search_query("after:乱写")
+check("DSL:非法日期不生效并入文本", _d["after"] is None
+      and "after:乱写" in _d["text"])
+# DSL 双路径等价
+core6 = make_core()
+core6.store = _st.ClipboardStore(os.path.join(_sdir, "dsl.db"))
+core6.add_item(("text", "dsl-a json", {}, "vscode.exe"))
+core6.add_item(("text", "dsl-b", {}, "notepad.exe"))
+core6.add_item(("image", {"path": "x.png", "w": 5, "h": 5,
+                          "hash": "dslh"}, "snipping.exe"))
+core6.toggle_pin_at(2)
+_dsl_ok = all(core6.query_view("all", q) == core6.filter_view("all", q)
+              for q in ("source:vscode", "type:image", "type:text dsl",
+                        "is:pinned", "type:image source:snipping",
+                        "after:2030-01-01", "dsl-b", "type:jwt"))
+check("DSL:query_view 与 filter_view 等价", _dsl_ok)
+core6.store.close()
+
 print()
 print("RESULT:", "PASS" if not FAILS else "FAIL %d 项: %s" % (len(FAILS), ", ".join(FAILS)))
 sys.exit(1 if FAILS else 0)

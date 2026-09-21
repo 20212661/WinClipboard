@@ -2253,9 +2253,13 @@ class ClipboardCore:
 
     def filter_view(self, category, query="", src="", since=0.0):
         """按分类 + 关键词 + 来源应用 + 时间范围过滤,返回命中条目在
-        history 中的索引列表(内存路径;SQL 路径见 query_view)。"""
-        q = (query or "").strip().casefold()
-        src_q = (src or "").strip().lower()
+        history 中的索引列表(内存路径;SQL 路径见 query_view)。
+        查询串支持 Search DSL(source:/type:/after:/is:pinned),
+        与 query_view 语义逐条一致(parse_search_query 共用)。"""
+        dsl = parse_search_query(query)
+        q = dsl["text"].strip().casefold()
+        src_q = (src or "").strip().lower() or dsl["src"] or ""
+        since_eff = max(float(since or 0.0), dsl["after"] or 0.0)
         view = []
         for i, h in enumerate(self.history):
             t = h["type"]
@@ -2267,9 +2271,14 @@ class ClipboardCore:
                 continue
             if category == "link" and not (t == "text" and url_info(h["content"])):
                 continue
+            if dsl["types"] and not self._match_dsl_types(h, dsl["types"]):
+                continue
+            if dsl["pinned"] is not None and \
+                    bool(h.get("pinned")) != dsl["pinned"]:
+                continue
             if src_q and (h.get("src") or "").lower() != src_q:
                 continue
-            if since and float(h.get("ts", 0) or 0) < since:
+            if since_eff and float(h.get("ts", 0) or 0) < since_eff:
                 continue
             if q:
                 if q not in self._search_text(h):
@@ -2277,25 +2286,47 @@ class ClipboardCore:
             view.append(i)
         return view
 
+    _DSL_CATS = {"text", "link", "image", "files"}
+
+    @classmethod
+    def _match_dsl_types(cls, rec, types):
+        """type: token 组的判定(分类值看条目类型,子类型值看生效子类型)。
+        多个 token 全部满足(与 UI 筛选叠加语义一致)。"""
+        for t in types:
+            if t in cls._DSL_CATS:
+                if t == "link":
+                    if not (rec.get("type") == "text"
+                            and url_info(rec.get("content") or "")):
+                        return False
+                elif rec.get("type") != t:
+                    return False
+            elif effective_subtype(rec) != t:
+                return False
+        return True
+
     def query_view(self, category, query="", src="", since=0.0, limit=400):
         """视图过滤(SQL 优先):组合过滤在库上执行,返回命中条目在
         self.history 中的下标列表——与 filter_view 同序同义(UI 索引语义
-        不变)。无库(测试/加密模式)或存在未入库条目(外部直插)时,
-        整体回退内存 filter_view,行为完全一致。"""
+        不变)。查询串支持 Search DSL(source:/type:/after:/is:pinned,
+        见 parse_search_query);无库或存在未入库条目时整体回退内存路径。"""
         if getattr(self, "store", None) is None:
             return self.filter_view(category, query, src=src, since=since)
         if any(h.get("_db") is None for h in self.history):
             return self.filter_view(category, query, src=src, since=since)
-        q = (query or "").strip()
-        src_q = (src or "").strip().lower()
+        dsl = parse_search_query(query)
+        src_q = (src or "").strip().lower() or dsl["src"] or ""
+        since_eff = max(float(since or 0.0), dsl["after"] or 0.0)
         ctype = {"text": "text", "image": "image",
                  "files": "files"}.get(category)
         recs, _total = self.store.query_page(
             content_type=ctype, source_app=src_q or None,
-            since=since, q=q or None, limit=max(int(limit), 1))
+            since=since_eff, q=dsl["text"] or None,
+            pinned=dsl["pinned"], limit=max(int(limit), 1))
         if category == "link":
             recs = [r for r in recs
                     if r.get("type") == "text" and url_info(r["content"])]
+        if dsl["types"]:
+            recs = [r for r in recs if self._match_dsl_types(r, dsl["types"])]
         pos = {h["_db"]: i for i, h in enumerate(self.history)}
         out, seen = [], set()
         for r in recs:
@@ -2304,6 +2335,19 @@ class ClipboardCore:
                 seen.add(i)
                 out.append(i)
         return out
+
+    def set_type_override(self, rec, value):
+        """用户纠正条目类型(None=恢复自动)。仅当前记录,不做任何学习;
+        生效优先级:type_override > 自动识别(effective_subtype)。"""
+        if value is not None and value not in TYPE_OVERRIDES:
+            return
+        if value:
+            rec["type_override"] = value
+        else:
+            rec.pop("type_override", None)
+        if self.store is not None and rec.get("_db") is not None:
+            self.store.set_type_override(rec["_db"], value or None)
+        self._mark_dirty()
 
     # ---- 回写 / 粘贴 ----
     def copy_record(self, rec):
@@ -3010,8 +3054,10 @@ _LANG_ALIAS = {
 
 
 ContentInfo = namedtuple(
-    "ContentInfo", "category subtype lang confidence metadata")
-# (category, subtype, lang, confidence, metadata) —— 见 detect_content 文档
+    "ContentInfo", "category subtype lang confidence metadata reasons",
+    defaults=({}, ()))
+# (category, subtype, lang, confidence, metadata, reasons) —— 见 detect_content
+# reasons:判定依据列表(排障/测试用;UI 只显示 subtype,不展示置信度细节)
 
 
 def _sniff_jwt(t):
@@ -3107,56 +3153,60 @@ def detect_content(text):
     """
     t = (text or "").lstrip()
     if not t:
-        return ContentInfo("text", "plain", "text", 1.0, {})
+        return ContentInfo("text", "plain", "text", 1.0, {}, ["空内容"])
     try:
         json.loads(t)
         return ContentInfo("structured_text", "json", "json", 1.0,
-                           {"valid": True})
+                           {"valid": True}, ["完整 JSON 解析通过"])
     except Exception:
         pass
     stripped = text.strip()
     if "\n" not in stripped and _URL_RE.match(stripped):
-        return ContentInfo("url", "web_url", "text", 0.99, {})
+        return ContentInfo("url", "web_url", "text", 0.99, {},
+                           ["单行且匹配 URL 形态"])
     jwt = _sniff_jwt(t)
     if jwt is not None:
-        return ContentInfo("encoded", "jwt", "text", 0.99, {})
+        return ContentInfo("encoded", "jwt", "text", 0.99, {},
+                           ["三段结构", "base64url 有效", "header JSON 有效"])
     b64 = _sniff_base64(t)
     if b64 is not None:
         kind, raw = b64
         return ContentInfo("encoded", "base64", "text", 0.95,
-                           {"b64_kind": kind, "b64_len": len(raw)})
+                           {"b64_kind": kind, "b64_len": len(raw)},
+                           ["字符集/长度/填充符合 Base64"])
     head = t[:4000]
     if head[:5].lower() == "<?xml":
-        return ContentInfo("structured_text", "xml", "xml", 1.0, {})
+        return ContentInfo("structured_text", "xml", "xml", 1.0, {}, ["<?xml 声明"])
     if re.match(r"<(!doctype|html)\b", head, re.I):
-        return ContentInfo("markup", "html", "html", 0.9, {})
+        return ContentInfo("markup", "html", "html", 0.9, {}, ["<!doctype/html> 前缀"])
     if "\n```" in t or t.startswith("```") or re.search(r"(?m)^#{1,6} \S", head):
-        return ContentInfo("markup", "markdown", "markdown", 0.9, {})
+        return ContentInfo("markup", "markdown", "markdown", 0.9, {},
+                           ["围栏代码块或 ATX 标题"])
     delim = csv_sniff(text)
     if delim:
         return ContentInfo("structured_text", "csv", "csv", 0.93,
-                           {"delim": delim})
+                           {"delim": delim}, ["csv_sniff 定界符一致"])
     # 廉价强特征:剪贴板里多是短片段,pygments 对短文本置信度低,先用正则兜住
     if t[:2] == "#!":
         if "python" in t[:80]:
-            return ContentInfo("code", "python", "python", 0.8, {})
+            return ContentInfo("code", "python", "python", 0.8, {}, ["廉价代码强特征"])
         if re.search(r"\b(bash|zsh|sh|dash)\b", t[:80]):
-            return ContentInfo("code", "shell", "shell", 0.8, {})
+            return ContentInfo("code", "shell", "shell", 0.8, {}, ["廉价代码强特征"])
     if re.search(r"(?m)^(import\s+[\w.]+|from\s+[\w.]+\s+import\b)", head) and \
             not re.search(r"(?m)^import\s+[\w{}\s,]+\s+from\s+['\"]", head):
-        return ContentInfo("code", "python", "python", 0.8, {})
+        return ContentInfo("code", "python", "python", 0.8, {}, ["廉价代码强特征"])
     if re.search(r"(?mi)\b(const|let|var)\s+[\w$]+\s*=|function\s*[\w$]*\s*\(|=>"
                  r"|console\.(log|warn|error)\b|document\.getElement", head):
-        return ContentInfo("code", "javascript", "javascript", 0.8, {})
+        return ContentInfo("code", "javascript", "javascript", 0.8, {}, ["廉价代码强特征"])
     if re.search(r"(?m)^[\w\s.,#>-]+\{[^{}]*[\w-]+\s*:[^{}]*;[^{}]*\}", head):
-        return ContentInfo("code", "css", "css", 0.8, {})
+        return ContentInfo("code", "css", "css", 0.8, {}, ["廉价代码强特征"])
     if re.search(r"(?mi)\b(select\s+.+\s+from\b|insert\s+into\b|update\s+\w+\s+set\b"
                  r"|delete\s+from\b|create\s+(table|database|index)\b|alter\s+table\b"
                  r"|with\s+\w+\s+as\s*\()", head):
-        return ContentInfo("code", "sql", "sql", 0.8, {})
+        return ContentInfo("code", "sql", "sql", 0.8, {}, ["廉价代码强特征"])
     if re.search(r"(?m)^\s*(def\s+\w+\s*\(|class\s+\w+[:(]|@\w+(\.[\w.]+)?\s*$)",
                  head):
-        return ContentInfo("code", "python", "python", 0.8, {})
+        return ContentInfo("code", "python", "python", 0.8, {}, ["廉价代码强特征"])
     if _pg_guess_lexer is not None:
         try:
             # 采样 2000 字符:guess_lexer 对 20KB 输入需 ~36ms(预览面板每次
@@ -3165,10 +3215,152 @@ def detect_content(text):
             for a in getattr(lex, "aliases", None) or []:
                 if a in _LANG_ALIAS:
                     return ContentInfo("code", _LANG_ALIAS[a],
-                                       _LANG_ALIAS[a], 0.6, {})
+                                       _LANG_ALIAS[a], 0.6, {},
+                                       ["pygments 采样猜测(低置信)"])
         except Exception:
             pass
-    return ContentInfo("text", "plain", "text", 1.0, {})
+    return ContentInfo("text", "plain", "text", 1.0, {},
+                       ["无强形态特征,按纯文本"])
+
+
+# ============================================================
+# Paste Variants(粘贴变换)
+# ============================================================
+def _tx_json_compact(text):
+    try:
+        return json.dumps(json.loads(text), ensure_ascii=False,
+                          separators=(",", ":"))
+    except Exception:
+        return None
+
+
+def _tx_json_format(text):
+    try:
+        return json.dumps(json.loads(text), ensure_ascii=False, indent=2)
+    except Exception:
+        return None
+
+
+def _tx_url_decode(text):
+    from urllib.parse import unquote
+    return unquote(text)
+
+
+def _tx_url_encode(text):
+    from urllib.parse import quote
+    return quote(text, safe="")
+
+
+def _tx_escaped(text):
+    return json.dumps(text)[1:-1]          # JSON 字符串转义(不带引号)
+
+
+def _tx_quoted(text):
+    return json.dumps(text, ensure_ascii=False)   # 引号包裹 + 转义
+
+
+# (键, 菜单名, 变换函数);函数返回 None = 该内容不适用(菜单禁用)
+TRANSFORMS = (
+    ("plain", "纯文本", lambda t: t),
+    ("escaped", "转义(\\n \\\" …)", _tx_escaped),
+    ("quoted", "引号包裹", _tx_quoted),
+    ("json_compact", "JSON 压缩", _tx_json_compact),
+    ("json_format", "JSON 格式化", _tx_json_format),
+    ("url_decode", "URL 解码", _tx_url_decode),
+    ("url_encode", "URL 编码", _tx_url_encode),
+    ("lower", "小写", lambda t: t.lower()),
+    ("upper", "大写", lambda t: t.upper()),
+)
+TRANSFORM_BY_KEY = {k: (name, fn) for k, name, fn in TRANSFORMS}
+
+
+def transform_text(text, key):
+    """按变换键转换文本;不适用(如非 JSON 走 JSON 变换)返回 None。"""
+    entry = TRANSFORM_BY_KEY.get(key)
+    if entry is None or text is None:
+        return None
+    try:
+        return entry[1](text)
+    except Exception:
+        return None
+
+
+# ============================================================
+# 类型纠正(用户手动覆盖自动识别;仅当前记录,不学习)
+# ============================================================
+# 允许的覆盖值(None = 自动)
+TYPE_OVERRIDES = ("text", "json", "jwt", "base64", "url", "csv", "xml",
+                  "markdown", "code")
+
+
+def effective_subtype(rec):
+    """条目的生效子类型:用户纠正优先,否则轻量探测(content_badge)。"""
+    ov = rec.get("type_override")
+    if ov:
+        return ov
+    if rec.get("type") != "text":
+        return None
+    return content_badge(rec.get("content") or "")
+
+
+# ============================================================
+# Search DSL:source:vscode type:json after:2026-09-01 is:pinned 关键词
+# ============================================================
+DSL_TYPE_VALUES = {
+    "text", "link", "image", "files",           # 分类
+    "json", "jwt", "base64", "url", "csv", "xml", "markdown", "code",  # 子类型
+}
+
+
+def _dsl_after_to_ts(v):
+    """after: 的值 → 时间戳:YYYY-MM-DD / YYYY/MM/DD / Nd / Nw;不识别返回 None。"""
+    v = v.strip().lower().rstrip("s")
+    m = re.fullmatch(r"(\d+)\s*(d|w)", v)
+    if m:
+        n, unit = int(m.group(1)), m.group(2)
+        return time.time() - n * (604800 if unit == "w" else 86400)
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
+        try:
+            return time.mktime(time.strptime(v, fmt))
+        except ValueError:
+            continue
+    return None
+
+
+def parse_search_query(q):
+    """搜索串 → 结构化过滤。识别 token:source:/src: type:/kind:
+    after:/since: is:pinned is:unpinned;不认识的 xxx:yyy 与普通词
+    一样并入自由文本(宁漏判不误判)。返回 dict:
+    {src, types:set, after:float, pinned:bool|None, text}"""
+    out = {"src": None, "types": set(), "after": None,
+           "pinned": None, "text": []}
+    for tok in (q or "").split():
+        low = tok.lower()
+        if low == "is:pinned":
+            out["pinned"] = True
+            continue
+        if low == "is:unpinned":
+            out["pinned"] = False
+            continue
+        m = re.fullmatch(r"(source|src|type|kind|after|since):(.+)", low)
+        if m:
+            key, val = m.group(1), m.group(2)
+            if key in ("source", "src"):
+                out["src"] = val if val.endswith(".exe") else val + ".exe"
+                continue
+            if key in ("type", "kind"):
+                if val in DSL_TYPE_VALUES:
+                    out["types"].add(val)
+                    continue
+                # 未知类型值:当自由词(不吞用户的词)
+            if key in ("after", "since"):
+                ts = _dsl_after_to_ts(val)
+                if ts is not None:
+                    out["after"] = ts
+                    continue
+        out["text"].append(tok)
+    out["text"] = " ".join(out["text"])
+    return out
 
 
 def detect_lang(text):

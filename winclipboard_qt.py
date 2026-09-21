@@ -546,7 +546,7 @@ class Card(CardWidget):
         key = id(rec)
         got = cache.get(key)
         if got is None:
-            got = cm.content_badge(rec.get("content") or "") or ""
+            got = cm.effective_subtype(rec) or ""
             if len(cache) > 512:
                 cache.clear()
             cache[key] = got
@@ -722,6 +722,20 @@ class HistoryPage(QWidget):
         # 标签与尾部弹簧常驻,刷新零创建零销毁(见 set_view)
         self._idle = []
         self._cards = []
+        # 窗口化渲染:大视图只物化前 _win_limit 张卡,滚动到底部自动扩展
+        # (50,000 条过滤结果也只创建 ~60 个 Card Widget;滚到多深建多少)
+        self._win_limit = 60
+        self._win_chunk = 80
+        self._full_seq = []
+        self._btn_more = PushButton("", self)
+        self._btn_more.setObjectName("btnMore")
+        self._btn_more.setStyleSheet(
+            "QPushButton#btnMore { color: %s; background: transparent;"
+            " border: none; padding: 8px; }" % TER)
+        self._btn_more.setCursor(Qt.PointingHandCursor)
+        self._btn_more.clicked.connect(self._extend_window)
+        self.scroll.verticalScrollBar().valueChanged.connect(
+            self._on_scroll_maybe_extend)
         self._lab_pinned = CaptionLabel("📌 已固定")
         self._lab_recent = CaptionLabel("最近项目")
         for _lab in (self._lab_pinned, self._lab_recent):
@@ -893,7 +907,13 @@ class HistoryPage(QWidget):
         elif e.key() == Qt.Key_Up:
             self.app.move_sel(-1)
         elif e.key() == Qt.Key_Return or e.key() == Qt.Key_Enter:
-            self.app.paste_selected()
+            m = e.modifiers()
+            if m & Qt.ControlModifier and m & Qt.ShiftModifier:
+                self.app.open_transform()          # Ctrl+Shift+Enter 转换粘贴
+            elif m & Qt.ShiftModifier:
+                self.app.paste_plain()             # Shift+Enter 纯文本
+            else:
+                self.app.paste_selected()
         elif e.key() == Qt.Key_Delete:
             self.app.delete_selection_or_multi()
         else:
@@ -907,19 +927,29 @@ class HistoryPage(QWidget):
         """刷新 = 既有控件的重新排布 + 差量绑定,零销毁重建。
 
         - 卡片按 rec 身份配对回原控件(bind 幂等,同 rec 零开销),
-          配不上的从 _idle 池取,池空才新建(只增不减,上限≈条数上限);
+          配不上的从 _idle 池取,池空才新建;
         - 分组标签/尾部弹簧常驻复用,空组 hide;
-        - 视图序列与分组完全未变时连布局都不碰(重复 show/无效刷新零成本)。
+        - 视图序列与分组完全未变时连布局都不碰(重复 show/无效刷新零成本);
+        - 窗口化:大视图只物化前 _win_limit 张(滚动到底自动扩展,
+          见 _on_scroll_maybe_extend)——几万条过滤结果也只建 ~60 个控件。
         """
+        self._last_view, self._last_history = view, history
         recs = [history[i] for i in view]
-        pinned = [r for r in recs if r.get("pinned")]
-        rest = [r for r in recs if not r.get("pinned")]
-        seq = pinned + rest
+        all_seq = ([r for r in recs if r.get("pinned")]
+                   + [r for r in recs if not r.get("pinned")])
+        if [id(r) for r in self._full_seq] != [id(r) for r in all_seq]:
+            self._full_seq = all_seq
+            self._win_limit = 60               # 新视图 → 重置窗口
+        seq = self._full_seq[:self._win_limit]
+        pinned = [r for r in seq if r.get("pinned")]
+        rest = [r for r in seq if not r.get("pinned")]
         ids = [id(r) for r in seq]
+        more = len(self._full_seq) - len(seq)
 
         if ([id(c.rec) for c in self._cards] == ids
                 and self._lab_pinned.isVisible() == bool(pinned)
                 and self._lab_recent.isVisible() == bool(rest)
+                and self._btn_more.isVisible() == (more > 0)
                 and not self._empty_box.isVisible()):
             return
 
@@ -978,6 +1008,14 @@ class HistoryPage(QWidget):
             self._lab_recent.hide()
         for c in cards[len(pinned):]:
             self.cards_layout.addWidget(c)
+        if more > 0:
+            # 窗口化截断:显示扩展入口(滚动到底也自动扩展)
+            self._btn_more.setText("继续滚动加载更多(还有 %d 条)"
+                                   % more)
+            self._btn_more.setVisible(True)
+            self.cards_layout.addWidget(self._btn_more)
+        else:
+            self._btn_more.setVisible(False)
         if not seq:
             filtered = bool(history)
             self.empty_title.setText("没有找到匹配内容" if filtered else "暂无剪贴内容")
@@ -990,6 +1028,23 @@ class HistoryPage(QWidget):
             self.cards_layout.addItem(self._tail_spacer)
         for c in idle:
             c.hide()
+
+    def _extend_window(self):
+        """扩展物化窗口(+80)并增量重排;已到底时无操作。"""
+        if self._win_limit >= len(self._full_seq):
+            return
+        self._win_limit += self._win_chunk
+        self.set_view(self._last_view, self._last_history)
+
+    def _on_scroll_maybe_extend(self, value):
+        """滚动接近底部 → 自动扩展窗口(距底 <600px)。
+        滚动条未成形(max=0,内容未超视口或首次布局)与置顶态不触发,
+        防止视图刚建立就被整页自动展开。"""
+        if not self._full_seq or self._win_limit >= len(self._full_seq):
+            return
+        sb = self.scroll.verticalScrollBar()
+        if sb.maximum() > 0 and value > 0 and sb.maximum() - value < 600:
+            self._extend_window()
 
     def card_at(self, vi):
         """视图索引 → 对应卡片控件。卡片列表顺序 = 置顶组+最近组(set_view),
@@ -1049,18 +1104,18 @@ class HistoryPage(QWidget):
             self.pv_btn_json.setVisible(False)
             path = rec.get("content") or ""
             self.pv_img.clear()
-            pm = self._pv_img_cache.get(path)
-            if pm is None:
-                img = QImage(path)
-                if not img.isNull():
-                    w = min(PANEL_W - 40, img.width())
-                    pm = QPixmap.fromImage(img.scaled(
-                        w, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                    if len(self._pv_img_cache) > 32:   # FIFO,防止缓存无限增长
-                        self._pv_img_cache.pop(next(iter(self._pv_img_cache)))
-                    self._pv_img_cache[path] = pm
+            # 预览只用缓存缩略图(256px,后台生成);原图仅双击查看器加载,
+            # 列表/预览路径不再同步解码原图(大图曾把选中卡成百毫秒级)
+            pm = (getattr(app, "_thumbs", None) or {}).get(path)
             if pm is not None:
-                self.pv_img.setPixmap(pm)
+                self.pv_img.setPixmap(pm.scaled(
+                    min(PANEL_W - 40, pm.width() * 8), 128,
+                    Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                loader = getattr(app, "_thumb_loader", None)
+                if loader is not None:
+                    loader.submit(path)      # 生成完下次选中即有;本次占位
+                self.pv_img.setText("生成缩略图中…")
             self.pv_badge.setText("截图 · 放大预览")
             self.pv_stats.setText("%s × %s · 双击可全屏查看" %
                                   (rec.get("w", 0), rec.get("h", 0)))
@@ -3385,6 +3440,10 @@ class ViewerWindow(QWidget):
         # 内容识别管线:category/subtype/confidence(URL/JWT/Base64 等智能
         # 视图的数据源;手动改语言后智能视图让位 → 见 _mode_table)
         self._content = cm.detect_content(self._raw) if self._kind == "text" else None
+        # 用户类型纠正优先于自动识别(右键「类型」设置,仅本条目生效)
+        _ov = rec.get("type_override") if self._kind == "text" else None
+        if _ov and self._content is not None:
+            self._content = self._content._replace(subtype=_ov)
         self._auto_lang = self._content.lang if self._content is not None else "text"
         self._lang_index = 0                    # VIEW_LANGS 下标(0 = 自动识别)
         self._base_pt = 10                      # 100% 时的字号(磅)
@@ -4801,9 +4860,11 @@ class ThumbLoader(QObject):
             try:
                 img = QImage(path)          # 线程安全;失败得到 null 图
                 if not img.isNull():
-                    w, h = Card.THUMB
+                    # 256px 缓存:卡片(~92px)与底部预览(≤128px 高)共用,
+                    # 2x 余量;原图只在双击查看器时解码
                     self.loaded.emit(path, img.scaled(
-                        w * 2, h * 2, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                        256, 256, Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation))
             except Exception:
                 pass
             finally:
@@ -6127,6 +6188,68 @@ class WorkflowSlot:
     配置,非固定动作,故不进注册表本体)。"""
 
 
+class TransformDialog(MessageBoxBase):
+    """粘贴变换对话框(Ctrl+Shift+Enter):选变换 → 实时预览 → 粘贴/复制。"""
+
+    def __init__(self, app, rec):
+        super().__init__(app.win)
+        self.app = app
+        self.rec = rec
+        self.setWindowTitle = None
+        ttl = StrongBodyLabel("转换粘贴")
+        self.viewLayout.addWidget(ttl)
+        sub = CaptionLabel("选择变换后预览确认;「粘贴」写回剪贴板并回贴到"
+                           "原窗口(带目标窗口校验)。")
+        sub.setWordWrap(True)
+        sub.setStyleSheet("color: %s;" % TER)
+        self.viewLayout.addWidget(sub)
+
+        from PySide6.QtWidgets import QRadioButton, QVBoxLayout as _VL, QWidget as _W
+        box = _W()
+        vl = _VL(box)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(6)
+        self._btns = []
+        content = rec.get("content") or ""
+        for k, name, _fn in cm.TRANSFORMS:
+            if cm.transform_text(content, k) is None and k != "plain":
+                continue          # 不适用的变换直接不显示(如非 JSON)
+            b = QRadioButton(name)
+            b.toggled.connect(lambda on, k=k: self._update(k) if on else None)
+            vl.addWidget(b)
+            self._btns.append((k, b))
+        self.viewLayout.addWidget(box)
+        self.preview = QPlainTextEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setFixedHeight(180)
+        self.viewLayout.addWidget(self.preview)
+        b_copy = PushButton("复制")
+        b_copy.clicked.connect(self._copy)
+        self.viewLayout.addWidget(b_copy, 0, Qt.AlignRight)
+        self.yesButton.setText("粘贴并关闭")
+        self.cancelButton.setText("取消")
+        self.widget.setFixedWidth(520)
+        self._key = "plain"
+        if self._btns:
+            self._btns[0][1].setChecked(True)
+        self._update(self._key)
+
+    def _update(self, key):
+        self._key = key
+        out = cm.transform_text(self.rec.get("content") or "", key) or ""
+        self.preview.setPlainText(out[:4000])
+
+    def _copy(self):
+        out = cm.transform_text(self.rec.get("content") or "", self._key) or ""
+        self.app.core.copy_text(out)
+        InfoBar.success("已复制", "变换结果已放入剪贴板", parent=self.app.win,
+                        position=InfoBarPosition.TOP_RIGHT)
+
+    def validate(self):
+        self.app.paste_variant(self._key)
+        return True
+
+
 CLIP_ACTIONS = [
     ClipAction("粘贴", lambda r, h: h.paste_selected()),
     ClipAction("在独立窗口查看",
@@ -6462,6 +6585,47 @@ class WinClipboardApp(QObject):
             MessageBox("WinClipboard", "文件已不存在,无法粘贴。", self.win).exec()
             return
 
+    def _paste_text_now(self, text):
+        """变换粘贴的统一出口:收起主窗 + 强制回贴到意图目标窗口。"""
+        self.win.hide()
+        self.core.paste_text(text, force=True,
+                             target_hwnd=getattr(self, "_paste_target", None))
+
+    def _selected_text_rec(self):
+        if self.selected is None or self.selected >= len(self._view):
+            return None
+        rec = self.history[self._view[self.selected]]
+        return rec if rec.get("type") == "text" else None
+
+    def paste_plain(self):
+        """Shift+Enter:纯文本粘贴(paste_text 只写 CF_UNICODETEXT,不带富格式)。"""
+        rec = self._selected_text_rec()
+        if rec is not None:
+            self._paste_text_now(rec.get("content") or "")
+
+    def paste_variant(self, key):
+        """按变换键粘贴(「粘贴为」子菜单 / Transform 对话框共用)。"""
+        rec = self._selected_text_rec()
+        if rec is None:
+            return
+        out = cm.transform_text(rec.get("content") or "", key)
+        if out is None:
+            InfoBar.warning("不适用", "该内容无法应用此变换(如非 JSON)",
+                            parent=self.win, position=InfoBarPosition.TOP_RIGHT)
+            return
+        self._paste_text_now(out)
+
+    def open_transform(self):
+        """Ctrl+Shift+Enter / 菜单「转换…」:变换预览对话框。"""
+        rec = self._selected_text_rec()
+        if rec is not None:
+            TransformDialog(self, rec).exec()
+
+    def _set_type(self, rec, value):
+        """类型纠正(仅当前记录):写条目 + 库持久化 + 视图刷新。"""
+        self.core.set_type_override(rec, value)
+        self.refresh_view()
+
     # ---- 卡片动作 / 菜单 ----
     def card_action(self, act, card):
         self.select_card(card)
@@ -6493,6 +6657,31 @@ class WinClipboardApp(QObject):
             a = act(menu, "删除所选 %d 条(可撤销)" % len(self._multi_recs))
             a.triggered.connect(lambda _=False: self.delete_selection_or_multi())
             menu.addSeparator()
+        if rec.get("type") == "text":
+            # ---- 粘贴为(变换)子菜单:不适用项置灰 ----
+            sub = RoundMenu("粘贴为", self.panel)
+            for k, name, _fn in cm.TRANSFORMS:
+                a = act(sub, name)
+                if k != "plain" and \
+                        cm.transform_text(rec.get("content") or "", k) is None:
+                    a.setEnabled(False)
+                a.triggered.connect(
+                    lambda _=False, k=k: self.paste_variant(k))
+            sub.addSeparator()
+            a = act(sub, "转换…(Ctrl+Shift+Enter)")
+            a.triggered.connect(lambda _=False: self.open_transform())
+            menu.addMenu(sub)
+            # ---- 类型纠正子菜单:自动 / 纯文本 / JWT / Base64 / JSON / URL ----
+            tsub = RoundMenu("类型", self.panel)
+            cur = rec.get("type_override") or ""
+            for val, label in (("", "自动识别"), ("text", "纯文本"),
+                               ("jwt", "JWT"), ("base64", "Base64"),
+                               ("json", "JSON"), ("url", "URL")):
+                mark = "● " if val == cur else "○ "
+                a = act(tsub, mark + label)
+                a.triggered.connect(
+                    lambda _=False, v=val: self._set_type(rec, v or None))
+            menu.addMenu(tsub)
         for entry in CLIP_ACTIONS:
             if isinstance(entry, WorkflowSlot):
                 if rec["type"] != "text":
@@ -6823,8 +7012,17 @@ class WinClipboardApp(QObject):
                 "  Del   删除条目(可撤销)      Esc   关闭并回到原窗口\n"
                 "\n历史列表\n"
                 "  ↑ / ↓   移动选择      回车   粘贴选中条目\n"
+                "  Shift + 回车   纯文本粘贴(不带富文本格式)\n"
+                "  Ctrl + Shift + 回车   转换粘贴(JSON 格式化/压缩、URL 编解码、\n"
+                "                        转义、大小写等,实时预览)\n"
                 "  Esc   收起主窗口      双击卡片   打开独立查看器\n"
                 "  Ctrl + 点击   选两条记录对比(第一条设基准,第二条开对比窗口)\n"
+                "\n搜索语法(Search DSL,与筛选下拉叠加生效)\n"
+                "  source:vscode   按来源应用(自动补 .exe)\n"
+                "  type:json|jwt|base64|url|text|image|files   按类型/子类型\n"
+                "  after:2026-09-01 或 after:7d   时间起点\n"
+                "  is:pinned   只看置顶;其余词按子串搜索\n"
+                "  示例:type:image source:snipping\n"
                 "\n内容查看器\n"
                 "  Ctrl + F   浮动查找      Ctrl + = / - / 0   字号缩放\n"
                 "\n图片编辑(查看器内编辑态)\n"

@@ -204,8 +204,13 @@ class ClipboardStore:
             bmime = "image/png"
             bw, bh = rec.get("w", 0), rec.get("h", 0)
         now = time.time()
-        meta = json.dumps({"path": rec.get("content")},
-                          ensure_ascii=False) if t == "image" else None
+        meta = None
+        if t == "image":
+            meta = json.dumps({"path": rec.get("content")},
+                              ensure_ascii=False)
+        elif rec.get("type_override"):
+            meta = json.dumps({"type_override": rec["type_override"]},
+                              ensure_ascii=False)
         return (seq, float(rec.get("ts") or now), now, t,
                 rec.get("_subtype"), chash, rec.get("src"),
                 None, text, cls._search_text_of(rec), files,
@@ -230,6 +235,10 @@ class ClipboardStore:
             rec["src"] = r["source_app"]
         if r["content_subtype"]:
             rec["_subtype"] = r["content_subtype"]
+        if r["metadata_json"]:
+            _meta = json.loads(r["metadata_json"])
+            if _meta.get("type_override"):
+                rec["type_override"] = _meta["type_override"]
         rich = json.loads(r["rich_json"]) if r["rich_json"] else {}
         rec.update(rich)
         return rec
@@ -359,6 +368,25 @@ class ClipboardStore:
                 "UPDATE clipboard_items SET blob_hash=?, metadata_json=?, "
                 "updated_at=? WHERE id = ?",
                 (blob_hash, json.dumps({"path": path}, ensure_ascii=False),
+                 time.time(), int(dbid)))
+            self.db.commit()
+
+    def set_type_override(self, dbid, value):
+        """用户类型纠正持久化:合并写入 metadata_json(value 为 None 清除)。"""
+        with self._lock:
+            row = self.db.execute(
+                "SELECT metadata_json FROM clipboard_items WHERE id = ?",
+                (int(dbid),)).fetchone()
+            meta = json.loads(row["metadata_json"]) if row and \
+                row["metadata_json"] else {}
+            if value:
+                meta["type_override"] = value
+            else:
+                meta.pop("type_override", None)
+            self.db.execute(
+                "UPDATE clipboard_items SET metadata_json=?, updated_at=? "
+                "WHERE id = ?",
+                (json.dumps(meta, ensure_ascii=False) if meta else None,
                  time.time(), int(dbid)))
             self.db.commit()
 
