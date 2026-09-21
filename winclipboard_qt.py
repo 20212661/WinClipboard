@@ -27,6 +27,7 @@ from pinboard import PinBoardManager   # 图钉画布(置顶多图板)子包
 from pinboard import annotations as _anno_layer   # 标注层(非破坏模型)
 import workflow_steps as wfs   # AI 工作流 Step Contract(步骤统一契约)
 import workflow_runlog as wrl  # 工作流运行记录(Run Inspector 数据层)
+import ai                      # AI Action Bar 数据层(动作注册表/内置工作流/执行器)
 import diagnostics as diag     # 诊断快照 + 数据健康检查(纯数据层,无 UI)
 from quickpaste import QuickPasteWindow  # 快捷粘贴浮层(默认 Alt+`)
 from urllib.parse import unquote as _unquote, quote as _quote, urlsplit
@@ -444,11 +445,12 @@ class Card(CardWidget):
         root.addLayout(mid, 1)
 
         # 悬停操作按钮:首次悬停才创建(库按钮初始化各需解析一次 QSS,
-        # 实测 4 个按钮 ~5.7ms,是百张卡片首建数秒级卡顿的最大单项);
+        # 毫秒级/个,是百张卡片首建卡顿的最大单项;五个按钮含「✨ AI」);
         # 平时只留固定宽度占位容器,显隐不触发行布局重排
         self.act_btns = None
+        self._ai_btn = None
         actw = QWidget()
-        actw.setFixedSize(4 * 30 + 3 * 6, 30)
+        actw.setFixedSize(5 * 30 + 4 * 6, 30)
         self.actw = actw
         root.addWidget(actw, 0)
         root.setAlignment(actw, Qt.AlignVCenter)
@@ -564,9 +566,11 @@ class Card(CardWidget):
         actbox.setSpacing(6)
         for act, icon_name, tip in (
                 ("paste", "COPY", "粘贴"), ("pin", "PIN", "固定"),
-                ("del", "DELETE", "删除"), ("more", "MORE", "更多")):
+                ("del", "DELETE", "删除"), ("more", "MORE", "更多"),
+                ("ai", "ROBOT", "✨ AI 处理")):
             icon, txt = _fic(icon_name, {"paste": "贴", "pin": "钉",
-                                         "del": "删", "more": "⋯"}[act])
+                                         "del": "删", "more": "⋯",
+                                         "ai": "AI"}[act])
             if icon is not None:
                 b = TransparentToolButton(icon, self)
                 b.setIconSize(QSize(15, 15))
@@ -576,10 +580,14 @@ class Card(CardWidget):
             b.setFixedSize(30, 30)
             b.setCursor(Qt.PointingHandCursor)
             b.setToolTip(tip)
+            if act == "ai":
+                b.setObjectName("aiBtn")   # 测试定位 + 非文本卡片隐藏判定
             b.clicked.connect(lambda _=False, a=act: self.app.card_action(a, self))
             b.setVisible(False)
             actbox.addWidget(b)
             self.act_btns.append(b)
+            if act == "ai":
+                self._ai_btn = b
 
     def _meta(self, kind):
         return " · ".join(x for x in (kind, self.rec.get("src", ""),
@@ -587,8 +595,11 @@ class Card(CardWidget):
 
     def enterEvent(self, e):
         self._ensure_btns()
+        is_text = self.rec is not None and self.rec.get("type") == "text"
         for b in self.act_btns:
             b.setVisible(True)
+        if self._ai_btn is not None:
+            self._ai_btn.setVisible(is_text)   # AI 动作仅文本条目
         super().enterEvent(e)
 
     def leaveEvent(self, e):
@@ -5678,7 +5689,8 @@ class WorkflowEditorWindow(QWidget):
         hint = CaptionLabel("步骤类型:本地 AI(API 调用)、网页 AI(提示词进剪贴板,可选自动打开网页)、"
                             "人工确认(粘贴/编辑后继续)、复制到剪贴板、文本变换(本地白名单操作)、"
                             "条件判断(命中正则继续,未命中停链)。提示词占位符:{input}/{previous} = "
-                            "上一步产出(首步=原始输入),{origin} = 原始输入。")
+                            "上一步产出(首步=原始输入),{origin} = 原始输入。本地 AI 服务选"
+                            "「(默认服务)」= 第一个已配置的 AI 服务。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: %s;" % TER)
         v.addWidget(hint)
@@ -5747,10 +5759,13 @@ class WorkflowEditorWindow(QWidget):
 
         names = [s.get("name", "?") for s in self.app.cfg.get("ai_services") or []]
         combo = ComboBox()
+        combo.addItem("(默认服务)")     # 空服务名 = 第一个已配置的 AI 服务
         combo.addItems(names)
         cur = step.get("service")
         if cur in names:
             combo.setCurrentText(cur)
+        else:
+            combo.setCurrentIndex(0)   # 空/缺失服务 → 默认服务
         combo.setMinimumWidth(130)
 
         url_edit = LineEdit()
@@ -5845,11 +5860,8 @@ class WorkflowEditorWindow(QWidget):
             k = self._KINDS[r["kind"].currentIndex()][1]
             prompt = r["prompt"].toPlainText()
             if k == "ai":
-                svc = r["combo"].currentText().strip()
-                if not svc:
-                    InfoBar.error("无法保存", "本地 AI 步骤需要先在「AI 服务」中添加服务",
-                                  parent=self, position=InfoBarPosition.TOP_RIGHT)
-                    return
+                svc = "" if r["combo"].currentIndex() == 0 \
+                    else r["combo"].currentText().strip()
                 steps.append({"kind": "ai", "service": svc, "prompt": prompt})
             elif k == "web":
                 steps.append({"kind": "web", "prompt": prompt,
@@ -5956,7 +5968,7 @@ class WorkflowPage(QWidget):
             for st in wf.get("steps") or []:
                 k = st.get("kind", "ai")
                 parts.append("网页" if k == "web" else "人工" if k == "human"
-                             else (st.get("service") or "AI"))
+                             else (st.get("service") or "默认"))
             self.lst.addItem("%s\n%d 步:%s" % (wf.get("name", "未命名"),
                                                len(wf.get("steps") or []),
                                                " → ".join(parts)))
@@ -6886,6 +6898,12 @@ class WinClipboardApp(QObject):
         # 共享核心(状态加载 + 历史迁移 + 后台线程启动;安全模式不启线程)
         self.core = cm.ClipboardCore(safe_mode=self.safe_mode)
 
+        # AI 动作注册表:内置动作 + 用户动作目录(坏文件跳过只记日志)
+        self.ai_actions = ai.init(
+            user_dir=os.path.join(cm.APP_DIR, "ai_actions"))
+        for _src, _why in self.ai_actions.errors:
+            cm.log("AI 动作装载失败 %s:%s" % (_src, _why))
+
         self.win = MainWindow(self)
         self.panel = self.win.history_page     # 既有内部引用的稳定别名
         self._ai_runners = []
@@ -7154,6 +7172,75 @@ class WinClipboardApp(QObject):
             self.delete_selected()
         elif act == "more":
             self.card_menu(card, card.mapToGlobal(card.rect().topRight()))
+        elif act == "ai":
+            self.ai_menu(card, card.mapToGlobal(card.rect().topRight()))
+
+    # ---- ✨ AI 动作菜单(AI Action Bar;条目来自 ai/ 动作注册表) ----
+    # 菜单图标白名单:动作 JSON 的 icon 字段 → FluentIcon 成员。
+    # 固定映射而非开放取属性:图标名是外部输入(JSON),白名单之外一律无图标。
+    _AI_MENU_ICONS = {"EMBED": FIF.EMBED, "DEVELOPER_TOOLS": FIF.DEVELOPER_TOOLS,
+                      "CODE": FIF.CODE, "BOOK_SHELF": FIF.BOOK_SHELF,
+                      "DICTIONARY": FIF.DICTIONARY, "LABEL": FIF.LABEL}
+
+    def _ai_submenu(self, rec):
+        """构建「✨ AI」菜单:内置动作一键直跑 + 自定义工作流;未配置
+        服务时给引导入口。返回 RoundMenu(独立弹出或挂卡片右键子菜单)。"""
+        menu = RoundMenu("✨ AI", self.panel)
+
+        def _act(m, text):
+            a = QAction(text, m)
+            m.addAction(a)
+            return a
+
+        if (rec or {}).get("type") != "text":
+            a = _act(menu, "AI 动作仅支持文本条目")
+            a.setEnabled(False)
+            return menu
+        if not (self.cfg.get("ai_services") or []):
+            a = _act(menu, "配置 AI 服务…")
+            a.triggered.connect(self.show_services)
+            return menu
+        reg = getattr(self, "ai_actions", None) or ai.get_registry()
+        for d in reg.for_record(rec):
+            a = _act(menu, d.get("name", "?"))
+            ic = self._AI_MENU_ICONS.get(str(d.get("icon") or ""))
+            if ic is not None:
+                a.setIcon(ic.icon())
+            if d.get("description"):
+                a.setToolTip(str(d["description"]))
+            a.triggered.connect(
+                lambda _=False, d=d: self.run_ai_action(d, rec))
+        menu.addSeparator()
+        user_wfs = self.cfg.get("ai_workflows") or []
+        if user_wfs:
+            sub = RoundMenu("自定义工作流", self.panel)
+            for wf in user_wfs:
+                a = _act(sub, wf.get("name", "未命名"))
+                a.triggered.connect(
+                    lambda _=False, w=wf: self.run_workflow(w, rec))
+            sub.addSeparator()
+            am = _act(sub, "管理工作流…")
+            am.triggered.connect(self.show_ai_hub)
+            menu.addMenu(sub)
+        else:
+            a = _act(menu, "自定义工作流(先创建)…")
+            a.triggered.connect(self.show_ai_hub)
+        return menu
+
+    def ai_menu(self, card, gpos):
+        """卡片「✨ AI」按钮:在按钮旁弹出 AI 动作菜单。"""
+        rec = card.rec
+        self.select_card(card)
+        menu = self._ai_submenu(rec)
+        menu.exec(gpos)
+
+    def run_ai_action(self, defn, rec):
+        """执行注册表里的 AI 动作:解析工作流后交既有运行台(隐私门/
+        运行记录/逐步推进等能力全部继承)。"""
+        ok, msg = ai.executor.run_action(self, defn, rec)
+        if not ok:
+            InfoBar.warning("无法执行", msg, parent=self.win,
+                            position=InfoBarPosition.TOP_RIGHT)
 
     def card_menu(self, card, gpos):
         """右键菜单:条目全部来自 CLIP_ACTIONS 注册表(supported 谓词过滤),
@@ -7175,6 +7262,8 @@ class WinClipboardApp(QObject):
             a.triggered.connect(lambda _=False: self.delete_selection_or_multi())
             menu.addSeparator()
         if rec.get("type") == "text":
+            # ---- ✨ AI 一键动作(最前;条目来自 ai/ 动作注册表) ----
+            menu.addMenu(self._ai_submenu(rec))
             # ---- 粘贴为(变换)子菜单:不适用项置灰 ----
             sub = RoundMenu("粘贴为", self.panel)
             for k, name, _fn in cm.TRANSFORMS:

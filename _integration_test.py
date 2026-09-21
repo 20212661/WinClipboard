@@ -994,6 +994,75 @@ if built:
     check("菜单含 粘贴/独立窗口查看/删除",
           all(t in texts for t in ("粘贴", "在独立窗口查看", "删除")),
           str(texts))
+    # 子菜单(addMenu)进 _subMenus 不进 _actions,qfluentwidgets 渲染为列表项
+    sub_titles = [m.title() for m in built[0]._subMenus]
+    check("右键菜单含 ✨AI 子菜单", "✨ AI" in sub_titles, str(sub_titles))
+
+# ---- ✨ AI 动作菜单(AI Action Bar:卡片第 5 悬停按钮 + 一键动作) ----
+check("AI动作注册表已装载", len(a.ai_actions.all()) >= 6,
+      str(len(a.ai_actions.all())))
+if text_card is not None:
+    text_card._ensure_btns()
+    check("AI按钮:悬停条第5钮", len(text_card.act_btns) == 5,
+          str(len(text_card.act_btns)))
+    aib = text_card.findChild(wq.TransparentToolButton, "aiBtn")
+    check("AI按钮:存在且带提示", aib is not None
+          and aib.toolTip() == "✨ AI 处理")
+    text_card.enterEvent(wq.QEvent(wq.QEvent.Enter))
+    check("AI按钮:文本卡悬停可见", aib is not None and aib.isVisible())
+    for b in text_card.act_btns:
+        b.setVisible(False)
+    if img_card_menu is not None:
+        img_card_menu._ensure_btns()
+        img_aib = img_card_menu.findChild(wq.TransparentToolButton, "aiBtn")
+        img_card_menu.enterEvent(wq.QEvent(wq.QEvent.Enter))
+        check("AI按钮:图片卡隐藏", img_aib is not None
+              and not img_aib.isVisible())
+        for b in img_card_menu.act_btns:
+            b.setVisible(False)
+
+    # 菜单内容:六内置动作 + 自定义工作流入口(种子测试已配服务与工作流)
+    _ai_built = []
+    _oe_ai = wq.RoundMenu.exec
+    wq.RoundMenu.exec = lambda self, *args, **kw: _ai_built.append(self)
+    try:
+        a.card_action("ai", text_card)
+    finally:
+        wq.RoundMenu.exec = _oe_ai
+    check("AI菜单:构建不崩", bool(_ai_built))
+    if _ai_built:
+        t_ai = [x.text() for x in _ai_built[0]._actions]
+        check("AI菜单:六内置动作",
+              all(k in t_ai for k in ("解释代码", "优化代码", "生成注释",
+                                      "总结", "翻译", "转Markdown")), str(t_ai))
+        check("AI菜单:自定义工作流入口",
+              "自定义工作流" in [m.title() for m in _ai_built[0]._subMenus],
+              str(t_ai))
+
+    # 未配置任何 AI 服务:菜单退化为引导配置
+    _svcs_backup = a.cfg.get("ai_services")
+    a.cfg["ai_services"] = []
+    _ai_built2 = []
+    wq.RoundMenu.exec = lambda self, *args, **kw: _ai_built2.append(self)
+    try:
+        a.ai_menu(text_card, wq.QPoint(0, 0))
+    finally:
+        wq.RoundMenu.exec = _oe_ai
+    a.cfg["ai_services"] = _svcs_backup
+    check("AI菜单:未配置服务引导",
+          bool(_ai_built2) and
+          [x.text() for x in _ai_built2[0]._actions] == ["配置 AI 服务…"],
+          str([x.text() for x in _ai_built2[0]._actions]) if _ai_built2 else "无")
+
+    # 动作 → 运行台接线(拦截 run_workflow,不打真实 API)
+    _ran = []
+    _orig_rw = a.run_workflow
+    a.run_workflow = lambda wf, rec: _ran.append((wf, rec))
+    a.run_ai_action(a.ai_actions.get("code_explain"), text_card.rec)
+    a.run_workflow = _orig_rw
+    check("AI动作:经运行台执行", bool(_ran)
+          and _ran[0][0]["steps"][0]["kind"] == "ai"
+          and _ran[0][1] is text_card.rec, str(_ran[:1]))
 
 # ---- 预览面板(Ditto 式:选中即显示完整内容,不弹窗不展开) ----
 a.core._post(("clip", ("text", "def ping():\n    return 'pong'\n")))

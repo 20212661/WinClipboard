@@ -6,7 +6,10 @@ import os
 
 block_cipher = None
 
-datas = []
+datas = [
+    # AI 动作定义(声明式 JSON;ai/registry 运行时扫描,静态分析发现不了)
+    ("ai/actions", "ai/actions"),
+]
 
 a = Analysis(
     ["winclipboard_qt.py"],
@@ -25,6 +28,9 @@ a = Analysis(
         # 本项目模块(被字符串/延迟路径引用时兜底)
         "perf_probe",
         "pinboard",
+        "ai",
+        "ai.registry",
+        "ai.executor",
         # 可迁移加密备份(AES-256-GCM),延迟导入兜底
         "cryptography",
         "cryptography.hazmat.primitives.ciphers.aead",
