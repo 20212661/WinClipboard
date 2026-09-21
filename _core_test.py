@@ -228,6 +228,37 @@ check("明文历史往返(兼容旧格式)",
       "机密内容一二三" in _P(cm.HISTORY_FILE).read_text(encoding="utf-8")
       and cm.load_history() == _hist)
 
+# ---- 日志脱敏(SafeLogger):不变量 = 日志永不携带密钥/令牌/正文 ----
+_jwt = ("eyJhbGciOiJIUzI1NiJ9."
+        "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+        "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c")
+_s1 = cm.sanitize_log("处理失败 密码=hunter2secret token=%s" % _jwt)
+check("脱敏:键值对秘密遮盖", "hunter2secret" not in _s1 and "密码=[已遮盖]" in _s1)
+check("脱敏:JWT 遮盖", "eyJhbGci" not in _s1
+      and "[JWT已遮盖]" in cm.sanitize_log("jwt: " + _jwt))
+_s2 = cm.sanitize_log(
+    "key=sk-AbCdEf1234567890AbCdEf1234567890 "
+    "url=https://x.com/a?token=tok_abc123xyz&sig=1")
+check("脱敏:API Key 遮盖", "sk-AbCdEf" not in _s2)
+check("脱敏:URL 查询串遮盖(路径保留)",
+      "token=tok" not in _s2 and "https://x.com/a" in _s2)
+_s3 = cm.sanitize_log("hash=72acf1e2" + "a" * 56 + " 正常消息")
+check("脱敏:sha256 摘要放行(安全元数据)", "72acf1e2" in _s3)
+_s4 = cm.sanitize_log(
+    "b64=QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2"
+    "d3h5ejAxMjM0" * 3)
+check("脱敏:超长 base64 遮盖", "QUJDREVG" not in _s4 and "[长串" in _s4)
+_s5 = cm.sanitize_log("常规消息:路径 C:/Users/x/a.png 数量 3")
+check("脱敏:常规消息不受影响", _s5 == "常规消息:路径 C:/Users/x/a.png 数量 3")
+_s6 = cm.sanitize_log("超长正文" * 600)
+check("脱敏:超长截断兜底", "已截断" in _s6 and len(_s6) < 2100)
+check("脱敏:多行 traceback 结构保留",
+      "\n" in cm.sanitize_log("Traceback:\n  File x\nValueError: bad"))
+cm.log("捕获失败 密码=hunter2secret jwt=%s" % _jwt)
+_logtxt = _P(cm.LOG_FILE).read_text(encoding="utf-8")
+check("不变量8:app.log 不含密钥/JWT(端到端)",
+      "hunter2secret" not in _logtxt and "eyJhbGci" not in _logtxt)
+
 # ---- 富文本格式随条目(html/rtf + src 同批)----
 core = make_core()
 core.add_item(("text", "带格式",

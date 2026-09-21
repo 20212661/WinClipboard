@@ -657,12 +657,61 @@ def foreground_app_exe():
 # ============================================================
 _log_lock = threading.Lock()
 
+# ---- 日志脱敏(SafeLogger 兜底层)----
+# app.log 是明文落盘的诊断通道:任何剪贴板正文、密钥、令牌、URL 查询串
+# 都不允许进入。调用方纪律仍是第一道防线(只记元数据 id/type/size/hash),
+# 本层在 log() 出口做正则遮盖 + 长度截断,保证一条手滑不会泄漏 payload。
+_LOG_MAX_CHARS = 2000          # 单条上限:容得下 traceback,挡得住正文倾倒
+
+_RE_LOG_JWT = re.compile(
+    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")
+_RE_LOG_KEY = re.compile(
+    r"(sk-[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}"
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}|Bearer\s+[A-Za-z0-9._~+/=-]{12,}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----)")
+_RE_LOG_KEYVAL = re.compile(
+    r"(?i)\b(password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key"
+    r"|密码|口令|验证码|授权码)\b(\s*[:=]\s*)\S{3,}")
+_RE_LOG_URL_QUERY = re.compile(r"(\bhttps?://[^\s?'\"#]+)\?[^\s'\"#]+")
+# 64+ 连续 base64 形字符:几乎不可能是自然语言/常规日志,遮盖;
+# 纯十六进制 40/64 位(sha1/sha256)是安全的元数据,放行。
+_RE_LOG_OPAQUE = re.compile(
+    r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{64,}={0,2}(?![A-Za-z0-9+/])")
+
+
+def _mask_opaque(m):
+    s = m.group(0)
+    body = s.rstrip("=")
+    if len(body) in (40, 64) and all(c in "0123456789abcdef" for c in body):
+        return s                        # sha1/sha256 摘要:诊断友好的安全形式
+    return "[长串%d字符已遮盖]" % len(s)
+
+
+def sanitize_log(msg):
+    """日志出必经此脱敏:JWT/密钥/键值对秘密/URL 查询串/超长不透明串遮盖,
+    单条超长截断。脱敏自身异常时整条遮盖(宁废勿漏)。"""
+    try:
+        s = str(msg)
+        s = _RE_LOG_JWT.sub("[JWT已遮盖]", s)
+        s = _RE_LOG_KEY.sub("[密钥已遮盖]", s)
+        s = _RE_LOG_KEYVAL.sub(
+            lambda m: m.group(1) + m.group(2) + "[已遮盖]", s)
+        s = _RE_LOG_URL_QUERY.sub(
+            lambda m: m.group(1) + "?[查询串已遮盖]", s)
+        s = _RE_LOG_OPAQUE.sub(_mask_opaque, s)
+        if len(s) > _LOG_MAX_CHARS:
+            s = s[:_LOG_MAX_CHARS] + "…[已截断,原%d字符]" % len(s)
+        return s
+    except Exception:
+        return "[日志脱敏失败,整条遮盖]"
+
 
 def log(msg):
-    """追加运行/崩溃日志,超过 512KB 自动轮转(app.log.1/.2)。"""
+    """追加运行/崩溃日志(出口统一过 sanitize_log 脱敏),超 512KB 自动轮转。"""
     try:
         ensure_dirs()
-        line = "%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
+        line = "%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"),
+                            sanitize_log(msg))
         with _log_lock:
             if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 512 * 1024:
                 try:
