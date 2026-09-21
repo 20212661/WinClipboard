@@ -90,9 +90,10 @@ M_PAUSE = 1008                   # 暂停/恢复剪贴板监听(临时隐私模�
 ID_TIMER = 2001
 ID_TIMER_CAPTURE = 2002      # 启动剪贴板捕获(单次)
 ID_HOTKEY = 100              # 主热键(Ctrl+Shift+V)
-ID_HOTKEY_PIN = 102          # 图钉画布:直接钉剪贴板图片(Ctrl+Shift+P)
+ID_HOTKEY_PIN = 102          # 图钉画布:直接钉剪贴板图片(Ctrl+Alt+P)
 ID_HOTKEY_CTT = 103          # 图钉画布:鼠标穿透切换(Ctrl+Alt+T)
 ID_HOTKEY_QP = 104           # 快捷粘贴浮层(默认 Alt+`)
+ID_HOTKEY_PALETTE = 105      # 命令面板(默认 Ctrl+Shift+P,config 可改)
 
 # 部分 win32con 构建缺失的托盘常量,这里显式定义(避免 AttributeError)
 NIM_ADD = 0x00000000
@@ -118,6 +119,8 @@ DEFAULT_CFG = {
     "hotkey_key": 0x56,          # 'V'
     "quick_mod": MOD_ALT,
     "quick_key": 0xC0,           # '`'(VK_OEM_3):快捷粘贴浮层,Win+V 式轻入口
+    "palette_mod": MOD_CONTROL | MOD_SHIFT,
+    "palette_key": 0x50,         # 'P':命令面板(Ctrl+Shift+P,VSCode 习惯)
     "auto_paste": False,
     "sensitive_guard": True,
     "exclude_apps": [],         # 按应用排除:名单内程序的复制不入史(exe 名小写)
@@ -1349,22 +1352,33 @@ class TrayWorker(threading.Thread):
             self.app._post(("tray", "hotkey_fail"))
             log("全局热键注册失败(hotkey_mod=%d key=%d)" % (cfg["hotkey_mod"], cfg["hotkey_key"]))
         # 图钉画布热键:注册失败仅记日志/禁用对应功能,不弹模态
+        # (Ctrl+Shift+P 已让位给命令面板,直钉改 Ctrl+Alt+P,与穿透
+        #  Ctrl+Alt+T 同族)
         pin_ok = user32.RegisterHotKey(self.hwnd, ID_HOTKEY_PIN,
-                                       MOD_CONTROL | MOD_SHIFT, 0x50)   # 'P'
+                                       MOD_CONTROL | MOD_ALT, 0x50)    # 'P'
         ctt_ok = user32.RegisterHotKey(self.hwnd, ID_HOTKEY_CTT,
                                        MOD_CONTROL | MOD_ALT, 0x54)     # 'T'
         # 快捷粘贴浮层热键(默认 Alt+`):失败降级为仅设置页提示,不弹模态
         qp_ok = user32.RegisterHotKey(
             self.hwnd, ID_HOTKEY_QP,
             int(cfg.get("quick_mod", MOD_ALT)), int(cfg.get("quick_key", 0xC0)))
+        # 命令面板热键(默认 Ctrl+Shift+P):失败仅记日志(主窗内 QShortcut 兜底)
+        pal_ok = user32.RegisterHotKey(
+            self.hwnd, ID_HOTKEY_PALETTE,
+            int(cfg.get("palette_mod", MOD_CONTROL | MOD_SHIFT)),
+            int(cfg.get("palette_key", 0x50)))
         if not pin_ok:
-            log("图钉热键(Ctrl+Shift+P)被占用,直钉剪贴板不可用")
+            log("图钉热键(Ctrl+Alt+P)被占用,直钉剪贴板不可用")
         if not ctt_ok:
             log("穿透热键(Ctrl+Alt+T)被占用,鼠标穿透已禁用")
         if not qp_ok:
             log("快捷粘贴热键(%s)被占用,浮层入口不可用(可在设置页录制新组合)"
                 % hotkey_label(cfg.get("quick_mod", MOD_ALT),
                                cfg.get("quick_key", 0xC0)))
+        if not pal_ok:
+            log("命令面板热键(%s)被占用,面板仍可从主窗口内 Ctrl+Shift+P 唤起"
+                % hotkey_label(cfg.get("palette_mod", MOD_CONTROL | MOD_SHIFT),
+                               cfg.get("palette_key", 0x50)))
         self.app._post(("ctt_hotkey_state", bool(ctt_ok)))
         self.app._post(("qp_hotkey_state", bool(qp_ok)))
         user32.SetTimer(self.hwnd, ID_TIMER, 80, None)
@@ -1387,6 +1401,7 @@ class TrayWorker(threading.Thread):
             lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_PIN),
             lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_CTT),
             lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_QP),
+            lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_PALETTE),
             lambda: user32.RemoveClipboardFormatListener(self.hwnd),
         ):
             try:
@@ -1435,6 +1450,8 @@ class TrayWorker(threading.Thread):
             self.app._post(("ctt_hotkey",))
         elif wp == ID_HOTKEY_QP:
             self.app._post(("qp_hotkey",))
+        elif wp == ID_HOTKEY_PALETTE:
+            self.app._post(("palette_hotkey",))
         else:
             self.app._post(("hotkey",))
         return 0

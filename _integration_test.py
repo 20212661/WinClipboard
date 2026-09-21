@@ -1064,6 +1064,46 @@ if text_card is not None:
           and _ran[0][0]["steps"][0]["kind"] == "ai"
           and _ran[0][1] is text_card.rec, str(_ran[:1]))
 
+# ---- 命令面板(Ctrl+Shift+P):注册表 + 浮层 + 热键接线 ----
+check("命令目录已注册", len(a.commands) >= 30, str(len(a.commands)))
+check("命令分组齐全", set(a.commands.categories()) >=
+      {"剪贴板", "查看与对比", "AI", "图钉画布", "导航", "应用"},
+      str(a.commands.categories()))
+check("面板热键默认 Ctrl+Shift+P",
+      cm.DEFAULT_CFG.get("palette_key") == 0x50
+      and cm.DEFAULT_CFG.get("palette_mod") == (cm.MOD_CONTROL | cm.MOD_SHIFT)
+      and cm.ID_HOTKEY_PALETTE == 105)
+_hk_txt = a.shortcut_help_text()
+check("帮助含 命令面板/图钉新键", "命令面板" in _hk_txt
+      and "Ctrl + Alt + P" in _hk_txt and "Ctrl+Shift+P" in _hk_txt)
+
+_ms = a.palette.open()
+pump(0.1)
+check("面板可打开", a.palette.isVisible() and isinstance(_ms, (int, float)))
+check("面板空查询显示全部",
+      a.palette.model.rowCount() == len(a.commands.search("")),
+      "%d vs %d" % (a.palette.model.rowCount(), len(a.commands.search(""))))
+a.palette.search.setText("总结")
+pump(0.2)                       # 60ms 防抖结算
+_ids = [c.id for c in a.palette._cmds]
+check("面板过滤 AI 总结", _ids and _ids[0] == "ai.summarize", str(_ids))
+a.palette.search.clear()
+a.palette.refresh()
+_target = next(i for i, c in enumerate(a.palette._cmds)
+               if c.id == "nav.settings")
+a.palette._sel = _target
+a.palette.exec_current()
+pump(0.2)
+check("面板执行导航命令",
+      a.win.stackedWidget.currentWidget() is a.win.settings_page
+      and not a.palette.isVisible())
+a.signal_q.put(("palette_hotkey",))
+a._drain_events()
+check("palette_hotkey 信号打开面板", a.palette.isVisible())
+a.palette.close_restore()
+a.win.switchTo(a.win.history_page)   # 导航命令测试后回到历史页(后续预览断言在此页)
+pump(0.2)
+
 # ---- 预览面板(Ditto 式:选中即显示完整内容,不弹窗不展开) ----
 a.core._post(("clip", ("text", "def ping():\n    return 'pong'\n")))
 a.core._post(("clip", ("text", '{"k":1}')))

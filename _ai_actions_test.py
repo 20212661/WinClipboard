@@ -23,6 +23,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ---- 隔离持久化路径 ----
 import clipboard_manager as cm
 
+# 假 AI 服务器在 127.0.0.1:openai SDK(httpx)默认读系统代理,本地回环
+# 走代理会偶发连不上(测试进程内绕开全部代理,只影响本测试)
+os.environ["NO_PROXY"] = os.environ["no_proxy"] = "*"
+
 TMP = tempfile.mkdtemp(prefix="wclb_aiact_test_")
 cm.APP_DIR = TMP
 cm.IMAGE_DIR = os.path.join(TMP, "images")

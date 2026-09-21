@@ -28,8 +28,10 @@ from pinboard import annotations as _anno_layer   # 标注层(非破坏模型)
 import workflow_steps as wfs   # AI 工作流 Step Contract(步骤统一契约)
 import workflow_runlog as wrl  # 工作流运行记录(Run Inspector 数据层)
 import ai                      # AI Action Bar 数据层(动作注册表/内置工作流/执行器)
+import command                 # 命令注册表(Command Palette 数据层)
 import diagnostics as diag     # 诊断快照 + 数据健康检查(纯数据层,无 UI)
 from quickpaste import QuickPasteWindow  # 快捷粘贴浮层(默认 Alt+`)
+from palette import CommandPaletteWindow  # 命令面板浮层(默认 Ctrl+Shift+P)
 from urllib.parse import unquote as _unquote, quote as _quote, urlsplit
 
 from PySide6.QtCore import (Qt, QTimer, QRectF, QRect, QSize, QEvent, QPropertyAnimation,
@@ -6920,6 +6922,15 @@ class WinClipboardApp(QObject):
         # 打开只做过滤 + show,目标 <100ms
         self.quick = QuickPasteWindow(self)
 
+        # 命令面板(Ctrl+Shift+P):全部功能注册成命令,一个快捷键直达;
+        # 全局热键在核心线程注册(被占用仅记日志),此处再挂主窗内
+        # QShortcut 兜底(主窗口聚焦时同样可唤起)
+        self.commands = command.CommandRegistry()
+        command.builtin.register_builtin(self.commands, self)
+        self.palette = CommandPaletteWindow(self)
+        _pal_sc = QShortcut(QKeySequence("Ctrl+Shift+P"), self.win)
+        _pal_sc.activated.connect(self.palette.toggle)
+
         # 定时器必须先于启动事件排空创建。ClipboardCore 构造时已经启动
         # 托盘/剪贴板线程,启动捕获可能在事件桥接通前积压 change 信号；
         # 若先 _drain_events(),可在 _on_history_change() 里访问到尚不存在的
@@ -7610,11 +7621,17 @@ class WinClipboardApp(QObject):
                              self.cfg.get("hotkey_key", 0x56))
         qk = cm.hotkey_label(self.cfg.get("quick_mod", cm.MOD_ALT),
                              self.cfg.get("quick_key", 0xC0))
+        pal = cm.hotkey_label(
+            self.cfg.get("palette_mod", cm.MOD_CONTROL | cm.MOD_SHIFT),
+            self.cfg.get("palette_key", 0x50))
         return ("全局\n"
                 "  %s   显示 / 隐藏主窗口(设置页可按键录制更改)\n"
                 "  %s   快捷粘贴浮层(Win+V 式:搜索 + ↑↓ + 回车粘贴)\n"
-                "  Ctrl + Shift + P   剪贴板图片直钉到画布\n"
+                "  %s   命令面板(全部功能一键直达,见下)\n"
+                "  Ctrl + Alt + P   剪贴板图片直钉到画布\n"
                 "  Ctrl + Alt + T   画布鼠标穿透切换\n"
+                "\n命令面板(%s)\n"
+                "  输入即过滤全部功能 · ↑↓ 选择 · Enter 执行 · Ctrl+1~9 直选 · Esc 返回\n"
                 "\n快捷粘贴浮层(%s)\n"
                 "  ↑ / ↓   选择      回车   粘贴      Shift + 回车   纯文本粘贴\n"
                 "  Ctrl + 回车   打开查看器      Ctrl + 1~9   直选粘贴\n"
@@ -7640,7 +7657,7 @@ class WinClipboardApp(QObject):
                 "  Ctrl + Z   撤销      Del   删除选中标注      Esc   放弃编辑\n"
                 "\n系统托盘\n"
                 "  左键   切换面板      右键   菜单(暂停监听 / 清空 / 退出)"
-                % (hk, qk, qk))
+                % (hk, qk, pal, qk, pal))
 
     def show_shortcut_help(self):
         MessageBox("快捷键与操作", self.shortcut_help_text(), self.win).exec()
@@ -7774,6 +7791,9 @@ class WinClipboardApp(QObject):
         elif kind == "qp_hotkey":           # Alt+`:快捷粘贴浮层
             with PerfSpan("quickpaste_open"):
                 self.quick.toggle()
+        elif kind == "palette_hotkey":      # Ctrl+Shift+P:命令面板
+            with PerfSpan("palette_open"):
+                self.palette.toggle()
         elif kind == "qp_hotkey_state":     # 启动期快捷粘贴热键注册结果
             self._qp_hotkey_ok = bool(rest[0])
             try:
