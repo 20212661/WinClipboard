@@ -986,6 +986,12 @@ check("DSL:相对日期", _d["after"] is not None
 _d = cm.parse_search_query("after:乱写")
 check("DSL:非法日期不生效并入文本", _d["after"] is None
       and "after:乱写" in _d["text"])
+_d = cm.parse_search_query("before:2030-01-01 until:2w")
+check("DSL:before/until 解析", _d["before"] is not None
+      and abs(_d["before"] - (cm.time.time() - 2 * 604800)) < 5)
+_d = cm.parse_search_query("before:乱写")
+check("DSL:非法 before 并入文本", _d["before"] is None
+      and "before:乱写" in _d["text"])
 # DSL 双路径等价
 core6 = make_core()
 core6.store = _st.ClipboardStore(os.path.join(_sdir, "dsl.db"))
@@ -997,8 +1003,17 @@ core6.toggle_pin_at(2)
 _dsl_ok = all(core6.query_view("all", q) == core6.filter_view("all", q)
               for q in ("source:vscode", "type:image", "type:text dsl",
                         "is:pinned", "type:image source:snipping",
-                        "after:2030-01-01", "dsl-b", "type:jwt"))
+                        "after:2030-01-01", "before:2030-01-01",
+                        "before:2000-01-01", "after:2000-01-01 before:2030-01-01",
+                        "dsl-b", "type:jwt"))
 check("DSL:query_view 与 filter_view 等价", _dsl_ok)
+check("DSL:before 上界过滤(内存)",
+      core6.filter_view("all", "before:2000-01-01") == []
+      and len(core6.filter_view("all", "before:2030-01-01")) == 3)
+_now = cm.time.time()
+check("DSL:store.query until 参数",
+      len(core6.store.query(until=_now + 3600)) == 3
+      and core6.store.query(until=_now - 3600) == [])
 core6.store.close()
 
 print()

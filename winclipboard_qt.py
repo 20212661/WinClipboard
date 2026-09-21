@@ -7021,6 +7021,7 @@ class WinClipboardApp(QObject):
                 "  source:vscode   按来源应用(自动补 .exe)\n"
                 "  type:json|jwt|base64|url|text|image|files   按类型/子类型\n"
                 "  after:2026-09-01 或 after:7d   时间起点\n"
+                "  before:2026-09-10 或 before:3d   时间上界\n"
                 "  is:pinned   只看置顶;其余词按子串搜索\n"
                 "  示例:type:image source:snipping\n"
                 "\n内容查看器\n"

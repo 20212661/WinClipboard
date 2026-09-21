@@ -2254,12 +2254,13 @@ class ClipboardCore:
     def filter_view(self, category, query="", src="", since=0.0):
         """按分类 + 关键词 + 来源应用 + 时间范围过滤,返回命中条目在
         history 中的索引列表(内存路径;SQL 路径见 query_view)。
-        查询串支持 Search DSL(source:/type:/after:/is:pinned),
+        查询串支持 Search DSL(source:/type:/after:/before:/is:pinned),
         与 query_view 语义逐条一致(parse_search_query 共用)。"""
         dsl = parse_search_query(query)
         q = dsl["text"].strip().casefold()
         src_q = (src or "").strip().lower() or dsl["src"] or ""
         since_eff = max(float(since or 0.0), dsl["after"] or 0.0)
+        before_eff = dsl["before"]
         view = []
         for i, h in enumerate(self.history):
             t = h["type"]
@@ -2279,6 +2280,8 @@ class ClipboardCore:
             if src_q and (h.get("src") or "").lower() != src_q:
                 continue
             if since_eff and float(h.get("ts", 0) or 0) < since_eff:
+                continue
+            if before_eff and float(h.get("ts", 0) or 0) >= before_eff:
                 continue
             if q:
                 if q not in self._search_text(h):
@@ -2307,8 +2310,9 @@ class ClipboardCore:
     def query_view(self, category, query="", src="", since=0.0, limit=400):
         """视图过滤(SQL 优先):组合过滤在库上执行,返回命中条目在
         self.history 中的下标列表——与 filter_view 同序同义(UI 索引语义
-        不变)。查询串支持 Search DSL(source:/type:/after:/is:pinned,
-        见 parse_search_query);无库或存在未入库条目时整体回退内存路径。"""
+        不变)。查询串支持 Search DSL(source:/type:/after:/before:
+        /is:pinned,见 parse_search_query);无库或存在未入库条目时整体
+        回退内存路径。"""
         if getattr(self, "store", None) is None:
             return self.filter_view(category, query, src=src, since=since)
         if any(h.get("_db") is None for h in self.history):
@@ -2320,7 +2324,8 @@ class ClipboardCore:
                  "files": "files"}.get(category)
         recs, _total = self.store.query_page(
             content_type=ctype, source_app=src_q or None,
-            since=since_eff, q=dsl["text"] or None,
+            since=since_eff, until=dsl["before"] or None,
+            q=dsl["text"] or None,
             pinned=dsl["pinned"], limit=max(int(limit), 1))
         if category == "link":
             recs = [r for r in recs
@@ -3312,8 +3317,9 @@ DSL_TYPE_VALUES = {
 }
 
 
-def _dsl_after_to_ts(v):
-    """after: 的值 → 时间戳:YYYY-MM-DD / YYYY/MM/DD / Nd / Nw;不识别返回 None。"""
+def _dsl_date_to_ts(v):
+    """after:/before: 的值 → 时间戳:YYYY-MM-DD / YYYY/MM/DD / Nd / Nw;
+    不识别返回 None。"""
     v = v.strip().lower().rstrip("s")
     m = re.fullmatch(r"(\d+)\s*(d|w)", v)
     if m:
@@ -3329,10 +3335,10 @@ def _dsl_after_to_ts(v):
 
 def parse_search_query(q):
     """搜索串 → 结构化过滤。识别 token:source:/src: type:/kind:
-    after:/since: is:pinned is:unpinned;不认识的 xxx:yyy 与普通词
-    一样并入自由文本(宁漏判不误判)。返回 dict:
-    {src, types:set, after:float, pinned:bool|None, text}"""
-    out = {"src": None, "types": set(), "after": None,
+    after:/since: before:/until: is:pinned is:unpinned;不认识的
+    xxx:yyy 与普通词一样并入自由文本(宁漏判不误判)。返回 dict:
+    {src, types:set, after:float, before:float, pinned:bool|None, text}"""
+    out = {"src": None, "types": set(), "after": None, "before": None,
            "pinned": None, "text": []}
     for tok in (q or "").split():
         low = tok.lower()
@@ -3354,9 +3360,14 @@ def parse_search_query(q):
                     continue
                 # 未知类型值:当自由词(不吞用户的词)
             if key in ("after", "since"):
-                ts = _dsl_after_to_ts(val)
+                ts = _dsl_date_to_ts(val)
                 if ts is not None:
                     out["after"] = ts
+                    continue
+            if key in ("before", "until"):
+                ts = _dsl_date_to_ts(val)
+                if ts is not None:
+                    out["before"] = ts
                     continue
         out["text"].append(tok)
     out["text"] = " ".join(out["text"])

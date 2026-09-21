@@ -423,31 +423,39 @@ class ClipboardStore:
                 p, p, qlike, qlike)
 
     def query(self, content_type=None, source_app=None, since=0.0,
-              q=None, pinned=None, limit=None, offset=0):
-        """参数化组合查询,返回 id 列表(seq 降序)。q 为子串语义(LIKE)。"""
-        a = self._filter_args(content_type, source_app, since, q, pinned)
+              q=None, pinned=None, until=None, limit=None, offset=0):
+        """参数化组合查询,返回 id 列表(seq 降序)。q 为子串语义(LIKE);
+        until 为时间上界(created_at < until,None 不过滤)。"""
+        u = None if until is None else float(until)
+        a = self._filter_args(content_type, source_app, since, q,
+                              pinned) + (u, u)
         sql = ("SELECT id FROM clipboard_items WHERE state='active' "
                "AND (? IS NULL OR content_type = ?) "
                "AND (? IS NULL OR source_app = ?) "
                "AND (? = 0 OR created_at >= ?) "
                "AND (? IS NULL OR is_pinned = ?) "
                "AND (? IS NULL OR search_text LIKE ?) "
+               "AND (? IS NULL OR created_at < ?) "
                "ORDER BY seq DESC LIMIT ? OFFSET ?")
         args = a + (10 ** 9 if limit is None else int(limit), int(offset))
         with self._lock:
             return [r["id"] for r in self.db.execute(sql, args).fetchall()]
 
     def query_page(self, content_type=None, source_app=None, since=0.0,
-                   q=None, pinned=None, limit=200, offset=0):
-        """分页查询:返回 (rec 列表, 命中总数)。rec 与内存条目同构(含 _db)。"""
-        a = self._filter_args(content_type, source_app, since, q, pinned)
+                   q=None, pinned=None, until=None, limit=200, offset=0):
+        """分页查询:返回 (rec 列表, 命中总数)。rec 与内存条目同构(含 _db)。
+        until 为时间上界(created_at < until,None 不过滤)。"""
+        u = None if until is None else float(until)
+        a = self._filter_args(content_type, source_app, since, q,
+                              pinned) + (u, u)
         total_sql = ("SELECT COUNT(*) AS c FROM clipboard_items "
                      "WHERE state='active' "
                      "AND (? IS NULL OR content_type = ?) "
                      "AND (? IS NULL OR source_app = ?) "
                      "AND (? = 0 OR created_at >= ?) "
                      "AND (? IS NULL OR is_pinned = ?) "
-                     "AND (? IS NULL OR search_text LIKE ?)")
+                     "AND (? IS NULL OR search_text LIKE ?) "
+                     "AND (? IS NULL OR created_at < ?)")
         page_sql = ("SELECT id, seq, created_at, updated_at, content_type, "
                     "content_subtype, content_hash, source_app, source_window, "
                     "text_content, search_text, files_json, rich_json, "
@@ -459,6 +467,7 @@ class ClipboardStore:
                     "AND (? = 0 OR created_at >= ?) "
                     "AND (? IS NULL OR is_pinned = ?) "
                     "AND (? IS NULL OR search_text LIKE ?) "
+                    "AND (? IS NULL OR created_at < ?) "
                     "ORDER BY seq DESC LIMIT ? OFFSET ?")
         with self._lock:
             total = int(self.db.execute(total_sql, a).fetchone()["c"])
