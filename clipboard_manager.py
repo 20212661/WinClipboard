@@ -3466,9 +3466,13 @@ def ai_service_by_name(cfg, name):
     return None
 
 
-def render_prompt(prompt, content):
-    """提示词模板渲染:{input} 占位符替换为输入内容。"""
-    return str(prompt or "").replace("{input}", str(content or ""))
+def render_prompt(prompt, content, previous=None):
+    """提示词模板渲染:{input} 占位符替换为输入内容;给了 previous 时
+    先插 {previous}(工作流 Step Contract 的占位符,见 workflow_steps)。"""
+    s = str(prompt or "")
+    if previous is not None:
+        s = s.replace("{previous}", str(previous))
+    return s.replace("{input}", str(content or ""))
 
 
 # ---- AI 调用引擎:openai SDK 优先(统一 OpenAI 兼容端点的标准客户端),

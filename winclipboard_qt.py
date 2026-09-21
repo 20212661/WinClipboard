@@ -24,6 +24,7 @@ import clipboard_manager as cm   # 后端复用
 import perf_probe
 from perf_probe import PerfSpan, since, stamp   # 关键路径性能埋点
 from pinboard import PinBoardManager   # 图钉画布(置顶多图板)子包
+import workflow_steps as wfs   # AI 工作流 Step Contract(步骤统一契约)
 from quickpaste import QuickPasteWindow  # 快捷粘贴浮层(默认 Alt+`)
 from urllib.parse import unquote as _unquote, quote as _quote, urlsplit
 
@@ -5456,9 +5457,10 @@ class WorkflowEditorWindow(QWidget):
         h.addWidget(self.e_name, 1)
         v.addLayout(h)
 
-        hint = CaptionLabel("每步可选三种类型:网页 AI(把提示词放进剪贴板,可选自动打开网页)、"
-                            "人工确认(粘贴/编辑后继续)、本地 AI(需在「AI 服务」配置接口)。"
-                            "提示词中 {input} = 输入内容 / 上一步输出。")
+        hint = CaptionLabel("步骤类型:本地 AI(API 调用)、网页 AI(提示词进剪贴板,可选自动打开网页)、"
+                            "人工确认(粘贴/编辑后继续)、复制到剪贴板、文本变换(本地白名单操作)、"
+                            "条件判断(命中正则继续,未命中停链)。提示词占位符:{input}/{previous} = "
+                            "上一步产出(首步=原始输入),{origin} = 原始输入。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: %s;" % TER)
         v.addWidget(hint)
@@ -5500,11 +5502,15 @@ class WorkflowEditorWindow(QWidget):
         super().showEvent(e)
         ensure_onscreen(self)
 
-    _KINDS = (("网页 AI", "web"), ("人工确认", "human"), ("本地 AI", "ai"))
+    # 种类下拉来自 Step Contract 注册表((label, kind) 序,索引约定沿用)
+    _KINDS = tuple((label, kind) for kind, label in wfs.EDITOR_KINDS)
 
     def _add_row(self, step):
         step = step or {}
-        kind = step.get("kind", "ai")
+        kind = wfs.KIND_ALIASES.get(str(step.get("kind", "ai")).lower(),
+                                     step.get("kind", "ai"))
+        if kind not in (k for _, k in self._KINDS):
+            kind = "ai"
         frame = QFrame()
         frame.setObjectName("stepCard")
         frame.setStyleSheet("QFrame#stepCard { background: %s; border-radius: 12px;"
@@ -5544,23 +5550,51 @@ class WorkflowEditorWindow(QWidget):
         top.addWidget(b_del)
         col.addLayout(top)
 
+        # 变换/条件步骤的参数行(其余类型隐藏)
+        params = QHBoxLayout()
+        op_combo = ComboBox()
+        op_combo.addItems([wfs.TransformStep.OP_LABELS[o]
+                           for o in wfs.TransformStep.OPS])
+        op0 = step.get("op") or "trim"
+        if op0 in wfs.TransformStep.OPS:
+            op_combo.setCurrentText(wfs.TransformStep.OP_LABELS[op0])
+        op_combo.setMinimumWidth(110)
+        arg1 = LineEdit()
+        arg1.setText(str(step.get("arg1") or step.get("pattern") or ""))
+        arg2 = LineEdit()
+        arg2.setText(str(step.get("arg2") or ""))
+        params.addWidget(op_combo)
+        params.addWidget(arg1, 1)
+        params.addWidget(arg2, 1)
+        col.addLayout(params)
+
         prompt = TextEdit()
-        prompt.setPlaceholderText("提示词 / 给操作者的说明:{input} 为输入内容 / 上一步输出")
+        prompt.setPlaceholderText("提示词 / 给操作者的说明:{input}/{previous} 为上一步产出(首步=原始输入),{origin} 为原始输入")
         prompt.setPlainText(step.get("prompt", ""))
         prompt.setFont(font(12))
         prompt.setFixedHeight(84)
         col.addWidget(prompt)
 
         row_ref = {"frame": frame, "kind": kind_combo, "combo": combo,
-                   "url": url_edit, "prompt": prompt, "nlab": nlab}
+                   "url": url_edit, "prompt": prompt, "nlab": nlab,
+                   "op": op_combo, "arg1": arg1, "arg2": arg2}
 
         def sync_kind():
             k = self._KINDS[kind_combo.currentIndex()][1]
             combo.setVisible(k == "ai")
             url_edit.setVisible(k == "web")
+            op_combo.setVisible(k == "transform")
+            arg1.setVisible(k in ("transform", "if"))
+            arg2.setVisible(k == "transform")
+            prompt.setVisible(k != "clipboard")
+            if k == "transform":
+                arg1.setPlaceholderText("查找内容(替换的原文 / 正则模式)")
+                arg2.setPlaceholderText("替换为 / 加后缀内容")
+            elif k == "if":
+                arg1.setPlaceholderText("正则:当前内容命中则继续,未命中则停止自动串联")
             prompt.setPlaceholderText(
-                "提示词,{input} 为输入内容 / 上一步输出" if k != "human"
-                else "给操作者的说明(可选),显示在等待面板")
+                "给操作者的说明(可选),显示在等待面板" if k == "human"
+                else "提示词,{input}/{previous} 为上一步产出,{origin} 为原始输入")
         kind_combo.currentIndexChanged.connect(sync_kind)
         sync_kind()
         b_del.clicked.connect(lambda _=False, r=row_ref: self._del_row(r))
@@ -5592,28 +5626,36 @@ class WorkflowEditorWindow(QWidget):
         for r in self._rows:
             k = self._KINDS[r["kind"].currentIndex()][1]
             prompt = r["prompt"].toPlainText()
-            if k == "web":
-                steps.append({"kind": "web", "prompt": prompt,
-                              "url": r["url"].text().strip()})
-            elif k == "human":
-                steps.append({"kind": "human", "prompt": prompt})
-            else:
+            if k == "ai":
                 svc = r["combo"].currentText().strip()
                 if not svc:
                     InfoBar.error("无法保存", "本地 AI 步骤需要先在「AI 服务」中添加服务",
                                   parent=self, position=InfoBarPosition.TOP_RIGHT)
                     return
                 steps.append({"kind": "ai", "service": svc, "prompt": prompt})
-        wfs = self.app.cfg.setdefault("ai_workflows", [])
+            elif k == "web":
+                steps.append({"kind": "web", "prompt": prompt,
+                              "url": r["url"].text().strip()})
+            elif k == "human":
+                steps.append({"kind": "human", "prompt": prompt})
+            elif k == "clipboard":
+                steps.append({"kind": "clipboard"})
+            elif k == "transform":
+                steps.append(wfs.TransformStep(
+                    wfs.TransformStep.OPS[r["op"].currentIndex()],
+                    r["arg1"].text(), r["arg2"].text()).to_dict())
+            else:                                              # if
+                steps.append({"kind": "if", "pattern": r["arg1"].text().strip()})
+        wflist = self.app.cfg.setdefault("ai_workflows", [])
         if self.wf is not None:
             self.wf.clear()
             self.wf.update({"name": name, "steps": steps})
         else:
-            if any(w.get("name") == name for w in wfs):
+            if any(w.get("name") == name for w in wflist):
                 InfoBar.error("名称重复", "已存在同名工作流:%s" % name, parent=self,
                               position=InfoBarPosition.TOP_RIGHT)
                 return
-            wfs.append({"name": name, "steps": steps})
+            wflist.append({"name": name, "steps": steps})
         cm.save_config(self.app.cfg)
         if self.on_saved:
             self.on_saved()
@@ -5744,11 +5786,13 @@ class WorkflowPage(QWidget):
 
 
 class WorkflowRunner(QWidget):
-    """工作流运行台:步骤类型 web(网页 AI)/ human(人工确认)/ ai(本地 API)。
+    """工作流运行台:步骤经 workflow_steps 契约分发(ai/web/human/
+    clipboard/transform/if,见 STEP_REGISTRY)。
 
-    web 步骤:渲染提示词 → 复制到剪贴板(可自动打开网页)→ 等待你把网页回答粘贴回来;
-    human 步骤:直接进入等待面板,编辑/确认后作为下一步输入;
-    ai 步骤:本地 API 自动调用。所有步骤的产出都可编辑后再继续(人在回路)。
+    web:提示词进剪贴板(可自动打开网页),等人粘贴回答;
+    human:等待面板人工确认/编辑;ai:本地 API 自动调用;
+    clipboard:快照当前内容;transform:本地文本变换;if:条件闸。
+    所有步骤的产出都可编辑后再继续(人在回路)。
     """
 
     def __init__(self, app, wf, content):
@@ -5765,6 +5809,8 @@ class WorkflowRunner(QWidget):
         self._wait_confirm = None
         self._dead = False
         self._auto = False
+        self._ctx = None                   # WorkflowContext(惰性,宿主回调注入)
+        self._cur_step = None              # 当前步骤实例(取消用)
 
         self.setWindowTitle("工作流 — " + wf.get("name", ""))
         self.setWindowIcon(app.icon)
@@ -5843,12 +5889,7 @@ class WorkflowRunner(QWidget):
     # ---- 步骤块 ----
     @staticmethod
     def _step_label(step):
-        kind = step.get("kind", "ai")
-        if kind == "web":
-            return "网页"
-        if kind == "human":
-            return "人工"
-        return step.get("service") or "AI"
+        return wfs.describe(step)
 
     def _add_block(self, title, text, kind="result", idx=None):
         card = QFrame()
@@ -6037,7 +6078,9 @@ class WorkflowRunner(QWidget):
         if self._worker is not None or self._waiting is not None:
             if self._worker is not None and self._auto:      # 充当「停止自动」
                 self._auto = False
-                self._set_busy(False, "已停止自动运行,当前步骤完成后不再继续")
+                if self._cur_step is not None:
+                    self._cur_step.cancel()   # 契约取消:迟到结果作废
+                self._set_busy(False, "已停止:当前步骤结果将被丢弃")
             return
         self._run_step()
 
@@ -6045,56 +6088,94 @@ class WorkflowRunner(QWidget):
         self._auto = True
         self._run_step()
 
+    # ---- Step Contract 宿主侧:上下文与回调 ----
+    def _ensure_ctx(self):
+        if self._ctx is not None:
+            return
+        self._ctx = wfs.WorkflowContext(
+            input_text=self._origin,
+            find_service=lambda name: cm.ai_service_by_name(self.app.cfg, name),
+            privacy_gate=self._privacy_gate,
+            start_ai=self._start_ai,
+            copy_text=self.app.core.copy_text,
+            open_url=self._open_url)
+
+    def _open_url(self, url):
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            return True
+        except Exception:
+            return False
+
+    def _start_ai(self, svc, prompt, on_done):
+        """起 AIWorker 线程;返回句柄(cancel 为尽力而为:HTTP 不可中断,
+        迟到结果由 Job.cancelled 丢弃)。"""
+        w = AIWorker(svc, prompt, self.step_idx)
+        w.done.connect(lambda _i, ok, text: on_done(ok, text))
+        w.finished.connect(self._worker_finished)
+        self._worker = w
+        w.start()
+        return w
+
     def _run_step(self):
         if self._worker is not None or self._waiting is not None \
                 or self.step_idx >= len(self.steps):
             return
-        step = self.steps[self.step_idx]
-        kind = step.get("kind", "ai")
         idx = self.step_idx
+        self._ensure_ctx()
+        self._ctx.index = idx
+        self._ctx.previous = self.cur
+        step = wfs.deserialize(self.steps[idx])
+        self._cur_step = step
 
-        if kind == "web":
-            prompt = cm.render_prompt(step.get("prompt"), self.cur)
-            # 只写剪贴板:提示词要用户自己去网页粘贴,自动 Ctrl+V 会把它
-            # 打进当前聚焦窗口(误操作风险),故不走 paste_text
-            self.app.core.copy_text(prompt)
-            opened = ""
-            url = str(step.get("url") or "").strip()
-            if url:
-                try:
-                    import urllib.parse
-                    import webbrowser
-                    webbrowser.open(url.replace("{prompt}", urllib.parse.quote(prompt)))
-                    opened = ",已打开网页"
-                except Exception:
-                    pass
-            self._add_block("步骤 %d · 提示词(已复制%s)" % (idx + 1, opened),
-                            prompt, "info")
-            self._show_wait_panel(
-                idx, "提示词已在剪贴板:切到网页 AI 粘贴发送,把回答复制后"
-                     "点「📋 从剪贴板粘贴」(也可直接在此输入)。")
+        err = step.validate(self._ctx)          # 契约:运行前检查
+        if err is not None:
+            self._auto = False
+            InfoBar.error("无法运行", err, parent=self,
+                          position=InfoBarPosition.TOP_RIGHT, duration=-1)
+            self._set_busy(False, "步骤 %d 配置无效,已停止" % (idx + 1))
+            return
 
-        elif kind == "human":
-            self._show_wait_panel(
-                idx, str(step.get("prompt") or "确认 / 编辑当前内容后继续:"), self.cur)
+        res = step.execute(self._ctx)           # 契约:执行
+        if isinstance(res, wfs.Cancelled):
+            self._auto = False
+            self._set_busy(False, "步骤 %d 已取消(%s)" % (idx + 1, res.reason))
+            return
+        if isinstance(res, wfs.Wait):
+            if res.note is not None:
+                self._add_block("步骤 %d · %s" % (idx + 1, res.note[0]),
+                                res.note[1], "info")
+            self._show_wait_panel(idx, res.hint, res.prefill)
+            return
+        if isinstance(res, wfs.Job):
+            self._set_busy(True, "步骤 %d 正在执行(%s)…" % (idx + 1, step.describe()))
+            res.start(lambda ok, text, _i=idx: self._on_done(_i, ok, text))
+            return
+        if isinstance(res, wfs.Done):           # 同步步骤(clipboard/transform/if)
+            if res.note is not None:
+                self._add_block("步骤 %d · %s" % (idx + 1, res.note[0]),
+                                res.note[1], "info")
+            self._step_complete(idx, res.text, halt=res.halt)
+            if self._auto and self.step_idx < len(self.steps):
+                self._run_step()                # 自动模式:同步步骤直接链推
 
-        else:                                                  # ai:本地 API
-            svc = cm.ai_service_by_name(self.app.cfg, step.get("service"))
-            if svc is None:
-                InfoBar.error("无法运行", "找不到 AI 服务「%s」,请检查 AI 设置" % step.get("service"),
-                              parent=self, position=InfoBarPosition.TOP_RIGHT, duration=-1)
-                return
-            prompt = cm.render_prompt(step.get("prompt"), self.cur)
-            prompt = self._privacy_gate(prompt, svc)          # 敏感内容三选一门
-            if prompt is None:
-                self._auto = False
-                self._set_busy(False, "步骤 %d 已取消(隐私门拦截)" % (idx + 1))
-                return
-            self._set_busy(True, "步骤 %d 正在调用 %s …" % (idx + 1, svc.get("name")))
-            self._worker = AIWorker(svc, prompt, idx)
-            self._worker.done.connect(self._on_done)
-            self._worker.finished.connect(self._worker_finished)
-            self._worker.start()
+    def _step_complete(self, idx, text, halt=False):
+        """一步成功收尾:记录产出、推进游标、刷新界面(halt=条件停链)。"""
+        self.results.append(text)
+        self.cur = text
+        self.step_idx = idx + 1
+        self._add_block("步骤 %d · %s" % (idx + 1, self._step_label(self.steps[idx])),
+                        text, "result", idx)
+        if self.step_idx >= len(self.steps):
+            self._set_busy(False, "全部 %d 步完成,结果可复制" % len(self.steps))
+            InfoBar.success("工作流完成", "共 %d 步,最新结果已可复制" % len(self.steps),
+                            parent=self, position=InfoBarPosition.TOP_RIGHT)
+        elif halt:
+            self._auto = False
+            self._set_busy(False, "步骤 %d 条件不满足,自动串联已停(可手动继续)" % (idx + 1))
+        elif not self._auto:
+            self._set_busy(False, "步骤 %d 完成;可编辑结果或直接继续" % idx)
 
     def _privacy_gate(self, prompt, svc):
         """AI 发送前隐私门:命中敏感内容弹三选一(遮盖/原样/取消);
@@ -6112,6 +6193,7 @@ class WorkflowRunner(QWidget):
         return None
 
     def _on_done(self, idx, ok, text):
+        """异步步骤(Job)的完成回调(失败停在当前步可重试)。"""
         if self._dead:
             return
         if not ok:
@@ -6120,17 +6202,7 @@ class WorkflowRunner(QWidget):
             InfoBar.error("调用失败", text[:220], parent=self,
                           position=InfoBarPosition.TOP_RIGHT, duration=-1)
             return
-        self.results.append(text)
-        self.cur = text
-        self.step_idx += 1
-        self._add_block("步骤 %d · %s" % (idx + 1, self.steps[idx].get("service")),
-                        text, "result", idx)
-        if self.step_idx >= len(self.steps):
-            self._set_busy(False, "全部 %d 步完成,结果可复制" % len(self.steps))
-            InfoBar.success("工作流完成", "共 %d 步,最新结果已可复制" % len(self.steps),
-                            parent=self, position=InfoBarPosition.TOP_RIGHT)
-        elif not self._auto:
-            self._set_busy(False, "步骤 %d 完成;可编辑结果或直接继续" % idx)
+        self._step_complete(idx, text)
 
     def _worker_finished(self):
         self._worker = None

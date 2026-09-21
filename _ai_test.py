@@ -383,6 +383,114 @@ try:
 finally:
     wq.PrivacyGateDialog = _orig_dlg
 
+# ---- Step Contract:步骤统一契约(workflow_steps) ----
+import workflow_steps as wfs
+
+check("Step.契约方法齐备",
+      all(callable(getattr(wfs.WorkflowStep, m, None))
+          for m in ("validate", "execute", "cancel", "to_dict", "from_dict")))
+# 契约名 execute 与实现体 run 是同一函数(别名挂载,见 workflow_steps 模块头)
+check("Step.execute 别名一致", all(
+    c.execute is (c.__dict__.get("run") or wfs.WorkflowStep.run)
+    for c in wfs.STEP_REGISTRY.values()))
+check("Step.旧配置无 kind 视为 ai",
+      isinstance(wfs.deserialize({"service": "A", "prompt": "p"}), wfs.AiStep))
+check("Step.manual 别名归一",
+      isinstance(wfs.deserialize({"kind": "manual", "prompt": ""}), wfs.HumanStep))
+check("Step.未知类型拦在 validate",
+      wfs.deserialize({"kind": "???"}).validate(None) is not None)
+for _d in ({"kind": "ai", "service": "A", "prompt": "p"},
+           {"kind": "web", "prompt": "p", "url": "u"},
+           {"kind": "human", "prompt": "p"},
+           {"kind": "clipboard"},
+           {"kind": "transform", "op": "regex", "arg1": r"\d+", "arg2": "N"},
+           {"kind": "if", "pattern": "x"}):
+    check("Step.序列化往返·%s" % _d["kind"],
+          wfs.deserialize(_d).to_dict() == _d, str(wfs.deserialize(_d).to_dict()))
+
+_tctx = wfs.WorkflowContext(input_text="原始")
+_tctx.previous = " 链上 42 号 "
+_r = wfs.deserialize({"kind": "transform", "op": "trim"}).run(_tctx)
+check("Transform.trim", isinstance(_r, wfs.Done) and _r.text == "链上 42 号", _r.text)
+_r = wfs.deserialize({"kind": "transform", "op": "regex", "arg1": r"\d+",
+                      "arg2": "N"}).run(_tctx)
+check("Transform.regex", _r.text == " 链上 N 号 ", _r.text)
+check("Transform.坏正则被拦", bool(
+    wfs.deserialize({"kind": "transform", "op": "regex",
+                     "arg1": "("}).validate(None)))
+check("Transform.未知 op 被拦", bool(
+    wfs.deserialize({"kind": "transform", "op": "eval"}).validate(None)))
+
+# 运行台:同步步骤链(clipboard → transform → if 命中)自动推进
+_copied0 = len(fake.core.copied)
+wf_sync = {"name": "同步链", "steps": [
+    {"kind": "clipboard"},
+    {"kind": "transform", "op": "upper"},
+    {"kind": "if", "pattern": "^AB"},
+]}
+rs = wq.WorkflowRunner(fake, wf_sync, "ab配额12")
+fake._ai_runners.append(rs)
+rs._on_auto()
+app.processEvents()
+check("Sync.auto-chain", rs.step_idx == 3
+      and rs.results == ["ab配额12", "AB配额12", "AB配额12"], str(rs.results))
+check("Sync.clipboard快照", fake.core.copied[_copied0:] == ["ab配额12"],
+      str(fake.core.copied[_copied0:]))
+rs.close()
+
+# if 未命中:自动停链,可手动继续
+wf_if = {"name": "条件停", "steps": [
+    {"kind": "if", "pattern": "zzz"},
+    {"kind": "clipboard"},
+]}
+rf = wq.WorkflowRunner(fake, wf_if, "正常内容")
+fake._ai_runners.append(rf)
+rf._on_auto()
+app.processEvents()
+check("If.未命中停链", rf.step_idx == 1 and rf._auto is False)
+rf._on_next()                     # 手动继续后续步骤
+app.processEvents()
+check("If.手动继续", rf.step_idx == 2)
+rf.close()
+
+# {previous}/{origin} 占位符(AI 步骤走真实 FakeAI 服务)
+wf_t = {"name": "占位符", "steps": [
+    {"service": "A", "prompt": "P1[{input}]"},
+    {"service": "A", "prompt": "P2[{previous}]+[{origin}]"},
+]}
+rt = wq.WorkflowRunner(fake, wf_t, "种子")
+fake._ai_runners.append(rt)
+rt._on_auto()
+_dl = time.time() + 15
+while time.time() < _dl and rt.step_idx < 2:
+    app.processEvents()
+    time.sleep(0.02)
+app.processEvents()
+check("Step.占位符链式+原始", rt.step_idx == 2 and "P2[" in rt.results[1]
+      and rt.results[0] in rt.results[1] and "种子" in rt.results[1],
+      str(rt.results))
+rt.close()
+
+# 编辑器:新种类行 + 保存归一
+CFG["ai_workflows"].append({"name": "契约编辑", "steps": [
+    {"kind": "transform", "op": "replace", "arg1": "a", "arg2": "b"},
+    {"kind": "if", "pattern": "x"},
+    {"kind": "clipboard"},
+]})
+we2 = wq.WorkflowEditorWindow(fake, CFG["ai_workflows"][-1], None)
+check("Editor.契约行数", len(we2._rows) == 3)
+check("Editor.transform 参数带出",
+      we2._rows[0]["op"].currentText() == wfs.TransformStep.OP_LABELS["replace"]
+      and we2._rows[0]["arg1"].text() == "a"
+      and we2._rows[0]["arg2"].text() == "b")
+check("Editor.if 模式带出", we2._rows[1]["arg1"].text() == "x")
+we2._save()
+_saved = CFG["ai_workflows"][-1]["steps"]
+check("Editor.契约保存归一",
+      {"kind": "transform", "op": "replace", "arg1": "a", "arg2": "b"} in _saved
+      and {"kind": "if", "pattern": "x"} in _saved
+      and {"kind": "clipboard"} in _saved, str(_saved))
+
 print()
 print("RESULT:", "PASS" if not FAILS else "FAILED: %s" % FAILS)
 sys.exit(0 if not FAILS else 1)
