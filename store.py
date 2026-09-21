@@ -416,6 +416,46 @@ class ClipboardStore:
                 "SELECT COUNT(*) AS c FROM clipboard_items "
                 "WHERE blob_hash = ?", (blob_hash,)).fetchone()["c"])
 
+    # ---- 诊断/维护(只读检查 + 索引重建;诊断页与健康检查共用) ----
+    def integrity_check(self):
+        """PRAGMA integrity_check 结论(ok = 数据库文件结构完好)。"""
+        with self._lock:
+            r = self.db.execute("PRAGMA integrity_check").fetchone()
+            return str(r[0]) if r else "unknown"
+
+    def deleted_count(self):
+        """deleted 态行数(宽限期内待 GC,撤销仍可救回)。"""
+        with self._lock:
+            return int(self.db.execute(
+                "SELECT COUNT(*) AS c FROM clipboard_items "
+                "WHERE state = 'deleted'").fetchone()["c"])
+
+    def image_blob_refs(self):
+        """全部图片行(任意态)的 (blob_hash, 记录路径) 列表——引用存在性
+        与孤儿清点的事实来源;宽限期内 deleted 行同样要求 blob 在。"""
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT blob_hash, metadata_json FROM clipboard_items "
+                "WHERE content_type = 'image'").fetchall()
+        out = []
+        for r in rows:
+            path = None
+            try:
+                meta = json.loads(r["metadata_json"]) \
+                    if r["metadata_json"] else {}
+                path = meta.get("path")
+            except Exception:
+                path = None
+            out.append((r["blob_hash"] or "", str(path or "")))
+        return out
+
+    def rebuild_fts(self):
+        """全文索引整体重建(诊断页维护动作;外容表只能 rebuild)。"""
+        with self._lock:
+            self.db.execute(
+                "INSERT INTO items_fts(items_fts) VALUES ('rebuild')")
+            self.db.commit()
+
     def update_image_ref(self, dbid, blob_hash, path):
         """CAS 迁移:图片条目的 blob 落位到分片路径后的引用更新。"""
         with self._lock:

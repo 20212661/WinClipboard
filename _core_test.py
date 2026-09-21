@@ -1009,6 +1009,67 @@ check("不变量7:commit 失败时行与 blob 俱在",
       _bombed7 and _bp7.exists() and core.store.blob_refcount(_bh7) == 1)
 core.store.close()
 
+# ---- 诊断快照 + 数据健康检查(diagnostics.py,建议 19/29) ----
+import diagnostics as _diag
+_dcore = make_core()
+_dcore.store = _st.ClipboardStore(os.path.join(_sdir, "diag.db"))
+_dcore.cfg["ai_services"] = [{"name": "Ollama", "api_key": "sk-shouldNotLeak"}]
+_png_d = b"\x89PNG\r\n\x1a\n" + b"diag" * 64
+_bh_ok = _hl6.sha256(_png_d).hexdigest()
+_bp_ok = _P(cm.blob_path(_bh_ok))
+_bp_ok.parent.mkdir(parents=True, exist_ok=True)
+_bp_ok.write_bytes(_png_d)
+_bh_gone = _hl6.sha256(b"gone").hexdigest()          # 只建引用,不落文件 → 缺失
+_orph = _P(cm.blob_path("f" * 64)).parent / ("f" * 64)   # 无引用 → 孤儿
+_orph.parent.mkdir(parents=True, exist_ok=True)
+_orph.write_bytes(b"orphan")
+os.utime(_orph, (1, 1))                              # 早于时间窗,才算孤儿
+_dcore.history[:] = [
+    {"type": "text", "content": "diag-t", "pinned": True, "ts": 1.0},
+    {"type": "image", "content": str(_bp_ok), "hash": _bh_ok,
+     "w": 4, "h": 4, "ts": 2.0},
+    {"type": "image", "content": "", "hash": _bh_gone, "w": 4, "h": 4,
+     "ts": 3.0},
+]
+for _r in _dcore.history:
+    _dcore.store.insert(_r)
+_snap = _diag.collect_diagnostics(_dcore)
+check("诊断:快照条目/置顶/私密/schema", _snap["items"] == 3
+      and _snap["pinned"] == 1 and _snap["private"] == 0
+      and _snap["schema_version"] == _st.SCHEMA_VERSION)
+check("诊断:AI 服务只取名称(密钥不入快照)",
+      _snap["ai_services"] == ["Ollama"])
+_ftxt = _diag.format_diagnostics(_snap)
+check("诊断:格式化文本含版本与监听,不含密钥",
+      "Ollama" in _ftxt and "1.0.0" in _ftxt
+      and "shouldNotLeak" not in _ftxt)
+_P(cm.PRIVATE_FILE).write_text('["私密样本"]', encoding="utf-8")
+_P(cm.HISTORY_FILE + ".bak1").write_text('[]', encoding="utf-8")
+_res = _diag.run_health_check(_dcore)
+_names = {r["name"]: r for r in _res["results"]}
+check("健康:数据库完整性 ok", _names["数据库完整性"]["ok"] is True)
+check("健康:缺失 blob 被发现", _names["引用 blob 存在性"]["ok"] is False)
+check("健康:孤儿文件被发现", _names["孤儿文件"]["ok"] is False)
+check("健康:私密区可解密(明文旧版)", _names["私密区可解密"]["ok"] is True)
+check("健康:备份可读", _names["备份可读"]["ok"] is True)
+check("健康:总判定=有硬伤", _res["ok"] is False)
+check("store:deleted_count 原语", _dcore.store.deleted_count() == 0
+      and _dcore.store.image_blob_refs().__len__() == 2)
+_dcore.store.mark_deleted([_dcore.history[0]["_db"]])
+check("store:deleted_count 计 deleted 态", _dcore.store.deleted_count() == 1)
+_dcore.store.restore([_dcore.history[0]["_db"]])
+_dcore.store.rebuild_fts()
+check("store:rebuild_fts 后检索不变",
+      len(_dcore.store.query(q="diag-t")) == 1)
+# 修复缺失与孤儿后复检 → 全绿
+_bp_gone = _P(cm.blob_path(_bh_gone))
+_bp_gone.parent.mkdir(parents=True, exist_ok=True)
+_bp_gone.write_bytes(b"restored")
+_orph.unlink()
+_res2 = _diag.run_health_check(_dcore)
+check("健康:修复后总判定通过", _res2["ok"] is True, str(_res2["results"]))
+_dcore.store.close()
+
 # ---- Transaction:JSON 模式(无库)删除→撤销 ----
 core = make_core(history=[
     {"type": "text", "content": "j-1", "pinned": False, "ts": 2},
