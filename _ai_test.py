@@ -316,6 +316,73 @@ check("Seed.no-dup-services", svcs.count("A") == 1 and "GLM" in svcs, str(svcs))
 hub._seed()   # 幂等
 check("Seed.idempotent", len([w for w in CFG["ai_workflows"] if w["name"] == names[0]]) == 1)
 
+# ---- Privacy Gate:AI 发送前敏感拦截(遮盖/原样/取消) ----
+_host = wq.QWidget()          # 离屏宿主(MaskDialogBase 需要真 QWidget 定位遮罩)
+gd = wq.PrivacyGateDialog(_host, ["API 密钥", "JWT Token"], "遮盖预览文本",
+                          "https://api.example.com")
+check("GateDialog.default-cancel", gd.choice == "cancel")
+gd._pick("mask")
+check("GateDialog.pick-mask", gd.choice == "mask")
+gd._pick("raw")
+check("GateDialog.pick-raw", gd.choice == "raw")
+gd.close()
+
+wf_gate = {"name": "隐私链", "steps": [{"service": "A", "prompt": "解释 {input}"}]}
+gr = wq.WorkflowRunner(fake, wf_gate, "普通内容")
+check("Gate.clean-passthrough",
+      gr._privacy_gate("普通内容", CFG["ai_services"][0]) == "普通内容")
+
+_secret = "密钥 sk-" + "A" * 30 + " 是什么"       # 无效占位密钥样本
+_gate_seen = []
+
+
+def _make_stub_gate():
+    """离屏桩(动态构造,不弹窗):choice 由测试侧指定;任意 Qt 方法调用
+    (exec/setModal 等)一律安静返回。"""
+    def _init(self, parent, hits, masked, endpoint):
+        _gate_seen.append((tuple(hits), masked, endpoint))
+    return type("StubGate", (), {
+        "choice": "mask",
+        "__init__": _init,
+        "__getattr__": lambda self, name: (lambda *a: 0),
+    })
+
+
+_StubGate = _make_stub_gate()
+
+
+_orig_dlg = wq.PrivacyGateDialog
+wq.PrivacyGateDialog = _StubGate
+try:
+    out = gr._privacy_gate(_secret, CFG["ai_services"][0])
+    check("Gate.mask-applied", "sk-" not in out and "▇▇▇[API 密钥]" in out)
+    check("Gate.dialog-args", _gate_seen and _gate_seen[0][0] == ("API 密钥",)
+          and _gate_seen[0][2] == BASE, str(_gate_seen[:1]))
+    _StubGate.choice = "raw"
+    check("Gate.raw-passthrough",
+          gr._privacy_gate(_secret, CFG["ai_services"][0]) == _secret)
+    _StubGate.choice = "cancel"
+    check("Gate.cancel-blocks",
+          gr._privacy_gate(_secret, CFG["ai_services"][0]) is None)
+
+    # 端到端:链上敏感输入经门遮盖后发往假服务器(回显验证)
+    _StubGate.choice = "mask"
+    gr2 = wq.WorkflowRunner(fake, wf_gate, _secret)
+    fake._ai_runners.append(gr2)
+    gr2._on_next()
+    _dl = time.time() + 15
+    while time.time() < _dl and gr2.step_idx < 1:
+        app.processEvents()
+        time.sleep(0.02)
+    app.processEvents()
+    check("Gate.runner-e2e-masked",
+          gr2.step_idx == 1 and gr2.results
+          and "▇▇▇[API 密钥]" in gr2.results[0]
+          and "sk-" not in gr2.results[0], str(gr2.results[:1]))
+    gr2.close()
+finally:
+    wq.PrivacyGateDialog = _orig_dlg
+
 print()
 print("RESULT:", "PASS" if not FAILS else "FAILED: %s" % FAILS)
 sys.exit(0 if not FAILS else 1)

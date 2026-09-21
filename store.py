@@ -43,7 +43,9 @@ CREATE TABLE IF NOT EXISTS clipboard_items (
     blob_height   INTEGER,
     blob_size     INTEGER,
     is_pinned     INTEGER NOT NULL DEFAULT 0,
-    metadata_json TEXT
+    metadata_json TEXT,
+    state         TEXT    NOT NULL DEFAULT 'active',   -- active | deleted
+    deleted_at    REAL                                   -- 进 deleted 态的时刻
 );
 CREATE INDEX IF NOT EXISTS idx_items_seq   ON clipboard_items(seq DESC);
 CREATE INDEX IF NOT EXISTS idx_items_type  ON clipboard_items(content_type);
@@ -98,6 +100,7 @@ class ClipboardStore:
         self.db.execute("PRAGMA synchronous=NORMAL")
         self._ensure_v2()          # 旧库升级必须先于 schema(触发器引用新列)
         self.db.executescript(_SCHEMA)
+        self._upgrade_schema()     # state/deleted_at:带默认值,ALTER 即生效
         if self._upgraded:
             # 既有行的 FTS 索引重建(外容表只能用 rebuild,不能手工插行)
             self.db.execute("INSERT INTO items_fts(items_fts) VALUES ('rebuild')")
@@ -143,6 +146,18 @@ class ClipboardStore:
         self.db.execute("DROP TRIGGER IF EXISTS items_fts_au")
         self.db.execute("DROP TABLE IF EXISTS items_fts")
         self._upgraded = True
+
+    def _upgrade_schema(self):
+        """CREATE TABLE IF NOT EXISTS 不改已存在的表,缺列在此补
+        (state/deleted_at;带默认值,老行视为 active)。"""
+        cols = {r["name"] for r in self.db.execute(
+            "PRAGMA table_info(clipboard_items)").fetchall()}
+        if "state" not in cols:
+            self.db.execute("ALTER TABLE clipboard_items "
+                            "ADD COLUMN state TEXT NOT NULL DEFAULT 'active'")
+        if "deleted_at" not in cols:
+            self.db.execute("ALTER TABLE clipboard_items "
+                            "ADD COLUMN deleted_at REAL")
 
     def close(self):
         with self._lock:
@@ -228,14 +243,16 @@ class ClipboardStore:
                 "content_subtype, content_hash, source_app, source_window, "
                 "text_content, search_text, files_json, rich_json, blob_hash, "
                 "blob_mime, blob_width, blob_height, blob_size, is_pinned, "
-                "metadata_json FROM clipboard_items ORDER BY seq DESC"
+                "metadata_json FROM clipboard_items WHERE state='active' "
+                "ORDER BY seq DESC"
             ).fetchall()
         return [self._rec_from_row(r) for r in rows]
 
     def count(self):
         with self._lock:
             return int(self.db.execute(
-                "SELECT COUNT(*) AS c FROM clipboard_items"
+                "SELECT COUNT(*) AS c FROM clipboard_items "
+                "WHERE state='active'"
             ).fetchone()["c"])
 
     # ---- 写透 ----
@@ -256,7 +273,8 @@ class ClipboardStore:
             return rec["_db"]
 
     def upsert_promote(self, rec):
-        """撤销恢复/重复提升:已有 _db 则更新并移到最前,否则插入。"""
+        """撤销恢复/重复提升:已有 _db 则置回 active 并移到最前,否则插入。
+        行已被 GC 时走插入重建——数据在内存 rec 里仍然完整。"""
         with self._lock:
             dbid = rec.get("_db")
             if dbid is not None and self.db.execute(
@@ -266,7 +284,8 @@ class ClipboardStore:
                 row = self._row_from_rec(rec, self._seq)
                 self.db.execute(
                     "UPDATE clipboard_items SET seq=?, created_at=?, "
-                    "updated_at=?, content_subtype=?, content_hash=?, "
+                    "updated_at=?, state='active', deleted_at=NULL, "
+                    "content_subtype=?, content_hash=?, "
                     "source_app=?, search_text=?, rich_json=?, blob_size=?, "
                     "is_pinned=? WHERE id = ?",
                     (row[0], row[1], row[2], row[4], row[5], row[6],
@@ -280,6 +299,67 @@ class ClipboardStore:
             self.db.execute(
                 "UPDATE clipboard_items SET is_pinned=?, updated_at=? "
                 "WHERE id = ?", (1 if pinned else 0, time.time(), dbid))
+            self.db.commit()
+
+    def mark_deleted(self, dbids, now=None):
+        """用户删除:行置 deleted 态(可撤销);不物理删行,不动 blob 文件。"""
+        ids = [int(i) for i in dbids if i is not None]
+        if not ids:
+            return
+        now = float(now if now is not None else time.time())
+        with self._lock:
+            self.db.executemany(
+                "UPDATE clipboard_items SET state='deleted', deleted_at=?, "
+                "updated_at=? WHERE id = ?",
+                [(now, now, i) for i in ids])
+            self.db.commit()
+
+    def restore(self, dbids):
+        """撤销删除:行回 active 态并提升 seq 到最前(列表语义 = 最近)。"""
+        ids = [int(i) for i in dbids if i is not None]
+        if not ids:
+            return
+        with self._lock:
+            for i in ids:
+                self._seq += 1
+                self.db.execute(
+                    "UPDATE clipboard_items SET state='active', deleted_at=NULL, "
+                    "seq=? WHERE id = ?", (self._seq, i))
+            self.db.commit()
+
+    def collect_garbage(self, grace_seconds):
+        """物理删除宽限期已过的 deleted 行;返回 [(id, blob_hash), …] 供
+        上层做 blob 引用计数清点(grace 内的行保留——撤销还救得回)。"""
+        cutoff = time.time() - float(grace_seconds)
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT id, blob_hash FROM clipboard_items "
+                "WHERE state='deleted' AND deleted_at IS NOT NULL "
+                "AND deleted_at < ?", (cutoff,)).fetchall()
+            if not rows:
+                return []
+            self.db.executemany(
+                "DELETE FROM clipboard_items WHERE id = ?",
+                [(r["id"],) for r in rows])
+            self.db.commit()
+            return [(r["id"], r["blob_hash"]) for r in rows]
+
+    def blob_refcount(self, blob_hash):
+        """该 blob 被表内多少行引用(任意态——deleted 行在宽限期内仍算,
+        撤销后引用必须仍然成立);文件是否可删由调用方据此判断。"""
+        with self._lock:
+            return int(self.db.execute(
+                "SELECT COUNT(*) AS c FROM clipboard_items "
+                "WHERE blob_hash = ?", (blob_hash,)).fetchone()["c"])
+
+    def update_image_ref(self, dbid, blob_hash, path):
+        """CAS 迁移:图片条目的 blob 落位到分片路径后的引用更新。"""
+        with self._lock:
+            self.db.execute(
+                "UPDATE clipboard_items SET blob_hash=?, metadata_json=?, "
+                "updated_at=? WHERE id = ?",
+                (blob_hash, json.dumps({"path": path}, ensure_ascii=False),
+                 time.time(), int(dbid)))
             self.db.commit()
 
     def delete(self, dbid):
@@ -318,8 +398,8 @@ class ClipboardStore:
               q=None, pinned=None, limit=None, offset=0):
         """参数化组合查询,返回 id 列表(seq 降序)。q 为子串语义(LIKE)。"""
         a = self._filter_args(content_type, source_app, since, q, pinned)
-        sql = ("SELECT id FROM clipboard_items WHERE "
-               "(? IS NULL OR content_type = ?) "
+        sql = ("SELECT id FROM clipboard_items WHERE state='active' "
+               "AND (? IS NULL OR content_type = ?) "
                "AND (? IS NULL OR source_app = ?) "
                "AND (? = 0 OR created_at >= ?) "
                "AND (? IS NULL OR is_pinned = ?) "
@@ -333,8 +413,9 @@ class ClipboardStore:
                    q=None, pinned=None, limit=200, offset=0):
         """分页查询:返回 (rec 列表, 命中总数)。rec 与内存条目同构(含 _db)。"""
         a = self._filter_args(content_type, source_app, since, q, pinned)
-        total_sql = ("SELECT COUNT(*) AS c FROM clipboard_items WHERE "
-                     "(? IS NULL OR content_type = ?) "
+        total_sql = ("SELECT COUNT(*) AS c FROM clipboard_items "
+                     "WHERE state='active' "
+                     "AND (? IS NULL OR content_type = ?) "
                      "AND (? IS NULL OR source_app = ?) "
                      "AND (? = 0 OR created_at >= ?) "
                      "AND (? IS NULL OR is_pinned = ?) "
@@ -343,8 +424,9 @@ class ClipboardStore:
                     "content_subtype, content_hash, source_app, source_window, "
                     "text_content, search_text, files_json, rich_json, "
                     "blob_hash, blob_mime, blob_width, blob_height, blob_size, "
-                    "is_pinned, metadata_json FROM clipboard_items WHERE "
-                    "(? IS NULL OR content_type = ?) "
+                    "is_pinned, metadata_json FROM clipboard_items "
+                    "WHERE state='active' "
+                    "AND (? IS NULL OR content_type = ?) "
                     "AND (? IS NULL OR source_app = ?) "
                     "AND (? = 0 OR created_at >= ?) "
                     "AND (? IS NULL OR is_pinned = ?) "
@@ -355,6 +437,13 @@ class ClipboardStore:
             rows = self.db.execute(
                 page_sql, a + (int(limit), int(offset))).fetchall()
         return [self._rec_from_row(r) for r in rows], total
+
+    def search(self, q, limit=100):
+        """搜索(active 行)id 列表(seq 降序):子串语义,等价于
+        query(q=…, limit=…)——FTS 词级索引由触发器维护,供将来切换。"""
+        if not q:
+            return []
+        return self.query(q=q, limit=limit)
 
     def migrate_from_list(self, history):
         """history 列表(最旧在前)一次性导入,单事务;返回条数。"""
