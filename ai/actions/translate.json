@@ -1,0 +1,9 @@
+{
+    "id": "translate",
+    "name": "翻译",
+    "description": "中英互译(自动判断语言)",
+    "workflow": "translate",
+    "icon": "DICTIONARY",
+    "applies": ["text"],
+    "order": 5
+}

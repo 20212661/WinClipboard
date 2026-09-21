@@ -1,0 +1,9 @@
+{
+    "id": "code_optimize",
+    "name": "优化代码",
+    "description": "保持行为不变地重构优化,并给出改动理由",
+    "workflow": "code_optimize",
+    "icon": "DEVELOPER_TOOLS",
+    "applies": ["text"],
+    "order": 2
+}

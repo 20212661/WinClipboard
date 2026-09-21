@@ -188,7 +188,9 @@ class AiStep(WorkflowStep):
         if not self.prompt.strip():
             return "AI 步骤提示词为空"
         if ctx.find_service is None or ctx.find_service(self.service) is None:
-            return f"找不到 AI 服务「{self.service or '?'}」,请检查 AI 设置"
+            if not self.service:
+                return "尚未配置 AI 服务:请到「AI 服务」添加后再运行(服务留空 = 默认服务)"
+            return f"找不到 AI 服务「{self.service}」,请检查 AI 设置"
         return None
 
     def run(self, ctx):

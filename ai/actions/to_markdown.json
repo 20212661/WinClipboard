@@ -1,0 +1,9 @@
+{
+    "id": "to_markdown",
+    "name": "转Markdown",
+    "description": "把内容整理为规范的 Markdown 源码",
+    "workflow": "to_markdown",
+    "icon": "LABEL",
+    "applies": ["text"],
+    "order": 6
+}

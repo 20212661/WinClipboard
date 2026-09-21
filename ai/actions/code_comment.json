@@ -1,0 +1,9 @@
+{
+    "id": "code_comment",
+    "name": "生成注释",
+    "description": "为代码补充中文 docstring 与行内注释",
+    "workflow": "code_comment",
+    "icon": "CODE",
+    "applies": ["text"],
+    "order": 3
+}

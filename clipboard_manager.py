@@ -3540,7 +3540,14 @@ def xml_pretty(text):
 # 工作流:{"name","steps":[{"service","prompt"}]}  prompt 中 {input} 为上一步输出
 # ============================================================
 def ai_service_by_name(cfg, name):
-    for s in cfg.get("ai_services") or []:
+    """按名称取 AI 服务;空名 = 默认服务(清单第一个)。
+
+    内置 AI 动作的工作流 service 留空即走此路径——配置任一服务即可
+    直跑,不需要给每条工作流指定服务名。"""
+    svcs = cfg.get("ai_services") or []
+    if not str(name or "").strip():
+        return svcs[0] if svcs else None
+    for s in svcs:
         if s.get("name") == name:
             return s
     return None
