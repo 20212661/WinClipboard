@@ -75,7 +75,10 @@ class PinBoardManager(QObject):
         self.loader.loaded.connect(self._on_loaded)
 
         self.window = PinBoardWindow(self)
-        self._restore()
+        if getattr(app, "safe_mode", False):
+            pass    # 安全模式:画布窗口空壳,不加载钉住的图片(建议 20)
+        else:
+            self._restore()
 
     # ---- 启动恢复 ----
     def _restore(self):

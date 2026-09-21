@@ -1032,6 +1032,30 @@ check("不变量4:清理后撤销仍可用",
 _bp8.unlink()                              # 清场:不留古老 mtime 的孤儿文件
 core.store.close()
 
+# ---- 启动状态追踪 + Safe Mode(建议 20)----
+import diagnostics as _diag_boot
+cm._write_boot_state(0, False)             # 干净起点
+check("boot:初次 begin 计 1", cm.begin_boot() == 1)
+check("boot:未确认再启累积", cm.begin_boot() == 2
+      and cm.read_boot_state()["streak"] >= cm.SAFE_MODE_THRESHOLD)
+cm.confirm_boot_ok()
+check("boot:启动确认后清零", cm.read_boot_state()["streak"] == 0
+      and cm.read_boot_state()["running"] is True)
+cm.begin_boot()
+cm.mark_clean_quit()
+check("boot:正常退出清零且非运行态",
+      cm.read_boot_state()["streak"] == 0
+      and cm.read_boot_state()["running"] is False)
+# 安全模式核心:真实构造(无线程启动),监听/热键不启,状态完整可用
+_core_safe = cm.ClipboardCore(safe_mode=True)
+check("SafeMode:核心可构造且 worker 建而不启",
+      _core_safe.safe_mode is True and _core_safe.worker is not None
+      and not _core_safe.worker.is_alive())
+check("SafeMode:快照监听状态如实标记",
+      "安全模式" in _diag_boot.collect_diagnostics(_core_safe)["watcher"])
+if _core_safe.store is not None:
+    _core_safe.store.close()
+
 # ---- 诊断快照 + 数据健康检查(diagnostics.py,建议 19/29) ----
 import diagnostics as _diag
 _dcore = make_core()

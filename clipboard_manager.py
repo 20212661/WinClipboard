@@ -221,6 +221,60 @@ def blob_path(blob_id):
     return blob_full_path(APP_DIR, b)
 
 
+# ---- 启动状态追踪(Safe Mode 判据,建议 20)----
+# 语义:begin_boot 在 main() 最早处记 streak+1(本次启动"未确认");
+# 启动完整落地后 confirm_boot_ok 清零;正常退出 mark_clean_quit 再落一笔。
+# 崩溃(启动中或运行中)到不了 confirm/quit——streak 由此累积,连续
+# 未确认达到阈值即视为"连续启动崩溃",由前端提供安全模式选择。
+BOOT_STATE_FILE = os.path.join(APP_DIR, "boot_state.json")
+SAFE_MODE_THRESHOLD = 2     # 连续第 N 次未确认启动 → 提供安全模式
+
+
+def read_boot_state():
+    """读启动状态 {streak, running, last_boot};文件缺失/损坏视为全新。"""
+    try:
+        d = json.loads(Path(BOOT_STATE_FILE).read_text(encoding="utf-8"))
+        if not isinstance(d, dict):
+            d = {}
+    except Exception:
+        d = {}
+    try:
+        streak = max(0, int(d.get("streak", 0) or 0))
+    except (TypeError, ValueError):
+        streak = 0
+    try:
+        last_boot = float(d.get("last_boot", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        last_boot = 0.0
+    return {"streak": streak, "running": bool(d.get("running")),
+            "last_boot": last_boot}
+
+
+def _write_boot_state(streak, running, last_boot=None):
+    Path(BOOT_STATE_FILE).write_text(json.dumps(
+        {"streak": int(streak), "running": bool(running),
+         "last_boot": last_boot if last_boot is not None
+         else read_boot_state()["last_boot"]}, ensure_ascii=False),
+        encoding="utf-8")
+
+
+def begin_boot():
+    """启动即记一笔:streak+1(本次尚未确认成功),返回累计值。"""
+    streak = min(read_boot_state()["streak"] + 1, 999)
+    _write_boot_state(streak, True, time.time())
+    return streak
+
+
+def confirm_boot_ok():
+    """启动完整落地(核心/窗口/托盘全就绪)后清零——本次启动已成功。"""
+    _write_boot_state(0, True)
+
+
+def mark_clean_quit():
+    """正常退出时落一笔;崩溃退出到不了这里,这正是判据。"""
+    _write_boot_state(0, False)
+
+
 def _dec_field(value):
     """解密一个密文字段({"dpapi":bool,"data":<b64>});明文原样返回,解密失败返回 None。"""
     if isinstance(value, str):
@@ -1581,7 +1635,10 @@ class ClipboardCore:
     store = None        # SQLite 仓库(类级默认:__new__ 直造的核心/测试为 None→JSON 路径)
     _txn_stack = None   # 撤销栈(类级默认同上;访问一律经 _txn_list)
 
-    def __init__(self):
+    def __init__(self, safe_mode=False):
+        # 安全模式(Safe Mode):不启动托盘/热键/剪贴板监听线程——核心状态、
+        # 历史浏览、导出与设置恢复仍完整可用,给"连续启动失败"留一条退路。
+        self.safe_mode = bool(safe_mode)
         self.cfg, _cfg_stale = _load_config_raw()
         self._cfg_need_save = _cfg_stale
         self.max_items = int(self.cfg.get("max_items", 100))
@@ -1668,9 +1725,12 @@ class ClipboardCore:
         # 旧版明文私密区/密钥自动升级为 DPAPI 加密
         self._migrate_private()
         self._migrate_config_secrets()
-        # 后台线程(托盘 / 全局热键 / 剪贴板监听)
+        # 后台线程(托盘 / 全局热键 / 剪贴板监听)。
+        # 安全模式只建对象不启线程:cmd_q 等字段仍可用(粘贴命令静默排队,
+        # 无消费者),窗口句柄为 None 的剪贴板写入是合法的(OpenClipboard(NULL))。
         self.worker = TrayWorker(self)
-        self.worker.start()
+        if not self.safe_mode:
+            self.worker.start()
 
     # ---- 事件投递(任意线程可调) ----
     def _store_del(self, recs):

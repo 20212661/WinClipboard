@@ -64,7 +64,7 @@ from qfluentwidgets import (FluentIcon as FIF, setTheme, setThemeColor, Theme,
                             TreeWidget, TableWidget,
                             SwitchSettingCard, PushSettingCard, OptionsSettingCard,
                             SettingCardGroup, SettingCard)
-from PySide6.QtWidgets import QGraphicsOpacityEffect
+from PySide6.QtWidgets import QGraphicsOpacityEffect, QMessageBox
 
 # ============================================================
 # 主题与调色板(浅色 / 深色)
@@ -6647,9 +6647,12 @@ class WinClipboardApp(QObject):
         if getattr(self, "panel", None) is not None and self.panel.isVisible():
             self._view_timer.start()
 
-    def __init__(self, qapp):
+    def __init__(self, qapp, safe_mode=False):
         super().__init__()
         self.qapp = qapp
+        # 安全模式(连续启动崩溃后的降级启动):不加载监听/热键/图钉画布/
+        # 自动清理/联网检查;历史浏览、导出、设置恢复照常(建议 20)
+        self.safe_mode = bool(safe_mode)
         self.category = "all"
         self.query = ""
         self.src_filter = ""            # 来源应用筛选(exe 名;空 = 全部)
@@ -6671,8 +6674,8 @@ class WinClipboardApp(QObject):
                 pass
         self.icon = QIcon(cm.ICON_FILE) if os.path.exists(cm.ICON_FILE) else QIcon()
 
-        # 共享核心(状态加载 + 历史迁移 + 后台线程启动)
-        self.core = cm.ClipboardCore()
+        # 共享核心(状态加载 + 历史迁移 + 后台线程启动;安全模式不启线程)
+        self.core = cm.ClipboardCore(safe_mode=self.safe_mode)
 
         self.win = MainWindow(self)
         self.panel = self.win.history_page     # 既有内部引用的稳定别名
@@ -6724,15 +6727,16 @@ class WinClipboardApp(QObject):
 
         # 缩略图后台生成器(启动预热全量截图不再阻塞 UI)
         self._thumb_loader = ThumbLoader(self)
-        QTimer.singleShot(600, self._prewarm)
-        # 孤儿图片清理:启动收尾全部完成后再做(不占启动关键路径,
-        # UI 线程执行 + 方法内的新文件时间窗防护,与捕获线程无竞态)
-        QTimer.singleShot(3000, self._cleanup_orphan_images)
-        # 清理策略周期执行(常驻多日也要按天数/容量裁剪):每 6 小时一次
-        self._cleanup_timer = QTimer(self)
-        self._cleanup_timer.setInterval(6 * 3600 * 1000)
-        self._cleanup_timer.timeout.connect(self._periodic_cleanup)
-        self._cleanup_timer.start()
+        if not self.safe_mode:
+            QTimer.singleShot(600, self._prewarm)
+            # 孤儿图片清理:启动收尾全部完成后再做(不占启动关键路径,
+            # UI 线程执行 + 方法内的新文件时间窗防护,与捕获线程无竞态)
+            QTimer.singleShot(3000, self._cleanup_orphan_images)
+            # 清理策略周期执行(常驻多日也要按天数/容量裁剪):每 6 小时一次
+            self._cleanup_timer = QTimer(self)
+            self._cleanup_timer.setInterval(6 * 3600 * 1000)
+            self._cleanup_timer.timeout.connect(self._periodic_cleanup)
+            self._cleanup_timer.start()
 
         # UI 事件循环健康监控:Mica 在个别远程会话上致派发器假死时
         # 无 Mica 自重启(机制与触发日志见 UiHealthMonitor)
@@ -6740,18 +6744,32 @@ class WinClipboardApp(QObject):
         self.health.arm()
         # 首次启动欢迎(离屏/测试环境不弹;看过一次写入配置,不再打扰)
         if not self.cfg.get("first_run_shown") \
+                and not self.safe_mode \
                 and QGuiApplication.platformName() != "offscreen":
             QTimer.singleShot(1500, self._show_welcome)
-        # 启动静默检查更新(每 7 天一次;发现新版才提示,不打扰)
+        # 启动静默检查更新(每 7 天一次;发现新版才提示,不打扰;安全模式不联网)
         try:
             _last_chk = float(self.cfg.get("last_update_check", 0) or 0)
         except (TypeError, ValueError):
             _last_chk = 0.0
-        if QGuiApplication.platformName() != "offscreen" \
+        if not self.safe_mode \
+                and QGuiApplication.platformName() != "offscreen" \
                 and time.time() - _last_chk > 7 * 86400:
             self.cfg["last_update_check"] = time.time()
             cm.save_config(self.cfg)
             QTimer.singleShot(8000, lambda: self.check_update(silent=True))
+        if self.safe_mode:
+            QTimer.singleShot(1200, self._show_safe_mode_banner)
+        # 启动完整落地:Safe Mode 判据清零(本次启动已确认成功)
+        cm.confirm_boot_ok()
+
+    def _show_safe_mode_banner(self):
+        """安全模式横幅:告知未加载的子系统,指明「导出/恢复后重启」出路。"""
+        InfoBar.warning(
+            "安全模式运行中",
+            "剪贴板监听、全局热键、图钉画布与自动清理未加载;"
+            "历史浏览、导出与设置恢复正常可用,退出后正常重启即可。",
+            parent=self.win, duration=8000, position=InfoBarPosition.TOP)
 
     # ---- 剪贴板读取 / 历史维护:见 cm.ClipboardCore(共享后端) ----
 
@@ -7636,6 +7654,7 @@ def main():
             0, "WinClipboard 已经在运行中(检查系统托盘)。", cm.APP_NAME, 0x40)
         return 0
     globals()["_MUTEX"] = mutex
+    streak = cm.begin_boot()     # Safe Mode 判据:本次启动先记"未确认"
     cm.log("启动(Qt+Fluent) pid=%d py=%s %s" %
            (os.getpid(), sys.executable, sys.version.split()[0]))
     perf_probe.setup()                    # 性能埋点 → logs/perf.log(独立于 app.log)
@@ -7657,8 +7676,29 @@ def main():
             pass
     init_palette(isDarkTheme())
 
+    # 连续启动崩溃 → 提供安全模式(建议 20):不加载监听/热键/画布/自动
+    # 任务,保住"导出数据 + 恢复设置"两条退路。选正常启动若再失败,下次仍提示。
+    safe = False
+    if streak >= cm.SAFE_MODE_THRESHOLD \
+            and QGuiApplication.platformName() != "offscreen":
+        box = QMessageBox()
+        box.setWindowTitle(cm.APP_NAME)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText("检测到 WinClipboard 连续 %d 次启动未正常完成。" % streak)
+        box.setInformativeText(
+            "安全模式不加载剪贴板监听、全局热键、图钉画布与自动清理,\n"
+            "历史浏览、导出数据与设置恢复照常可用。\n"
+            "可先正常启动;若再次失败,下次仍会提示。")
+        b_safe = box.addButton("安全模式启动", QMessageBox.ButtonRole.ActionRole)
+        b_norm = box.addButton("正常启动", QMessageBox.ButtonRole.ActionRole)
+        box.setDefaultButton(b_safe)
+        box.exec()
+        safe = box.clickedButton() is b_safe
+        cm.log("启动方式选择: %s(连续未确认启动 %d 次)"
+               % ("安全模式" if safe else "正常", streak))
+
     try:
-        app = WinClipboardApp(qapp)
+        app = WinClipboardApp(qapp, safe_mode=safe)
     except Exception:
         cm.log("初始化失败:\n" + traceback.format_exc())
         try:
@@ -7669,6 +7709,7 @@ def main():
         return 1
     rc = qapp.exec()
     cm.log("退出")
+    cm.mark_clean_quit()         # 正常退出;崩溃到不了这里——这正是判据
     return rc
 
 
