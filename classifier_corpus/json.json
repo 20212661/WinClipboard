@@ -1,0 +1,6 @@
+[
+  {"text": "{\"name\": \"WinClipboard\", \"version\": 1, \"tags\": [\"剪贴板\", \"工具\"]}", "expect": "json"},
+  {"text": "[1, 2, 3, {\"a\": null, \"b\": true}]", "expect": "json"},
+  {"text": "{\"嵌套\": {\"列表\": [1, 2.5, \"文本\"]}, \"空\": {}}", "expect": "json"},
+  {"text": "{\"unicode\": \"中文与 emoji 😀\", \"esc\": \"line\\nbreak\"}", "expect": "json"}
+]

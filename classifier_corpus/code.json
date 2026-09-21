@@ -1,0 +1,8 @@
+[
+  {"text": "import os\nimport sys\nprint(sys.argv)", "expect": "python"},
+  {"text": "def process(items):\n    return [i for i in items if i]", "expect": "python"},
+  {"text": "SELECT id, name FROM users WHERE age > 18", "expect": "sql"},
+  {"text": "const x = 1;\nconsole.log(x);", "expect": "javascript"},
+  {"text": "#!/usr/bin/env python3\nprint('脚本')", "expect": "python"},
+  {"text": "body { margin: 0; padding: 12px; color: #333; }", "expect": "css"}
+]

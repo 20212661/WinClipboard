@@ -1,0 +1,7 @@
+[
+  {"text": "# 标题\n\n正文段落,说明文档内容。", "expect": "markdown"},
+  {"text": "```python\nprint('hi')\n```", "expect": "markdown"},
+  {"text": "## 二级标题\n\n- 列表项一\n- 列表项二", "expect": "markdown"},
+  {"text": "文档开头先来一段。\n\n```json\n{\"a\": 1}\n```\n\n结尾再来一段。", "expect": "markdown"},
+  {"text": "# 中文标题也识别\n这个是 ATX 一级标题下的正文。", "expect": "markdown"}
+]

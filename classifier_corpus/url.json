@@ -1,0 +1,7 @@
+[
+  {"text": "https://example.com/a?b=1&c=2", "expect": "web_url"},
+  {"text": "http://192.168.1.1:8080/admin", "expect": "web_url"},
+  {"text": "https://docs.python.org/3/library/json.html", "expect": "web_url"},
+  {"text": "https://example.com/路径/编码", "expect": "web_url"},
+  {"text": "https://用户:密码@example.com:8443/path?q=中文", "expect": "web_url"}
+]

@@ -1,0 +1,13 @@
+[
+  {"text": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "expect": "plain", "note": "sha256 哈希不是 Base64(纯十六进制排除)"},
+  {"text": "1.2.3.4.5", "expect": "plain", "note": "版本串不是 URL"},
+  {"text": "C:\\Users\\test\\Documents\\file.txt", "expect": "plain", "note": "Windows 路径不是 URL"},
+  {"text": "今天天气不错,适合出去走走。", "expect": "plain", "note": "单行中文逗号不是 CSV"},
+  {"text": "password=hunter2, please log in", "expect": "plain", "note": "口令样文本不是 CSV/JSON"},
+  {"text": "多行说明文本:\n包含 https://example.com 链接\n和普通句子若干。", "expect": "plain", "note": "多行里的 URL 不整体判 URL"},
+  {"text": "12:34:56", "expect": "plain", "note": "时间不是版本/URL"},
+  {"text": "aGVsbG8=", "expect": "plain", "note": "短 Base64(<40 字符)不嗅探"},
+  {"text": "eyJhbGci.eyJzdWIi.e30", "expect": "plain", "note": "三段但头段不是合法 JWT header"},
+  {"text": "- 列表项一\n- 列表项二", "expect": "plain", "note": "仅无序列表(无围栏/ATX 标题)当前不判 markdown——边界快照"},
+  {"text": "ftp://files.example.com/pub/readme.txt", "expect": "plain", "note": "web_url 只认 http/https(_URL_RE 设计),ftp 不在范畴——边界快照"}
+]
