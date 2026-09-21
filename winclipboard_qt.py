@@ -26,6 +26,7 @@ from perf_probe import PerfSpan, since, stamp   # 关键路径性能埋点
 from pinboard import PinBoardManager   # 图钉画布(置顶多图板)子包
 from pinboard import annotations as _anno_layer   # 标注层(非破坏模型)
 import workflow_steps as wfs   # AI 工作流 Step Contract(步骤统一契约)
+import diagnostics as diag     # 诊断快照 + 数据健康检查(纯数据层,无 UI)
 from quickpaste import QuickPasteWindow  # 快捷粘贴浮层(默认 Alt+`)
 from urllib.parse import unquote as _unquote, quote as _quote, urlsplit
 
@@ -1630,6 +1631,8 @@ class ExcludeAppsDialog(MessageBoxBase):
 
 
 class SettingsPage(QWidget):
+    _health_done = Signal(object)     # 健康检查后台线程 → UI 线程弹结果
+
     def __init__(self, app):
         super().__init__()
         self.app = app
@@ -1653,6 +1656,7 @@ class SettingsPage(QWidget):
         scroll.setWidget(body)
         outer.addWidget(scroll, 1)
         cfg = app.cfg
+        self._health_done.connect(self._show_health_result)
 
         group = SettingCardGroup("剪贴板", self)
         c_pause = SwitchSettingCard(
@@ -1957,6 +1961,38 @@ class SettingsPage(QWidget):
         lay.addWidget(group2)
 
         # ---- 关于与更新 ----
+        groupDiag = SettingCardGroup("诊断", self)
+        c_diag = PushSettingCard(
+            "复制", FIF.COPY, "诊断信息",
+            "版本 / 运行环境 / 条目与存储占用 / 监听状态;"
+            "仅元数据(不含任何内容与密钥),可放心粘贴给问题反馈",
+            parent=groupDiag)
+        c_diag.clicked.connect(self._copy_diagnostics)
+        c_health = PushSettingCard(
+            "检查", FIF.HEART, "数据健康检查",
+            "数据库完整性 / 引用 blob 存在性 / 孤儿文件 / 私密区可解密 / 备份可读",
+            parent=groupDiag)
+        c_health.clicked.connect(self._run_health_check)
+        c_fts = PushSettingCard(
+            "重建", FIF.UPDATE, "重建搜索索引",
+            "全文索引整体重建(搜索异常时的修复动作,不影响数据)",
+            parent=groupDiag)
+        c_fts.clicked.connect(self._rebuild_fts)
+        c_orph = PushSettingCard(
+            "清理", FIF.DELETE, "清理孤立缓存",
+            "删除引用计数为零的图片 blob(与启动期自动清理同一套规则,"
+            "带新文件时间窗防护)", parent=groupDiag)
+        c_orph.clicked.connect(self._clean_orphan_caches)
+        c_logs = PushSettingCard(
+            "打开", FIF.FOLDER, "打开数据目录",
+            "app.log(运行日志)与 logs/perf.log(性能埋点)所在目录",
+            parent=groupDiag)
+        c_logs.clicked.connect(lambda: cm.reveal_in_explorer(
+            os.path.dirname(cm.LOG_FILE)))
+        for _c in (c_diag, c_health, c_fts, c_orph, c_logs):
+            groupDiag.addSettingCard(_c)
+        lay.addWidget(groupDiag)
+
         group5 = SettingCardGroup("关于与更新", self)
         c_ver = SettingCard(
             FIF.INFO, "当前版本",
@@ -2003,6 +2039,82 @@ class SettingsPage(QWidget):
             InfoBar.success("自动清理", "删除 %d 条,释放 %s"
                             % (n, cm._fmt_size(freed)),
                             parent=self, position=InfoBarPosition.TOP_RIGHT)
+
+    # ---- 诊断(建议 19/29;数据层见 diagnostics.py) ----
+    def _copy_diagnostics(self):
+        """复制诊断信息:轻量快照,仅元数据(不含内容与密钥)。"""
+        try:
+            text = diag.format_diagnostics(
+                diag.collect_diagnostics(self.app.core))
+            self.app.core.copy_text(text)
+            InfoBar.success("诊断信息已复制",
+                            "共 %d 行,可直接粘贴给问题反馈"
+                            % len(text.splitlines()),
+                            parent=self, position=InfoBarPosition.TOP_RIGHT)
+        except Exception:
+            cm.log("复制诊断信息失败:\n%s" % traceback.format_exc())
+            InfoBar.error("复制失败", "详情见 app.log", parent=self,
+                          position=InfoBarPosition.TOP_RIGHT)
+
+    def _run_health_check(self):
+        """数据健康检查(blob 目录扫描在后台线程,完成后回 UI 线程)。"""
+        core = self.app.core
+
+        def _work():
+            try:
+                res = diag.run_health_check(core)
+            except Exception:
+                cm.log("健康检查异常:\n%s" % traceback.format_exc())
+                res = {"ok": False, "results": [
+                    {"name": "检查异常", "ok": False,
+                     "detail": traceback.format_exc(limit=3)}]}
+            self._health_done.emit(res)
+
+        threading.Thread(target=_work, daemon=True,
+                         name="health-check").start()
+
+    def _show_health_result(self, res):
+        """健康检查结果:InfoBar 概要 + MessageBox 明细。"""
+        results = res.get("results") or []
+        lines = []
+        for r in results:
+            mark = "✓" if r["ok"] is True else \
+                ("✗" if r["ok"] is False else "—")
+            extra = ("  %s" % r["detail"]) if r.get("detail") else ""
+            lines.append("%s %s%s" % (mark, r["name"], extra))
+        bad = sum(1 for r in results if r["ok"] is False)
+        if res.get("ok"):
+            InfoBar.success("数据健康检查", "全部通过(共 %d 项)" % len(results),
+                            parent=self, position=InfoBarPosition.TOP_RIGHT)
+        else:
+            InfoBar.warning("数据健康检查", "发现 %d 项问题,详见详情" % bad,
+                            parent=self, position=InfoBarPosition.TOP_RIGHT)
+        MessageBox("数据健康检查", "\n".join(lines) or "无结果", self).exec()
+
+    def _rebuild_fts(self):
+        """重建全文索引(JSON 模式无索引,提示后返回)。"""
+        if self.app.core.store is None:
+            InfoBar.warning("重建搜索索引", "JSON 模式无全文索引", parent=self,
+                            position=InfoBarPosition.TOP_RIGHT)
+            return
+        try:
+            self.app.core.store.rebuild_fts()
+            InfoBar.success("重建搜索索引", "全文索引已整体重建", parent=self,
+                            position=InfoBarPosition.TOP_RIGHT)
+        except Exception:
+            cm.log("重建搜索索引失败:\n%s" % traceback.format_exc())
+            InfoBar.error("重建搜索索引", "失败,详情见 app.log", parent=self,
+                          position=InfoBarPosition.TOP_RIGHT)
+
+    def _clean_orphan_caches(self):
+        """手动触发一次孤儿清理(与启动期 +3s 的自动清理同一入口/规则)。"""
+        removed = self.app.core.cleanup_orphan_images()
+        InfoBar.success("清理孤立缓存",
+                        "删除 %d 个引用计数为零的文件" % removed if removed
+                        else "无孤立文件",
+                        parent=self, position=InfoBarPosition.TOP_RIGHT)
+        if removed:
+            self.app.refresh_view()
 
     # ---- 备份与迁移 ----
     def _export_history(self):
