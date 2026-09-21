@@ -2076,40 +2076,9 @@ class ClipboardCore:
                             removed += 1
             if removed:
                 log("孤儿 blob 清理:删除 %d 个引用计数为零的文件" % removed)
+            return removed
         except Exception:
-            pass
-
-        # 分片 blob 目录(data/blobs/<2位>/<哈希>)同样清理
-        try:
-            refs = {h.get("content") for h in self.history
-                    if h.get("type") == "image"}
-            now = time.time()
-            removed = 0
-            blob_root = os.path.join(APP_DIR, "data", "blobs")
-            if os.path.isdir(blob_root):
-                for d in os.scandir(blob_root):
-                    if not d.is_dir():
-                        continue
-                    for e in os.scandir(d.path):
-                        if not e.is_file():
-                            continue
-                        fp = os.path.join(d.path, e.name)
-                        if fp in refs:
-                            continue
-                        try:
-                            if now - e.stat().st_mtime < min_age:
-                                continue
-                        except OSError:
-                            continue
-                        try:
-                            os.remove(fp)
-                            removed += 1
-                        except Exception:
-                            pass
-            if removed:
-                log("孤儿 blob 清理:删除 %d 个未引用文件" % removed)
-        except Exception:
-            pass
+            return 0
 
     def _migrate_private(self):
         """旧版明文私密区在启动时立即升级为 DPAPI 加密(不等待下次写入)。"""

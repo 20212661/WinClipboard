@@ -1009,6 +1009,29 @@ check("不变量7:commit 失败时行与 blob 俱在",
       _bombed7 and _bp7.exists() and core.store.blob_refcount(_bh7) == 1)
 core.store.close()
 
+# 回归:孤儿清理不得波及撤销窗口内的 blob——曾有两套扫描并存,旧套只认
+# 内存 history 路径引用,软删图片不在 history,其 blob 会被误删(不变量 4 破坏)
+core = make_core()
+core.store = _st.ClipboardStore(os.path.join(_sdir, "inv_cleanup.db"))
+_png8 = b"\x89PNG\r\n\x1a\n" + b"inv8" * 64
+_bh8 = _hl6.sha256(_png8).hexdigest()
+_bp8 = _P(cm.blob_path(_bh8))
+_bp8.parent.mkdir(parents=True, exist_ok=True)
+_bp8.write_bytes(_png8)
+os.utime(_bp8, (1, 1))                      # mtime 调老,越过时间窗,故意"像"孤儿
+core.history[:] = [{"type": "image", "content": str(_bp8), "hash": _bh8,
+                    "w": 8, "h": 8, "ts": 1.0}]
+core.store.insert(core.history[0])
+core.soft_delete_at(0)                      # 软删:行 deleted 态,撤销窗口内
+core.cleanup_orphan_images()
+check("不变量4:孤儿清理不波及撤销窗内 blob(库行引用)",
+      _bp8.exists() and core.store.blob_refcount(_bh8) == 1)
+core.undo_delete()
+check("不变量4:清理后撤销仍可用",
+      _bp8.exists() and core.store.count() == 1)
+_bp8.unlink()                              # 清场:不留古老 mtime 的孤儿文件
+core.store.close()
+
 # ---- 诊断快照 + 数据健康检查(diagnostics.py,建议 19/29) ----
 import diagnostics as _diag
 _dcore = make_core()
