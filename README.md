@@ -33,6 +33,7 @@
 | 🧩 工作流(网页 AI 模式) | 不接 API 也能用:步骤可混搭「本地 AI / 网页 AI(提示词进剪贴板,可自动开网页)/ 人工确认 / 复制快照 / 文本变换 / 条件判断」六类,固定流程逐步推进,统一步骤契约可扩展 |
 | ✨ AI 一键动作 | 文本卡片悬停 **✨AI** 按钮或右键「✨ AI」:解释代码 / 优化代码 / 生成注释 / 总结 / 翻译 / 转Markdown 六个内置动作一键直跑,自定义工作流也在同一菜单;配好任一 AI 服务即可用(动作的工作流服务留空 = 默认服务),动作以 `ai/actions/*.json` 声明,数据目录 `ai_actions/` 可加自己的 |
 | 🎛 命令面板 | `Ctrl+Shift+P`(VSCode 习惯):全部功能注册成命令一处直达——剪贴板操作、查看与对比、六个 AI 动作、图钉画布、页面导航、导出/暂停/检查更新/退出;输入即过滤(名称/关键词/id 打分),`when` 谓词自动隐藏不适用命令;新功能只需在 `command/builtin.py` 注册一条 |
+| 🤖 Agent Runtime | 卡片 ✨AI →「🤖 Agent 任务…」或命令面板:填目标(如"帮我整理这篇论文"),**LLM 规划器**从工具注册表(summary / keywords / translate / code_explain / markdown / save_note / copy)制定任务计划,运行时按 observe→plan→execute→update 循环逐步执行,失败自动重规划;结果一键复制/存笔记,运行记录落 `agent_runs.json`(只元数据) |
 | 🔍 即时搜索 + DSL | 顶部搜索框关键词过滤(可搜"图片"或尺寸);支持 **Search DSL**:source:vscode / type:json|jwt|base64|image / after:2026-09-01 或 7d / before:2030-01-01 或 3d / is:pinned,与筛选下拉叠加生效,不新增任何按钮 |
 | 🧞 粘贴变换 | 右键「粘贴为」或 Ctrl+Shift+Enter 转换粘贴:纯文本/转义/引号包裹/JSON 压缩/JSON 格式化/URL 编解码/大小写,实时预览;Shift+Enter 纯文本粘贴直达 |
 | 🛠 类型纠正 | 识别错了不要忍:右键「类型」可把当前条目改为 纯文本/JWT/Base64/JSON/URL 或恢复自动,仅本条生效(卡片徽章与查看器立即跟随) |
@@ -88,6 +89,22 @@
 任一服务即可用**。在「工作流」页创建同名工作流(如「解释代码」)即可
 覆盖某个内置动作;动作本身是声明式 JSON(内置在 `ai/actions/`,用户动作
 放数据目录 `ai_actions/`,同 id 覆盖内置)。
+
+## 🤖 Agent Runtime(规划器 · 任务图 · 工具 · 循环)
+
+工作流是**固定流程**,Agent 是**LLM 现场规划**:给一个目标(如"帮我
+整理这篇论文"),规划器从工具注册表里制定任务计划,运行时按
+`observe → plan → execute → update_context` 循环执行,失败自动重规划,
+带轮次/任务数上限与协作取消。
+
+- **工具**(`agent/tools.py`):summary / keywords / translate /
+  code_explain / markdown(别名 markdown_export)/ save_note / copy;
+  上一步产出 = 下一步输入;LLM 工具走默认服务
+- **入口**:卡片 ✨AI →「🤖 Agent 任务…」或命令面板「Agent 任务」;
+  素材自动预填选中条目,运行纪要逐步显示计划与产出
+- **产物**:笔记追加到数据目录 `agent_notes.md`(Markdown,带时间戳);
+  运行记录落 `agent_runs.json`(保留 30 条,只元数据不记内容)
+- 新增工具 = 在 `agent/tools.py` 注册一条(名称+描述进规划器提示词)
 
 > **密钥安全**:`ai_services[].api_key` 落盘时自动用 Windows DPAPI 加密(绑定当前
 > 用户,与私密区同一机制),文件里不会留明文;旧版明文密钥在启动时自动升级,升级
@@ -165,6 +182,9 @@ WinClipboard\
 │                             registry 注册表 / workflows 内置工作流 / executor 执行器)
 ├── command\                  命令面板子包(command 对象 / registry 注册表与打分搜索 /
 │                             executor 统一执行出口 / builtin 内置命令目录)
+├── agent\                    Agent Runtime 子包(tools 工具注册表 / task_graph 计划
+│                             归一化 / planner LLM 规划器 / memory 运行记忆 / executor
+│                             observe→plan→execute→update 循环)
 ├── palette.py                命令面板浮层(Ctrl+Shift+P:输入即过滤,↑↓ Enter 执行,
 │                             失焦收起 / Esc 还原前窗焦点,顶部居中出现)
 ├── quickpaste.py             快捷粘贴浮层(Alt+`,Win+V 式:搜索 + 键盘粘贴 / 失焦收起 /
@@ -183,8 +203,11 @@ WinClipboard\
 │                             假 AI 端到端跑通内置动作/编辑器默认服务)
 ├── _command_test.py          命令面板测试(48 项;Command/注册表/执行器/内置目录
 │                             gating/AI 接线/离屏浮层过滤与执行)
+├── _agent_test.py            Agent Runtime 测试(45 项;工具/计划归一化/规划器
+│                             解析/循环(收敛/重规划/取消/上限)/记忆落盘/
+│                             假 AI 规划模式端到端真线程)
 ├── _pinboard_test.py         图钉画布单元+集成自检(72 项;序列化/资产/布局/持久化/迁移/LRU)
-├── _integration_test.py      Qt 前端集成自检(250 项;真实 app/核心/面板,离屏渲染,
+├── _integration_test.py      Qt 前端集成自检(254 项;真实 app/核心/面板,离屏渲染,
 │                             含 URL/JWT/Base64 Inspector、Diff、动作注册表、卡片徽章、
 │                             删除撤销、私密遮罩、热键录制、暂停监听、按应用排除、
 │                             存储清理、富文本剪贴板往返、来源/时间筛选、批量删除、

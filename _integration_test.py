@@ -1104,6 +1104,29 @@ a.palette.close_restore()
 a.win.switchTo(a.win.history_page)   # 导航命令测试后回到历史页(后续预览断言在此页)
 pump(0.2)
 
+# ---- Agent Runtime(路线图三阶段):入口与窗口 ----
+check("Agent命令已注册", "ai.agent" in a.commands)
+_ag_rec = text_card.rec if text_card is not None else None
+_aw = a.open_agent(rec=_ag_rec, goal="集成自检")
+pump(0.2)
+check("Agent窗口已打开", _aw is not None and _aw.isVisible()
+      and _aw.e_goal.text() == "集成自检")
+if _ag_rec is not None:
+    check("Agent素材预填", _aw.e_input.toPlainText() == _ag_rec["content"])
+if text_card is not None:
+    _ai_built3 = []
+    _oe_ag = wq.RoundMenu.exec
+    wq.RoundMenu.exec = lambda self, *args, **kw: _ai_built3.append(self)
+    try:
+        a.card_action("ai", text_card)
+    finally:
+        wq.RoundMenu.exec = _oe_ag
+    if _ai_built3:
+        t_ag = [x.text() for x in _ai_built3[0]._actions]
+        check("AI菜单含 Agent 入口", "🤖 Agent 任务…" in t_ag, str(t_ag))
+_aw.close()
+pump(0.1)
+
 # ---- 预览面板(Ditto 式:选中即显示完整内容,不弹窗不展开) ----
 a.core._post(("clip", ("text", "def ping():\n    return 'pong'\n")))
 a.core._post(("clip", ("text", '{"k":1}')))

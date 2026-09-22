@@ -119,6 +119,10 @@ def register_builtin(registry, app):
             ("to_markdown", "AI:生成 Markdown", "markdown 转换")):
         reg.register(Command("ai." + aid, name, _ai(aid, name),
                              when=has_text, category="AI", keywords=kw))
+    reg.register(Command("ai.agent", "Agent 任务(LLM 规划并执行)",
+                         lambda: app.open_agent(rec=_sel(app)),
+                         when=has_text, category="AI",
+                         keywords="agent planner 规划 计划 任务"))
     reg.register(Command("ai.workflows", "管理工作流",
                          app.show_ai_hub, category="AI",
                          keywords="workflow 工作流"))

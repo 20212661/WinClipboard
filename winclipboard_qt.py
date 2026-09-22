@@ -29,6 +29,8 @@ import workflow_steps as wfs   # AI 工作流 Step Contract(步骤统一契约)
 import workflow_runlog as wrl  # 工作流运行记录(Run Inspector 数据层)
 import ai                      # AI Action Bar 数据层(动作注册表/内置工作流/执行器)
 import command                 # 命令注册表(Command Palette 数据层)
+import agent as agent_pkg      # Agent Runtime(planner/task_graph/memory/executor)
+from agent import tools as agent_tools
 import diagnostics as diag     # 诊断快照 + 数据健康检查(纯数据层,无 UI)
 from quickpaste import QuickPasteWindow  # 快捷粘贴浮层(默认 Alt+`)
 from palette import CommandPaletteWindow  # 命令面板浮层(默认 Ctrl+Shift+P)
@@ -6681,6 +6683,255 @@ class WorkflowRunInspector(QWidget):
 
 
 # ============================================================
+# Agent Runtime 宿主侧(路线图三阶段):后台线程跑 observe→plan→
+# execute→update 循环,信号上抛进度;窗口展示规划/执行/结果。
+# ============================================================
+class AgentWorker(QThread):
+    """AgentRuntime 的后台线程:LLM 规划与工具执行都不占 UI 线程。"""
+
+    planned = Signal(int, list)        # 轮次, [{id, tool}]
+    task_start = Signal(int, str)      # 任务号, 工具名
+    task_done = Signal(int, bool, str)  # 任务号, 成败, 产出
+    result_ready = Signal(str)         # 最终产出(最新成功结果)
+    ended = Signal(bool, str)          # 总体成败, 运行纪要
+
+    def __init__(self, app, goal, input_text):
+        super().__init__()
+        self.app = app
+        self.goal = str(goal or "")
+        self.input_text = str(input_text or "")
+        self._cancel = False
+
+    def cancel(self):
+        """协作取消:轮间/任务间生效;LLM 在途不可中断,迟到结果照常入记忆。"""
+        self._cancel = True
+
+    def _on_event(self, kind, kw):
+        if kind == "planned":
+            self.planned.emit(int(kw.get("round", 0)),
+                              (kw.get("graph") or {}).get("tasks") or [])
+        elif kind == "task_start":
+            self.task_start.emit(int(kw.get("id", 0)), str(kw.get("tool", "")))
+        elif kind == "task":
+            self.task_done.emit(int(kw.get("id", 0)), bool(kw.get("ok")),
+                                str(kw.get("out", "")))
+
+    def run(self):
+        svc = cm.ai_service_by_name(self.app.cfg, "")    # 默认服务
+        if svc is None:
+            self.ended.emit(False, "尚未配置 AI 服务:请到「AI 服务」添加"
+                                  "(空服务 = 默认取第一个已配置)")
+            return
+
+        def chat(prompt):
+            return cm.ai_chat(svc, prompt)
+
+        tools = agent_tools.build_default_tools()
+        planner = agent_pkg.LLMPlanner(chat, tools)
+        ctx = {
+            "chat": chat,
+            "save_note": lambda g, t: agent_tools.default_save_note(
+                os.path.join(cm.APP_DIR, "agent_notes.md"), g, t),
+        }
+        rt = agent_pkg.AgentRuntime(
+            tools, planner, ctx=ctx,
+            should_cancel=lambda: self._cancel, on_event=self._on_event)
+        mem = rt.run(self.input_text, self.goal)
+        agent_pkg.RunMemory.save_run(mem.record(), cm.APP_DIR)
+        ok = bool(mem.finished and not mem.cancelled and not mem.error)
+        self.result_ready.emit(mem.last_output or self.input_text)
+        self.ended.emit(ok, mem.summary_text())
+
+
+class AgentRunner(QWidget):
+    """Agent 任务窗口:目标 + 素材 → LLM 规划 → 任务链执行 → 结果。"""
+
+    def __init__(self, app, rec=None, goal=""):
+        super().__init__(None)
+        self.app = app
+        self.setWindowTitle("Agent 任务")
+        self.setWindowIcon(app.icon)
+        self.setWindowFlags(Qt.Window)
+        self.setStyleSheet("QWidget { background: %s; }" % BG)
+        self.resize(720, 560)
+        self._worker = None
+        self._last_out = ""
+        self._dead = False
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(36, 24, 36, 16)
+        v.setSpacing(10)
+        v.addWidget(TitleLabel("Agent 任务"))
+
+        hint = CaptionLabel("LLM 规划器按目标制定任务计划(summary / keywords / "
+                            "markdown / save_note 等工具链),逐步执行、失败自动重规划;"
+                            "素材预填剪贴板条目,可改。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: %s;" % TER)
+        v.addWidget(hint)
+
+        row = QHBoxLayout()
+        lab = BodyLabel("目标")
+        lab.setStyleSheet("color: %s;" % SEC)
+        self.e_goal = LineEdit()
+        self.e_goal.setPlaceholderText("例如:帮我整理这篇论文")
+        self.e_goal.setText(str(goal or ""))
+        row.addWidget(lab)
+        row.addWidget(self.e_goal, 1)
+        v.addLayout(row)
+
+        v.addWidget(BodyLabel("素材"))
+        self.e_input = TextEdit()
+        self.e_input.setPlaceholderText("Agent 要处理的文本(自动预填选中条目)")
+        content = (rec or {}).get("content")
+        if rec is not None and rec.get("type") == "text" and content:
+            self.e_input.setPlainText(str(content)[:100000])
+        self.e_input.setFont(font(12))
+        self.e_input.setFixedHeight(96)
+        v.addWidget(self.e_input)
+
+        row2 = QHBoxLayout()
+        self.b_run = PrimaryPushButton("▶ 运行")
+        self.b_run.setIcon(FIF.PLAY.icon())
+        self.b_cancel = PushButton("停止")
+        self.b_cancel.setEnabled(False)
+        self.b_copy = PushButton("复制结果")
+        self.b_note = PushButton("存为笔记")
+        self.b_run.clicked.connect(self._start)
+        self.b_cancel.clicked.connect(self._cancel)
+        self.b_copy.clicked.connect(self._copy_out)
+        self.b_note.clicked.connect(self._save_note)
+        row2.addWidget(self.b_run)
+        row2.addWidget(self.b_cancel)
+        row2.addStretch(1)
+        row2.addWidget(self.b_note)
+        row2.addWidget(self.b_copy)
+        v.addLayout(row2)
+
+        self.transcript = QPlainTextEdit()
+        self.transcript.setReadOnly(True)
+        self.transcript.setFont(font(12))
+        self.transcript.setPlaceholderText("运行纪要:计划、每步产出与最终结果会显示在这里")
+        v.addWidget(self.transcript, 1)
+
+        self.lbl_status = CaptionLabel("就绪")
+        self.lbl_status.setStyleSheet("color: %s;" % TER)
+        v.addWidget(self.lbl_status)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        ensure_onscreen(self)
+
+    # ---- 运行控制 ----
+    def _start(self):
+        if self._worker is not None:
+            return
+        goal = self.e_goal.text().strip()
+        content = self.e_input.toPlainText()
+        if not goal and not content:
+            InfoBar.warning("缺少输入", "请填写目标或素材", parent=self,
+                            position=InfoBarPosition.TOP_RIGHT)
+            return
+        if cm.ai_service_by_name(self.app.cfg, "") is None:
+            InfoBar.warning("未配置 AI 服务",
+                            "请先到「AI 服务」添加任一服务(Agent 用默认服务)",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT)
+            return
+        self.transcript.clear()
+        self._last_out = ""
+        self.b_run.setEnabled(False)
+        self.b_cancel.setEnabled(True)
+        self._say("🎯 目标:%s" % (goal or "(未填写)"))
+        self._say("📄 素材:%d 字" % len(content))
+        self.lbl_status.setText("第 1 轮规划中…")
+        w = AgentWorker(self.app, goal, content)
+        w.planned.connect(self._on_planned)
+        w.task_start.connect(self._on_task_start)
+        w.task_done.connect(self._on_task_done)
+        w.result_ready.connect(self._on_result)
+        w.ended.connect(self._on_ended)
+        w.finished.connect(w.deleteLater)
+        self._worker = w
+        w.start()
+
+    def _cancel(self):
+        if self._worker is not None:
+            self._worker.cancel()
+            self.b_cancel.setEnabled(False)
+            self.lbl_status.setText("已请求停止(在途调用完成后停下)…")
+
+    # ---- 进度回调 ----
+    def _say(self, line):
+        self.transcript.appendPlainText(line)
+
+    def _on_planned(self, round_no, tasks):
+        names = " → ".join("%s.%s" % (t.get("id"), t.get("tool")) for t in tasks)
+        self._say("🧭 第 %d 轮计划:%s" % (round_no, names or "(空)"))
+
+    def _on_task_start(self, tid, tool):
+        self.lbl_status.setText("执行中:任务%d · %s" % (tid, tool))
+
+    def _on_task_done(self, tid, ok, out):
+        if ok:
+            self._say("  ✓ 任务%d 完成(%d 字)" % (tid, len(out)))
+            head = out.strip().splitlines()[0][:200] if out.strip() else ""
+            if head:
+                self._say("    │ " + head)
+        else:
+            self._say("  ✗ 任务%d 失败:%s" % (tid, out.strip()[:200]))
+
+    def _on_result(self, text):
+        self._last_out = str(text or "")
+
+    def _on_ended(self, ok, summary):
+        self._worker = None
+        self.b_run.setEnabled(True)
+        self.b_cancel.setEnabled(False)
+        self.lbl_status.setText("完成" if ok else "未完成")
+        self._say("")
+        for line in summary.splitlines():
+            self._say(line)
+        if ok:
+            InfoBar.success("Agent 任务完成", "结果可复制,纪要见下方",
+                            parent=self, position=InfoBarPosition.TOP_RIGHT)
+        if self._dead:
+            self.close()
+
+    # ---- 结果动作 ----
+    def _copy_out(self):
+        text = self._last_out or self.e_input.toPlainText()
+        if not text:
+            return
+        self.app.core.copy_text(text)
+        InfoBar.success("已复制", "Agent 结果已放入剪贴板", parent=self,
+                        position=InfoBarPosition.TOP_RIGHT)
+
+    def _save_note(self):
+        text = self._last_out or self.e_input.toPlainText()
+        if not text:
+            return
+        ok, msg = agent_tools.default_save_note(
+            os.path.join(cm.APP_DIR, "agent_notes.md"),
+            self.e_goal.text().strip(), text)
+        (InfoBar.success if ok else InfoBar.error)(
+            "保存笔记" if ok else "保存失败", msg, parent=self,
+            position=InfoBarPosition.TOP_RIGHT)
+
+    def closeEvent(self, e):
+        if self._worker is not None:
+            self._dead = True
+            self._worker.cancel()
+            self.hide()
+            e.ignore()          # 在途任务收尾后由 _on_ended 真正关闭
+            return
+        try:
+            self.app._agents.remove(self)
+        except (ValueError, AttributeError):
+            pass
+        super().closeEvent(e)
+
+
+# ============================================================
 # 动作注册表(Action Registry):卡片右键菜单与查看器专属动作的数据源。
 # 新增内容动作 = 在这里登记一条,不再往 card_menu/_inspector_actions
 # 里堆 if/elif;supported 谓词决定该条目何时出现。
@@ -6909,6 +7160,7 @@ class WinClipboardApp(QObject):
         self.win = MainWindow(self)
         self.panel = self.win.history_page     # 既有内部引用的稳定别名
         self._ai_runners = []
+        self._agents = []                 # Agent 任务窗口(可同时多个)
         self._viewers = []
         self._diffs = []
         self._diff_base = None               # 对比基准记录(Ctrl+点击选定)
@@ -7191,7 +7443,8 @@ class WinClipboardApp(QObject):
     # 固定映射而非开放取属性:图标名是外部输入(JSON),白名单之外一律无图标。
     _AI_MENU_ICONS = {"EMBED": FIF.EMBED, "DEVELOPER_TOOLS": FIF.DEVELOPER_TOOLS,
                       "CODE": FIF.CODE, "BOOK_SHELF": FIF.BOOK_SHELF,
-                      "DICTIONARY": FIF.DICTIONARY, "LABEL": FIF.LABEL}
+                      "DICTIONARY": FIF.DICTIONARY, "LABEL": FIF.LABEL,
+                      "ROBOT": FIF.ROBOT}
 
     def _ai_submenu(self, rec):
         """构建「✨ AI」菜单:内置动作一键直跑 + 自定义工作流;未配置
@@ -7212,6 +7465,11 @@ class WinClipboardApp(QObject):
             a.triggered.connect(self.show_services)
             return menu
         reg = getattr(self, "ai_actions", None) or ai.get_registry()
+        ag = _act(menu, "🤖 Agent 任务…")
+        ag.setIcon(FIF.ROBOT.icon())
+        ag.setToolTip("LLM 规划器按目标制定任务计划并逐步执行")
+        ag.triggered.connect(lambda _=False: self.open_agent(rec=rec))
+        menu.addSeparator()
         for d in reg.for_record(rec):
             a = _act(menu, d.get("name", "?"))
             ic = self._AI_MENU_ICONS.get(str(d.get("icon") or ""))
@@ -7584,6 +7842,13 @@ class WinClipboardApp(QObject):
         runner = WorkflowRunner(self, wf, rec["content"])
         _pop_to_front(runner)
         self._ai_runners.append(runner)
+
+    def open_agent(self, rec=None, goal=""):
+        """打开 Agent 任务窗口(素材预填选中条目;入口:✨AI 菜单/命令面板)。"""
+        w = AgentRunner(self, rec=rec, goal=goal)
+        _pop_to_front(w)
+        self._agents.append(w)
+        return w
 
     # ---- 托盘动作 ----
     def clear_all(self):

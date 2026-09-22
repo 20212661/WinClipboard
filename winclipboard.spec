@@ -34,6 +34,9 @@ a = Analysis(
         "command",
         "command.executor",
         "palette",
+        "agent",
+        "agent.tools",
+        "agent.executor",
         # 可迁移加密备份(AES-256-GCM),延迟导入兜底
         "cryptography",
         "cryptography.hazmat.primitives.ciphers.aead",
