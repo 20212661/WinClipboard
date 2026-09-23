@@ -2143,8 +2143,11 @@ class SettingsPage(QWidget):
             return
         try:
             payload = self.app.core.export_payload(bool(chk_img.isChecked()))
-            Path(path).write_text(json.dumps(payload, ensure_ascii=False),
-                                  encoding="utf-8")
+            # indent=2:导出文件给人看/给人diff,不再是挤成一行的机器格式;
+            # 导入走 json.load,缩进不影响还原
+            Path(path).write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8")
         except Exception:
             cm.log("导出历史失败:\n%s" % traceback.format_exc())
             InfoBar.error("导出失败", "详情见日志(%s)" % cm.LOG_FILE, parent=self,
