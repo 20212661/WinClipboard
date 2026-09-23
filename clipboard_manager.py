@@ -2544,6 +2544,75 @@ class ClipboardCore:
             self._blob_unref(h)
         self._mark_dirty()
 
+    def wipe_all_data(self, wipe_private=True, reset_config=False):
+        """一键清空全部数据(设置页「清空全部数据」;不可撤销)。
+
+        逐步执行、任一步失败即中止(已完成步骤照实返回,便于报告与复跑):
+          1. 撤销栈清空(条目即将全灭,撤销已无意义)
+          2. 历史全清(含置顶):内存出列 + 库整表物理删除;JSON 镜像
+             (加密模式导出的 history.json)写空;历史备份链 .bak1~3
+             一并删除(备份含旧数据,不清等于没清)
+          3. 图片资产全清:blobs/ 分片与旧 images/ 目录全部文件——引用已
+             全灭,无需引用计数与时间窗
+          4. 私密区清空(wipe_private=True):原地清空 + 落盘空加密容器
+          5. 配置重置(reset_config=True):配置与备份删除,内存 cfg 原地
+             换回默认值并立即落盘(容器身份不变,前端别名仍有效)
+        不动:app.log、boot_state、workflow_runs.json(诊断与运行记录)、
+        图钉画布资产(pins/ 由画布自行管理)。
+        返回 (已完成步骤说明列表, 是否全部成功)。
+        """
+        done = []
+        try:
+            self._txn_list().clear()
+            done.append("撤销栈清空")
+
+            self.history.clear()
+            if self.store is not None:
+                self.store.reset()          # 全行物理删除(FTS 由触发器同步)
+            save_history([], encrypt=bool(self.cfg.get("encrypt_history")))
+            for i in (1, 2, 3):
+                fp = "%s.bak%d" % (HISTORY_FILE, i)
+                if os.path.exists(fp):
+                    os.remove(fp)
+            cache = getattr(self, "_search_cache", None)
+            if cache is not None:
+                cache.clear()
+            self._dirty = False
+            done.append("历史全清(含置顶)")
+
+            removed_files = 0
+            for base in (BLOB_DIR, IMAGE_DIR):
+                if not os.path.isdir(base):
+                    continue
+                for root, _dirs, files in os.walk(base):
+                    for f in files:
+                        try:
+                            os.remove(os.path.join(root, f))
+                            removed_files += 1
+                        except Exception:
+                            pass
+            done.append("图片文件全清(%d 个)" % removed_files)
+
+            if wipe_private:
+                self.private.clear()
+                save_private(self.private)
+                done.append("私密区清空")
+            if reset_config:
+                for suffix in ("", ".bak1", ".bak2", ".bak3"):
+                    fp = CONFIG_FILE + suffix
+                    if os.path.exists(fp):
+                        os.remove(fp)
+                self.cfg.clear()
+                self.cfg.update(DEFAULT_CFG)
+                save_config(self.cfg)
+                done.append("配置重置")
+            log("清空全部数据:完成(%s)" % "; ".join(done))
+            return done, True
+        except Exception:
+            log("清空全部数据中途失败(已完成: %s):\n%s"
+                % ("; ".join(done), traceback.format_exc()))
+            return done, False
+
     # ---- 可撤销删除(Transaction 栈) ----
     _TXN_MAX = 20                  # 撤销栈最多保留 20 笔事务(弹底即不可再撤)
     _TXN_GC_GRACE = 45.0           # deleted 态行的 GC 宽限(秒);须远大于 UI 6s 撤销窗

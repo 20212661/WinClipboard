@@ -1095,6 +1095,44 @@ check("runlog:中途关闭=partial", _rec4.abort()["status"] == "partial")
 check("runlog:keep 截断", _wrl.save_run(_rec4.abort(), _rlp, keep=2) == 3
       and len(_wrl.load_runs(_rlp)) == 2)
 
+# ---- 清空全部数据(设置页「清空全部数据」核心层) ----
+core = make_core()
+core.store = _st.ClipboardStore(os.path.join(_sdir, "wipe.db"))
+core.cfg["ai_services"] = [{"name": "S", "api_key": "sk-x"}]
+_png_w = b"\x89PNG\r\n\x1a\n" + b"wipe" * 32
+_bh_w = _hl6.sha256(_png_w).hexdigest()
+_bp_w = _P(cm.blob_path(_bh_w))
+_bp_w.parent.mkdir(parents=True, exist_ok=True)
+_bp_w.write_bytes(_png_w)
+core.history[:] = [
+    {"type": "text", "content": "wipe-t", "pinned": True, "ts": 1.0},
+    {"type": "image", "content": str(_bp_w), "hash": _bh_w,
+     "w": 4, "h": 4, "ts": 2.0},
+]
+for _r in core.history:
+    core.store.insert(_r)
+core.private[:] = ["私密甲"]
+cm.save_private(core.private)
+cm.save_config(core.cfg)
+core.soft_delete_at(0)                       # 撤销栈里压一笔
+done_w, ok_w = core.wipe_all_data(wipe_private=True, reset_config=True)
+check("wipe:全部步骤成功", ok_w and len(done_w) == 5, str(done_w))
+check("wipe:历史/库/撤销栈全清", core.history == []
+      and core.store.count() == 0 and core._txn_list() == [])
+check("wipe:图片文件与备份链清除", not _bp_w.exists()
+      and not os.path.exists(cm.HISTORY_FILE + ".bak1"))
+check("wipe:私密区清空", core.private == [] and cm.load_private() == [])
+check("wipe:配置重置回默认", core.cfg == dict(cm.DEFAULT_CFG)
+      and cm.load_config().get("ai_services") == [])
+core.store.close()
+# JSON 模式(无库)同样成立
+core2 = make_core()
+core2.history[:] = [{"type": "text", "content": "j", "pinned": False,
+                     "ts": 1.0}]
+done2_w, ok2_w = core2.wipe_all_data(wipe_private=False, reset_config=False)
+check("wipe:JSON 模式清空", ok2_w and core2.history == []
+      and cm.load_history() == [])
+
 # ---- 诊断快照 + 数据健康检查(diagnostics.py,建议 19/29) ----
 import diagnostics as _diag
 _dcore = make_core()

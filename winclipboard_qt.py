@@ -1800,6 +1800,13 @@ class SettingsPage(QWidget):
         group3.addSettingCard(c_days)
         group3.addSettingCard(c_disk)
         group3.addSettingCard(c_enc)
+        c_wipe = PushSettingCard(
+            "清空…", FIF.DELETE, "清空全部数据",
+            "历史(含置顶)/图片文件/历史备份全部清空,不可撤销;"
+            "私密区与设置可选是否一并清空",
+            parent=group3)
+        c_wipe.clicked.connect(self._wipe_all_data)
+        group3.addSettingCard(c_wipe)
         lay.addWidget(group3)
 
         # ---- 备份与迁移 ----
@@ -2042,6 +2049,79 @@ class SettingsPage(QWidget):
                             parent=self, position=InfoBarPosition.TOP_RIGHT)
 
     # ---- 诊断(建议 19/29;数据层见 diagnostics.py) ----
+    def _wipe_all_data(self):
+        """清空全部数据:两步确认(明细+可选范围 → 输入「清空」)后执行。"""
+        core = self.app.core
+        n_items = len(core.history) + core.store.count() \
+            if core.store is not None else len(core.history)
+        n_priv = len(core.private)
+        _bf, blob_bytes = diag._dir_stats(cm.BLOB_DIR)
+        _if_, img_bytes = diag._dir_stats(cm.IMAGE_DIR)
+
+        dlg = MessageBoxBase(self)
+        ttl = StrongBodyLabel("清空全部数据")
+        dlg.viewLayout.addWidget(ttl)
+        body = CaptionLabel(
+            "将永久删除(不可撤销,撤销栈同时作废):\n"
+            "· 普通历史 %d 条(含置顶,含已删除待回收)\n"
+            "· 全部图片文件(约 %s)\n"
+            "· 历史备份(.bak1~3)\n\n"
+            "不会动:日志与诊断记录、图钉画布、工作流运行记录。"
+            % (n_items, cm._fmt_size(blob_bytes + img_bytes)))
+        body.setWordWrap(True)
+        dlg.viewLayout.addWidget(body)
+        chk_priv = CheckBox("同时清空私密区(%d 条,含敏感内容)" % n_priv)
+        chk_cfg = CheckBox("同时重置全部设置(AI 服务密钥 / 工作流 / 主题等)")
+        dlg.viewLayout.addWidget(chk_priv)
+        dlg.viewLayout.addWidget(chk_cfg)
+        dlg.yesButton.setText("下一步…")
+        dlg.cancelButton.setText("取消")
+        dlg.widget.setFixedWidth(460)
+        if not dlg.exec():
+            return
+
+        # 第二步:输入「清空」才算数——高危动作的物理确认
+        dlg2 = MessageBoxBase(self)
+        ttl2 = StrongBodyLabel("最终确认")
+        dlg2.viewLayout.addWidget(ttl2)
+        tip = CaptionLabel("此操作不可撤销、无法恢复。请输入「清空」两字继续:")
+        dlg2.viewLayout.addWidget(tip)
+        edit = LineEdit()
+        edit.setPlaceholderText("清空")
+        dlg2.viewLayout.addWidget(edit)
+        dlg2.yesButton.setText("执行清空")
+        dlg2.yesButton.setEnabled(False)
+        dlg2.cancelButton.setText("取消")
+        dlg2.widget.setFixedWidth(400)
+
+        def _gate(text):
+            dlg2.yesButton.setEnabled(text.strip() == "清空")
+
+        edit.textChanged.connect(_gate)
+        if not dlg2.exec():
+            return
+
+        done, ok = core.wipe_all_data(wipe_private=chk_priv.isChecked(),
+                                      reset_config=chk_cfg.isChecked())
+        # 前端联动:缩略图缓存/列表/私密区/来源下拉全部重建
+        self.app._thumbs.clear()
+        self.app.refresh_view()
+        for page in (getattr(self.app.win, "private_page", None),):
+            if page is not None and hasattr(page, "refresh"):
+                page.refresh()
+        if ok:
+            InfoBar.success("已清空全部数据",
+                            "完成:%s%s" % ("; ".join(done),
+                                           ";建议重启应用使界面完全复位"
+                                           if chk_cfg.isChecked() else ""),
+                            parent=self, position=InfoBarPosition.TOP_RIGHT,
+                            duration=8000)
+        else:
+            InfoBar.error("清空中途失败",
+                          "已完成:%s;详情见日志" % "; ".join(done),
+                          parent=self, position=InfoBarPosition.TOP_RIGHT,
+                          duration=-1)
+
     def _copy_diagnostics(self):
         """复制诊断信息:轻量快照,仅元数据(不含内容与密钥)。"""
         try:
