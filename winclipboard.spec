@@ -25,6 +25,14 @@ a = Analysis(
         # 本项目模块(被字符串/延迟路径引用时兜底)
         "perf_probe",
         "pinboard",
+        # 阶段 8 拆分出的模块(静态导入为主,此处兜底)
+        "ui_base",
+        "viewer",
+        "image_editor",
+        "workflow_ui",
+        "win32_host",
+        "privacy_store",
+        "history_store",
         # 可迁移加密备份(AES-256-GCM),延迟导入兜底
         "cryptography",
         "cryptography.hazmat.primitives.ciphers.aead",
@@ -62,6 +70,16 @@ a = Analysis(
 from PyInstaller.utils.hooks import collect_data_files  # noqa: E402
 
 a.datas += collect_data_files("qfluentwidgets")
+
+# Windows Qt wheels use the OS ICU API (unversioned ucnv_* exports).
+# A third-party icuuc.dll discovered through PATH, e.g. Poppler's versioned
+# ICU build, shadows the OS DLL and makes QtCore fail with WinError 127.
+# Keep an ICU DLL shipped with Qt itself; never bundle a PATH-discovered copy.
+import PySide6
+qt_package_dir = os.path.normcase(os.path.dirname(PySide6.__file__))
+a.binaries = [entry for entry in a.binaries
+              if os.path.basename(entry[0]).lower() != "icuuc.dll"
+              or os.path.normcase(os.path.dirname(entry[1])) == qt_package_dir]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 

@@ -21,9 +21,11 @@ if errorlevel 1 (
     "%PY%" -m pip install pyinstaller || (pause & exit /b 1)
 )
 
-REM Build icon (same generator the app uses at runtime, so tray/exe match)
+REM Build icon (same generator the app uses at runtime, so tray/exe match).
+REM APPDATA is redirected to a throwaway temp dir for this subprocess so the
+REM build never creates files in the real user data directory.
 if not exist build mkdir build
-"%PY%" -c "import clipboard_manager as cm; cm.ensure_dirs(); cm.make_icon(r'build\icon.ico')" || echo [WARN] icon generation failed, exe falls back to default icon
+"%PY%" -c "import os,tempfile;os.environ['APPDATA']=tempfile.mkdtemp(prefix='wclb_build_');import clipboard_manager as cm;cm.make_icon(r'build\icon.ico')" || echo [WARN] icon generation failed, exe falls back to default icon
 
 echo Building WinClipboard (onedir)...
 "%PY%" -m PyInstaller winclipboard.spec --noconfirm --clean
