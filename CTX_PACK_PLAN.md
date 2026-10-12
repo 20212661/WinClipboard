@@ -20,7 +20,7 @@
 | P0 前置 | ✅ 完成 | main 3f7af00..f80165e(11 提交) | 8 新模块入库;`feature/ctx-pack` 切出;15 模块导入冒烟 OK |
 | P1 模型/预算/拼装 | ✅ 完成 | 见 git log | `_ctxpack_test` 29 项 OK(估算区间/确定性/金样模板/截断/转义/性能 200KB≤10ms);CJK 计数用正则删串(translate 实测 17.5ms→2.5ms) |
 | P2 存储/服务 | ✅ 完成 | 见 git log | `_ctxpack_store_test` 20 项 OK(原子写/轮转/损坏留档/DPAPI 故障注入/双向迁移/清空/备份往返/集成钩子);cm 四处薄钩子:CTXPACK_FILE 常量、set_history_encryption 同步迁移(开启失败中止切换)、wipe_all_data 第 5 步、portable 备份含包 |
-| P3 UI 最小闭环 | 待开始 | | |
+| P3 UI 最小闭环 | ✅ 完成 | 见 git log | ctxpack/ui_tray.py 托盘(折叠徽标/包切换/预算三态/条目行/预览拼装/复制拼装)+ 卡片右键子菜单(多选批量)+ 查看器选区加入 + 敏感确认弹窗;_ctxpack_ui_test 14 项(几何不遮挡/三态/省略/拦截放行);_module_split_test 补调色板五模块同步;spec+打包冒烟清单登记 ctxpack;**基准 5/5 达标无回退**(benchmark 失败为本环境 %TEMP% 不可写→sqlite 临时文件被拒,工作区 TMP 绕行后全过,非代码问题);_ui_doc_shots 截图补充未做(留 polish) |
 | P4 工作流/提问 | 待开始 | | |
 | P5 轻量会话 | 可选(不做) | | P4 后再评估 |
 | P6 AI 压缩 | 可选(不做) | | |

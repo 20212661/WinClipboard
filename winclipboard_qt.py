@@ -577,6 +577,11 @@ class HistoryPage(QWidget):
         pv.addWidget(self.pv_img)
         v.addWidget(self.preview)
 
+        # 上下文篮托盘(默认折叠;服务延迟构造,首帧零成本)
+        from ctxpack.ui_tray import ContextTray
+        self.ctx_tray = ContextTray(app, self)
+        v.addWidget(self.ctx_tray)
+
         # ---- 底栏 ----
         foot = QHBoxLayout()
         foot.setContentsMargins(4, 6, 2, 2)
@@ -1883,6 +1888,9 @@ class SettingsPage(QWidget):
                 InfoBar.error("存储转换未完成", str(exc), parent=self,
                               position=InfoBarPosition.TOP_RIGHT, duration=8000)
                 return
+            svc = getattr(app, "_ctxpack_svc", None)
+            if svc is not None:            # 服务已在用:随开关对齐(文件已由核心层迁移)
+                svc.set_encrypt(bool(on))
             InfoBar.success("历史加密已" + ("开启" if on else "关闭"),
                             "存储已转换为" + ("加密 JSON" if on else "SQLite 库")
                             + "格式", parent=self, position=InfoBarPosition.TOP_RIGHT)
@@ -2160,7 +2168,8 @@ class SettingsPage(QWidget):
             "将永久删除(不可撤销,撤销栈同时作废):\n"
             "· 普通历史 %d 条(含置顶,含已删除待回收)\n"
             "· 全部图片文件(约 %s)\n"
-            "· 历史备份(.bak1~3)\n\n"
+            "· 历史备份(.bak1~3)\n"
+            "· 上下文包(全部包与条目,含备份)\n\n"
             "不会动:日志与诊断记录、图钉画布、工作流运行记录。"
             % (n_items, cm._fmt_size(blob_bytes + img_bytes)))
         body.setWordWrap(True)
@@ -2845,6 +2854,11 @@ class WinClipboardApp(QObject):
     def signal_q(self):
         return self.core.signal_q
 
+    def ctxpack(self):
+        """上下文包服务(延迟构造与缓存见 ui_tray.tray_service;测试可打桩)。"""
+        from ctxpack.ui_tray import tray_service
+        return tray_service(self)
+
     def _on_history_change(self):
         """核心投递的 "change" 信号(GUI 线程):剪贴捕获入史后,
         面板可见时合并刷新(防抖),避免连续捕获反复重建列表;
@@ -3187,6 +3201,11 @@ class WinClipboardApp(QObject):
             a = act(menu, "删除所选 %d 条(可撤销)" % len(self._multi_recs))
             a.triggered.connect(lambda _=False: self.delete_selection_or_multi())
             menu.addSeparator()
+        # ---- 加入上下文包(上下文篮;多选段选时即批量入口) ----
+        from ctxpack.ui_tray import append_ctx_menu
+        append_ctx_menu(self, menu,
+                        [r for r in self.history if id(r) in self._multi_recs]
+                        if len(self._multi_recs) > 1 else [rec])
         if rec.get("type") == "text":
             # ---- 粘贴为(变换)子菜单:不适用项置灰 ----
             sub = RoundMenu("粘贴为", self.panel)

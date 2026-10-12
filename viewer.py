@@ -1151,6 +1151,17 @@ class ViewerWindow(QWidget):
     # ---- 更多菜单 ----
     def _show_more_menu(self):
         m = RoundMenu(parent=self)
+        # 加入上下文篮(选区优先;延迟 import,查看器导入图不变)
+        from ctxpack.ui_tray import add_text_to_pack
+        sel = self._selected_text()
+        a_ctx = QAction("加入上下文篮(选区 %d 字)" % len(sel)
+                        if sel else "加入上下文篮(整条)", m)
+        a_ctx.triggered.connect(
+            lambda _=False: add_text_to_pack(
+                self.app, sel if sel else self._raw,
+                src_app=self.rec.get("src") or ""))
+        m.addAction(a_ctx)
+        m.addSeparator()
         if self._kind == "text":
             sub = RoundMenu("语言", self)
             for i, a in enumerate(self._lang_acts):
@@ -1172,6 +1183,17 @@ class ViewerWindow(QWidget):
         m.exec(self.btn_more.mapToGlobal(
             QPoint(self.btn_more.width() // 2, self.btn_more.height() + 8)))
         m.deleteLater()
+
+    def _selected_text(self):
+        """当前文本视图的选区(无选区/非文本视图返回空串)。"""
+        try:
+            ed = self._active_edit()
+        except Exception:
+            return ""
+        if ed is None:
+            return ""
+        c = ed.textCursor()
+        return c.selection().toPlainText() if c.hasSelection() else ""
 
     # ---- 查找 ----
     def _open_find(self):

@@ -49,21 +49,22 @@ import ui_base
 import viewer
 import image_editor
 import winclipboard_qt as wq
+import ctxpack.ui_tray as ctr
 from qfluentwidgets import setTheme, Theme
 setTheme(Theme.LIGHT)
 
 # ---- 1. 调色板多模块同步 ----
 wq.init_palette(False)
 check("palette.light-sync",
-      wq.BG == ui_base.BG == viewer.BG == image_editor.BG
-      and wq.ACCENT == viewer.ACCENT == image_editor.ACCENT
+      wq.BG == ui_base.BG == viewer.BG == image_editor.BG == ctr.BG
+      and wq.ACCENT == viewer.ACCENT == image_editor.ACCENT == ctr.ACCENT
       and wq.IS_DARK is False)
 setTheme(Theme.DARK)
 wq.init_palette(True)
 check("palette.dark-sync",
-      wq.BG == ui_base.BG == viewer.BG == image_editor.BG == "#1e1e1e"
+      wq.BG == ui_base.BG == viewer.BG == image_editor.BG == ctr.BG == "#1e1e1e"
       and wq.DIFF_ADD == viewer.DIFF_ADD == image_editor.DIFF_ADD == "#5ec97f"
-      and wq.IS_DARK is True and viewer.IS_DARK is True)
+      and wq.IS_DARK is True and viewer.IS_DARK is True and ctr.IS_DARK is True)
 setTheme(Theme.LIGHT)
 wq.init_palette(False)
 

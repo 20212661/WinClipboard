@@ -40,7 +40,9 @@ def verify_archive(exe):
                  "workflow_steps", "workflow_runlog", "quickpaste",
                  "diagnostics", "perf_probe",
                  "ui_base", "viewer", "image_editor", "workflow_ui",
-                 "win32_host", "privacy_store", "history_store"):
+                 "win32_host", "privacy_store", "history_store",
+                 "ctxpack.model", "ctxpack.budget", "ctxpack.assemble",
+                 "ctxpack.store", "ctxpack.service", "ctxpack.ui_tray"):
         source = compile((root / (name + ".py")).read_text(encoding="utf-8-sig"),
                          name + ".py", "exec")
         if code_signature(pyz.extract(name)) != code_signature(source):

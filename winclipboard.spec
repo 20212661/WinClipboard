@@ -33,6 +33,14 @@ a = Analysis(
         "win32_host",
         "privacy_store",
         "history_store",
+        # 上下文包(全部延迟导入,静态分析看不见)
+        "ctxpack",
+        "ctxpack.model",
+        "ctxpack.budget",
+        "ctxpack.assemble",
+        "ctxpack.store",
+        "ctxpack.service",
+        "ctxpack.ui_tray",
         # 可迁移加密备份(AES-256-GCM),延迟导入兜底
         "cryptography",
         "cryptography.hazmat.primitives.ciphers.aead",
