@@ -15,6 +15,11 @@ from .budget import (Allocation, AllocationEntry, BudgetError,
                      count_cjk, estimate_tokens, refresh_estimates,
                      truncate_head_tail, usable_budget, allocate)
 from .assemble import (Assembled, FORMATS, FMT_XML, FMT_MARKDOWN, assemble)
+from . import store as _store_module
+from .store import (PackLoadResult, SaveResult, FILE_VERSION,
+                    load_packs_status, save_packs, migrate_packs_file,
+                    wipe_packs, merge_packs_payload)
+from .service import AddResult, ContextPackService, snapshot_args_from_record
 
 __all__ = [
     "ContextItem", "ContextPack", "ITEM_KINDS", "ITEM_ROLES",
@@ -26,4 +31,7 @@ __all__ = [
     "DROP_OVER_BUDGET", "DROP_SENSITIVE", "count_cjk", "estimate_tokens",
     "refresh_estimates", "truncate_head_tail", "usable_budget", "allocate",
     "Assembled", "FORMATS", "FMT_XML", "FMT_MARKDOWN", "assemble",
+    "PackLoadResult", "SaveResult", "FILE_VERSION", "load_packs_status",
+    "save_packs", "migrate_packs_file", "wipe_packs", "merge_packs_payload",
+    "AddResult", "ContextPackService", "snapshot_args_from_record",
 ]

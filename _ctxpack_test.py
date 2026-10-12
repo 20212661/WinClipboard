@@ -3,6 +3,7 @@
 
 Run: .venv/Scripts/python.exe -X utf8 _ctxpack_test.py
 """
+import os
 import time
 import unittest
 
@@ -323,4 +324,12 @@ class PerfTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=1)
+    # 套件伞入口(指导 §3.1:ctxpack 一个 run_checks 套件):
+    # 自动发现并运行 _ctxpack*_test.py(核心/存储/将来离屏 UI)。
+    import sys
+    suite = unittest.defaultTestLoader.discover(
+        os.path.dirname(os.path.abspath(__file__)),
+        pattern="_ctxpack*_test.py")
+    result = unittest.TextTestRunner(verbosity=1).run(suite)
+    print("RESULT: %s" % ("PASS" if result.wasSuccessful() else "FAIL"))
+    sys.exit(0 if result.wasSuccessful() else 1)

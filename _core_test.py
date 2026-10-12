@@ -21,6 +21,7 @@ cm.IMAGE_DIR = os.path.join(TMP, "images")
 cm.BLOB_DIR = os.path.join(TMP, "data", "blobs")   # 与 blob_full_path 布局一致
 cm.HISTORY_FILE = os.path.join(TMP, "history.json")
 cm.PRIVATE_FILE = os.path.join(TMP, "private.json")
+cm.CTXPACK_FILE = os.path.join(TMP, "context_packs.json")
 cm.CONFIG_FILE = os.path.join(TMP, "config.json")
 cm.DB_FILE = os.path.join(TMP, "clipboard.db")
 cm.ICON_FILE = os.path.join(TMP, "icon.ico")
@@ -1129,7 +1130,7 @@ cm.save_private(core.private)
 cm.save_config(core.cfg)
 core.soft_delete_at(0)                       # 撤销栈里压一笔
 done_w, ok_w = core.wipe_all_data(wipe_private=True, reset_config=True)
-check("wipe:全部步骤成功", ok_w and len(done_w) == 5, str(done_w))
+check("wipe:全部步骤成功", ok_w and len(done_w) == 6, str(done_w))   # +上下文包步
 check("wipe:历史/库/撤销栈全清", core.history == []
       and core.store.count() == 0 and core._txn_list() == [])
 check("wipe:图片文件与备份链清除", not _bp_w.exists()

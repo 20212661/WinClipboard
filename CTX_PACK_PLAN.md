@@ -19,7 +19,7 @@
 | --- | --- | --- | --- |
 | P0 前置 | ✅ 完成 | main 3f7af00..f80165e(11 提交) | 8 新模块入库;`feature/ctx-pack` 切出;15 模块导入冒烟 OK |
 | P1 模型/预算/拼装 | ✅ 完成 | 见 git log | `_ctxpack_test` 29 项 OK(估算区间/确定性/金样模板/截断/转义/性能 200KB≤10ms);CJK 计数用正则删串(translate 实测 17.5ms→2.5ms) |
-| P2 存储/服务 | 待开始 | | |
+| P2 存储/服务 | ✅ 完成 | 见 git log | `_ctxpack_store_test` 20 项 OK(原子写/轮转/损坏留档/DPAPI 故障注入/双向迁移/清空/备份往返/集成钩子);cm 四处薄钩子:CTXPACK_FILE 常量、set_history_encryption 同步迁移(开启失败中止切换)、wipe_all_data 第 5 步、portable 备份含包 |
 | P3 UI 最小闭环 | 待开始 | | |
 | P4 工作流/提问 | 待开始 | | |
 | P5 轻量会话 | 可选(不做) | | P4 后再评估 |

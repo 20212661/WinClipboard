@@ -68,6 +68,7 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 HISTORY_FILE = os.path.join(APP_DIR, "history.json")
 DB_FILE = os.path.join(APP_DIR, "clipboard.db")   # SQLite 事实存储(默认模式)
 PRIVATE_FILE = os.path.join(APP_DIR, "private.json")   # 敏感内容隔离区
+CTXPACK_FILE = os.path.join(APP_DIR, "context_packs.json")  # AI 上下文包(独立资产)
 LOG_FILE = os.path.join(APP_DIR, "app.log")            # 崩溃/运行日志
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -2194,7 +2195,9 @@ class ClipboardCore:
           3. 图片资产全清:blobs/ 分片与旧 images/ 目录全部文件——引用已
              全灭,无需引用计数与时间窗
           4. 私密区清空(wipe_private=True):原地清空 + 落盘空加密容器
-          5. 配置重置(reset_config=True):配置与备份删除,内存 cfg 原地
+          5. 上下文包清空:context_packs.json 及备份链/留档一并删除
+             (独立资产,设置页确认文案已列明)
+          6. 配置重置(reset_config=True):配置与备份删除,内存 cfg 原地
              换回默认值并立即落盘(容器身份不变,前端别名仍有效)
         不动:app.log、boot_state、workflow_runs.json(诊断与运行记录)、
         图钉画布资产(pins/ 由画布自行管理)。
@@ -2250,6 +2253,12 @@ class ClipboardCore:
                         pass
                 self._private_dirty = False
                 done.append("私密区清空(含备份)")
+
+            # 上下文包一并清空(独立资产,备份链与留档同删;确认文案已列明)
+            from ctxpack.store import wipe_packs
+            wipe_packs(CTXPACK_FILE)
+            done.append("上下文包清空(含备份)")
+
             if reset_config:
                 for suffix in ("", ".bak1", ".bak2", ".bak3"):
                     fp = CONFIG_FILE + suffix
@@ -2472,14 +2481,31 @@ class ClipboardCore:
         私密内容只在**加密容器**里才允许导出(见 portable_backup_bytes)。"""
         payload = self.export_payload(include_images=include_images)
         payload["private"] = list(self.private) if include_private else []
+        payload["ctxpacks"] = self._ctxpack_portable_snapshot()
         return payload
+
+    def _ctxpack_portable_snapshot(self):
+        """上下文包快照进入可迁移备份(容器整体 AES-GCM 加密;包随备份走)。"""
+        try:
+            from ctxpack.store import load_packs_status
+            r = load_packs_status(CTXPACK_FILE)
+            if r.status in ("ok", "recovered"):
+                return {"version": 1, "active": r.active_pid,
+                        "packs": [p.to_dict() for p in r.packs]}
+        except Exception:
+            log("上下文包导出快照失败(本次备份不含包):\n%s"
+                % traceback.format_exc())
+        return None
 
     def import_portable_payload(self, payload):
         """导入加密备份载荷:历史走 import_payload(自动去重),
-        私密条目合并入私密区(去重)。返回 (新增, 跳过, 私密新增)。"""
+        私密条目合并入私密区(去重),上下文包按 pid 合并(本地优先)。
+        返回 (新增, 跳过, 私密新增)。"""
         priv = payload.get("private")
+        packs_data = payload.get("ctxpacks")
         payload = dict(payload)
         payload.pop("private", None)
+        payload.pop("ctxpacks", None)
         added, skipped = self.import_payload(payload)
         n_priv = 0
         if isinstance(priv, list):
@@ -2491,6 +2517,19 @@ class ClipboardCore:
                 res = self._private_save()
                 if not res.ok:
                     log("导入的私密条目已并入内存,但尚未保存(%s)" % res.error)
+        if isinstance(packs_data, dict) and packs_data.get("packs"):
+            try:
+                from ctxpack.store import merge_packs_payload
+                n_packs, res = merge_packs_payload(
+                    CTXPACK_FILE, packs_data,
+                    encrypt=bool(self.cfg.get("encrypt_history")))
+                if res is not None and not res.ok:
+                    log("导入的上下文包已读取,但尚未落盘(%s)" % res.error)
+                elif n_packs:
+                    log("上下文包导入:新增 %d 个包" % n_packs)
+            except Exception:
+                log("上下文包导入失败(其余导入不受影响):\n%s"
+                    % traceback.format_exc())
         return added, skipped, n_priv
 
     # ---- 可迁移加密备份(AES-256-GCM + PBKDF2,与 DPAPI 无关)----
@@ -2531,6 +2570,14 @@ class ClipboardCore:
         关闭时用当前历史重建库，保留加密备份供恢复。
         """
         on = bool(on)
+        # 上下文包与历史同步迁移(独立文件;开启失败=隐私倒退→中止切换,
+        # 关闭失败保留密封原文件=安全方向,不阻塞历史切换)
+        from ctxpack.store import migrate_packs_file
+        _ok, _err = migrate_packs_file(CTXPACK_FILE, encrypt=on)
+        if on and not _ok:
+            raise OSError("上下文包加密迁移失败:%s" % _err)
+        if not _ok:
+            log("上下文包解密迁移失败(密封原文件保留):%s" % _err)
         if on:
             if not save_history(self.history, encrypt=True):
                 raise OSError("无法保存加密历史，原存储模式保持不变")
