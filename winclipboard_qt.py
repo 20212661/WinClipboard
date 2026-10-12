@@ -67,291 +67,19 @@ from qfluentwidgets import (FluentIcon as FIF, setTheme, setThemeColor, Theme,
                             SettingCardGroup, SettingCard)
 from PySide6.QtWidgets import QGraphicsOpacityEffect, QMessageBox
 
-# ============================================================
-# 主题与调色板(浅色 / 深色)
-# ============================================================
-# 注意:init_palette / setTheme 需在 QApplication 创建后、
-# 构建 UI 之前调用(见 main)。深浅色跟随 Windows 系统设置,可在
-# config.json 用 "theme": "dark" / "light" / "auto"(默认)覆盖。
-
-PANEL_W = 520
-PANEL_H_MAX = 640
-MARGIN = 26          # 布局留白
-RADIUS = 16          # 圆角
-
-# 底部预览面板的大文本处理上限:预览区可视高度只有 ~5 行,超长文本截断展示,
-# 语法识别 / JSON 美化 / 高亮全部基于截断段;全文查看走独立查看器窗口。
-# (pygments 对 20KB 文本的全量染色实测 ~340ms,过去选中大条目会在 UI 线程卡住)
-_PV_TEXT_CAP = 4000
-
-# ============================================================
-# 主题:全部派生自 qfluentwidgets 当前主题 —— 强调色来自 themeColor()
-# (可在设置页换色),中性色与库全局样式表一致。不再自调配色。
-# ============================================================
-IS_DARK = False
-ACCENT = "#0078D4"
-ACCENT_SOFT = "rgba(0,120,212,0.14)"
-TEXT = "rgba(0,0,0,0.90)"
-SEC = "rgba(0,0,0,0.63)"
-TER = "rgba(0,0,0,0.45)"
-LINE = "rgba(0,0,0,0.08)"
-BG = "#f9f9f9"
-CARD_BG = "#ffffff"
-CARD_BORDER = "rgba(0,0,0,0.06)"
-FIELD_BG = "#ffffff"
-FIELD_BORDER = "rgba(0,0,0,0.09)"
-BADGE_BG = "rgba(0,0,0,0.05)"
-NAV_BG = "rgba(0,0,0,0.05)"
-THUMB_PH = "rgba(0,0,0,0.06)"
-THUMB_BORDER = "rgba(0,0,0,0.06)"
-GUTTER_BG = "#fafafa"       # 查看器行号栏(比内容卡片深半档)
-PANEL_TOP = CARD_BG
-PANEL_BOT = CARD_BG
-
-
-def init_palette(dark):
-    """按 qfluentwidgets 当前主题刷新派生色(常量名保留,供既有布局引用)。"""
-    g = globals()
-    g["IS_DARK"] = bool(dark)
-    acc = themeColor()
-    accent = acc.name()
-    accent_soft = "rgba(%d,%d,%d,0.14)" % (acc.red(), acc.green(), acc.blue())
-    neutral = {
-        False: {   # 浅色,与 qfluentwidgets 浅色样式表一致
-            "TEXT": "rgba(0,0,0,0.90)", "SEC": "rgba(0,0,0,0.63)",
-            "TER": "rgba(0,0,0,0.45)", "LINE": "rgba(0,0,0,0.08)",
-            "BG": "#f3f3f3", "CARD_BG": "#ffffff",
-            "CARD_BORDER": "rgba(0,0,0,0.06)",
-            "FIELD_BG": "#ffffff", "FIELD_BORDER": "rgba(0,0,0,0.09)",
-            "BADGE_BG": "rgba(0,0,0,0.05)", "NAV_BG": "rgba(0,0,0,0.05)",
-            "THUMB_PH": "rgba(0,0,0,0.06)", "THUMB_BORDER": "rgba(0,0,0,0.06)",
-            "GUTTER_BG": "#fafafa",
-            "DIFF_ADD": "#1f7a3f", "DIFF_DEL": "#c0392b", "DIFF_CTX": "rgba(0,0,0,0.45)",
-        },
-        True: {    # 深色
-            "TEXT": "rgba(255,255,255,0.93)", "SEC": "rgba(255,255,255,0.65)",
-            "TER": "rgba(255,255,255,0.44)", "LINE": "rgba(255,255,255,0.08)",
-            "BG": "#1e1e1e", "CARD_BG": "#2b2b2b",
-            "CARD_BORDER": "rgba(255,255,255,0.08)",
-            "FIELD_BG": "#333333", "FIELD_BORDER": "rgba(255,255,255,0.10)",
-            "BADGE_BG": "rgba(255,255,255,0.08)", "NAV_BG": "rgba(255,255,255,0.06)",
-            "THUMB_PH": "rgba(255,255,255,0.08)", "THUMB_BORDER": "rgba(255,255,255,0.08)",
-            "GUTTER_BG": "#303030",
-            "DIFF_ADD": "#5ec97f", "DIFF_DEL": "#ef8080", "DIFF_CTX": "rgba(255,255,255,0.45)",
-        },
-    }[bool(dark)]
-    g.update(neutral)
-    g["ACCENT"] = accent
-    g["ACCENT_SOFT"] = accent_soft
-    g["PANEL_TOP"] = g["CARD_BG"]
-    g["PANEL_BOT"] = g["CARD_BG"]
-
-
-def _win_prefers_dark():
-    """读取 Windows「应用模式」偏好(深色返回 True;读取失败按浅色)。"""
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                            r"Software\Microsoft\Windows\CurrentVersion"
-                            r"\Themes\Personalize") as k:
-            v, _ = winreg.QueryValueEx(k, "AppsUseLightTheme")
-            return int(v) == 0
-    except Exception:
-        return False
-
-
-def _mica_supported():
-    """Mica 是否可用:仅真实桌面会话(本地登录)且非离屏平台。
-    RDP / offscreen / 第三方远程工具(网易UU远程等,不置 RDP 标志)下
-    DWM 合成异常——实测 UU 远程会话中 Mica 让 Qt 事件循环假死(窗口在、
-    定时器与消息全不跑),故检测到远程进程直接跳过。"""
-    try:
-        import ctypes
-        if os.environ.get("WCLB_NO_MICA"):
-            return False
-        if QGuiApplication.platformName() == "offscreen":
-            return False
-        if ctypes.windll.user32.GetSystemMetrics(0x1000):   # SM_REMOTESESSION
-            return False
-        # 已知第三方远程工具进程名(命中即视为远程会话)
-        remote_hints = ("uuremote", "uuremote_service", "网易uu远程",
-                        "todesk", "sunloginclient", "rustdesk")
-        try:
-            # tasklist 输出 GBK:按字节捕获再容错解码(text=True 会随
-            # PYTHONUTF8 用 utf-8 解,在读取线程里炸 UnicodeDecodeError,
-            # 外层 except 拦不住,每次真实桌面启动都污染日志)
-            raw = subprocess.run(
-                ["tasklist", "/FO", "CSV", "/NH"],
-                capture_output=True, timeout=3).stdout
-            out = raw.decode("gbk", errors="replace").lower()
-            if any(h in out for h in remote_hints):
-                cm.log("检测到第三方远程会话,本进程跳过 Mica 材质")
-                return False
-        except Exception:
-            pass
-        return True
-    except Exception:
-        return False
-
-
-def resolve_theme(cfg):
-    """config.json 的 theme(auto/light/dark)→ 是否深色。"""
-    pref = str((cfg or {}).get("theme", "auto")).strip().lower()
-    if pref == "dark":
-        return True
-    if pref == "light":
-        return False
-    return _win_prefers_dark()
-
-
-def _fic(name, fallback_text):
-    icon = getattr(FIF, name, None)
-    return (icon, None) if icon is not None else (None, fallback_text)
-
-
-# 统一字族链:拉丁 Segoe UI;中文依次回退。雅黑的 UI 变体优先(行高与
-# Fluent 组件匹配);SimHei/Noto Sans SC 兜底离屏 FreeType 数据库枚举不到
-# msyh.ttc(雅黑)的环境。顺序即优先级,勿把中文字体放最前(拉丁字形变丑)。
-FONT_FAMILIES = ["Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei",
-                 "SimHei", "Noto Sans SC", "PingFang SC"]
-
-
-def font(px, weight=QFont.Normal):
-    f = QFont()
-    f.setFamilies(FONT_FAMILIES)
-    f.setPointSize(px)
-    f.setWeight(weight)
-    return f
-
-
-def apply_fonts(qapp=None):
-    """统一应用字族:拉丁用 Segoe UI,中文按序回退到机器上首个可用字体。
-
-    两处必须一起改:
-    - Qt 文本:QFont 单字族在缺字形的环境(离屏 FreeType 数据库读不出
-      msyh.ttc,枚举不到雅黑)整字变豆腐框,families 回退链才能兜住;
-    - qfluentwidgets 组件:内部 getFont 走自己的 fontFamilies 配置
-      (默认仅 YaHei/PingFang 回退),不同步覆盖则卡片/标签仍是豆腐框。
-    """
-    try:
-        from qfluentwidgets.common.font import setFontFamilies
-        setFontFamilies(list(FONT_FAMILIES))
-    except Exception:
-        cm.log("qfluentwidgets 字族覆盖失败(组件将用库默认字体)")
-    f = font(10)
-    if qapp is not None:
-        qapp.setFont(f)
-    return f
-
-
-def elided(text, f, maxw):
-    return QFontMetrics(f).elidedText(text, Qt.ElideRight, maxw)
-
-
-def pil_to_qimage(img):
-    buf = io.BytesIO()
-    img.save(buf, "PNG")
-    return QImage.fromData(buf.getvalue(), "PNG")
-
-
-def rounded_pixmap(pm, radius):
-    out = QPixmap(pm.size())
-    out.fill(Qt.transparent)
-    p = QPainter(out)
-    p.setRenderHint(QPainter.Antialiasing)
-    path = QPainterPath()
-    path.addRoundedRect(QRectF(0, 0, pm.width(), pm.height()), radius, radius)
-    p.setClipPath(path)
-    p.drawPixmap(0, 0, pm)
-    p.end()
-    return out
-
-
-def apply_round_region(widget, r=RADIUS):
-    """(已停用)SetWindowRgn 圆角裁剪 —— 半透明窗口的圆角由 QSS 像素决定,
-    且 SetWindowRgn 会与 WA_TranslucentBackground 的分层表面冲突,
-    曾导致面板卡在 alpha=0(窗口存在但不可见,点击穿透)。"""
-    return
-
-
-def _phys_screen():
-    """枚举真实显示器物理分辨率(远程/虚拟化会话中 Qt 屏幕尺寸可能偏大)。"""
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        class DEVMODE(ctypes.Structure):
-            _fields_ = [("dmDeviceName", ctypes.c_wchar * 32), ("dmSpecVersion", wintypes.WORD),
-                        ("dmDriverVersion", wintypes.WORD), ("dmSize", wintypes.WORD),
-                        ("dmDriverExtra", wintypes.WORD), ("dmFields", wintypes.DWORD),
-                        ("dmOrientation", ctypes.c_short), ("dmPaperSize", ctypes.c_short),
-                        ("dmPaperLength", ctypes.c_short), ("dmPaperWidth", ctypes.c_short),
-                        ("dmScale", ctypes.c_short), ("dmCopies", ctypes.c_short),
-                        ("dmDefaultSource", ctypes.c_short), ("dmPrintQuality", ctypes.c_short),
-                        ("dmColor", ctypes.c_short), ("dmDuplex", ctypes.c_short),
-                        ("dmYResolution", ctypes.c_short), ("dmTTOption", ctypes.c_short),
-                        ("dmCollate", ctypes.c_short), ("dmFormName", ctypes.c_wchar * 32),
-                        ("dmLogPixels", wintypes.WORD), ("dmBitsPerPel", wintypes.DWORD),
-                        ("dmPelsWidth", wintypes.DWORD), ("dmPelsHeight", wintypes.DWORD),
-                        ("dmDisplayFlags", wintypes.DWORD), ("dmDisplayFrequency", wintypes.DWORD),
-                        ("dmICMMethod", wintypes.DWORD), ("dmICMIntent", wintypes.DWORD),
-                        ("dmMediaType", wintypes.DWORD), ("dmDitherType", wintypes.DWORD),
-                        ("dmReserved1", wintypes.DWORD), ("dmReserved2", wintypes.DWORD),
-                        ("dmPanningWidth", wintypes.DWORD), ("dmPanningHeight", wintypes.DWORD)]
-        dm = DEVMODE()
-        dm.dmSize = ctypes.sizeof(DEVMODE)
-        user32 = ctypes.WinDLL("user32")
-        if user32.EnumDisplaySettingsW(None, -1, ctypes.byref(dm)):
-            return int(dm.dmPelsWidth), int(dm.dmPelsHeight)
-    except Exception:
-        pass
-    return None
-
-
-def ensure_onscreen(w):
-    """把窗口强制移动到当前屏幕可见范围内(与 Qt 同一逻辑坐标系)。"""
-    try:
-        scr = QGuiApplication.screenAt(w.frameGeometry().center()) or QGuiApplication.primaryScreen()
-        geo = scr.availableGeometry()
-    except Exception:
-        return
-    f = w.frameGeometry()
-    x = min(max(f.x(), geo.left()), max(geo.left(), geo.right() - f.width()))
-    y = min(max(f.y(), geo.top()), max(geo.top(), geo.bottom() - f.height()))
-    if (x, y) != (f.x(), f.y()):
-        w.move(x, y)
-
-
-class Badge(QLabel):
-    """键盘徽章:↑↓ / Enter / Esc"""
-    def __init__(self, text):
-        super().__init__(text)
-        self.setFont(font(10))
-        self.setStyleSheet(
-            "QLabel { background: %s; color: %s; border-radius: 6px;"
-            " padding: 3px 8px; }" % (BADGE_BG, SEC))
-
-
-def icon_tile(icon, size=34, radius=10):
-    """圆角图标瓦片(BADGE_BG 底 + 主题色 Fluent 图标,gallery 风格)。"""
-    box = QWidget()
-    box.setFixedSize(size, size)
-    box.setStyleSheet("background: %s; border-radius: %dpx;" % (BADGE_BG, radius))
-    lay = QHBoxLayout(box)
-    lay.setContentsMargins(0, 0, 0, 0)
-    ic = IconWidget(box)
-    ic.setIcon(icon)
-    isz = 16 if size < 40 else 20
-    ic.setFixedSize(isz, isz)
-    lay.addWidget(ic, 0, Qt.AlignCenter)
-    return box
-
-
-def _accent_tint(alpha):
-    """主题色淡染(选中态背景)。"""
-    c = QColor(ACCENT)
-    c.setAlpha(alpha)
-    return c
+# ---- 阶段 8 拆分:调色板/助手与查看器·编辑器子系统迁至独立模块(兼容重导出) ----
+import ui_base
+from ui_base import *  # noqa: F401,F403
+from ui_base import (init_palette, resolve_theme, apply_fonts, _fic,
+                     _win_prefers_dark, _mica_supported, _phys_screen,
+                     _accent_tint, _PV_TEXT_CAP)
+from viewer import (ViewerWindow, ImageViewerWindow, DiffWindow,  # noqa: F401
+                    INSPECTOR_ACTIONS, _copy_or_warn, apply_pygments_format,
+                    _pg_get_lexer)
+from image_editor import (ImageEditor, CompressDialog,  # noqa: F401
+                          ScaleDialog, AnnoRect, AnnoEllipse, AnnoPath,
+                          AnnoMosaic, AnnoText)
+ui_base.register(sys.modules[__name__])   # 调色板随主题刷新本模块全局
 
 
 class Card(CardWidget):
@@ -726,11 +454,19 @@ class HistoryPage(QWidget):
         # 标签与尾部弹簧常驻,刷新零创建零销毁(见 set_view)
         self._idle = []
         self._cards = []
-        # 窗口化渲染:大视图只物化前 _win_limit 张卡,滚动到底部自动扩展
-        # (50,000 条过滤结果也只创建 ~60 个 Card Widget;滚到多深建多少)
+        # 窗口化渲染:大视图只物化 [_win_lo, _win_limit) 段(滚动到底自动
+        # 扩展;深滚动超上限时上方远端释放回池 = 滑动窗口,控件数有界)
         self._win_limit = 60
+        self._win_lo = 0
         self._win_chunk = 80
         self._full_seq = []
+        # 分批渲染:新建卡片按时间预算分批经 0ms 定时器补齐(见 _render_tick),
+        # set_view 重来时清空在途批次 = 视图代数,旧批次绝不回填旧记录
+        self._render_pending = []
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.setInterval(0)
+        self._render_timer.timeout.connect(self._render_tick)
         self._btn_more = PushButton("", self)
         self._btn_more.setObjectName("btnMore")
         self._btn_more.setStyleSheet(
@@ -747,6 +483,10 @@ class HistoryPage(QWidget):
             _lab.setContentsMargins(6, 10, 0, 4)
             _lab.hide()
         self._tail_spacer = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
+        # 尾部件占用标志(_update_more_label 增量切换 更多按钮/弹簧 用)
+        self._btn_in_layout = False
+        self._tail_owned = False
+        self._row_h_est = 84
         self.scroll.setWidget(self.content)
         v.addWidget(self.scroll, 1)
 
@@ -874,12 +614,17 @@ class HistoryPage(QWidget):
         self.search.setFocus()
 
     def sync_src_combo(self):
-        """来源下拉与历史同步(最近在前,保留当前选择;被清空的来源回落到全部)。"""
+        """来源下拉与历史同步(最近在前,保留当前选择;被清空的来源回落到全部)。
+        来源集合与当前选择都未变时跳过重建(clear+addItem 会触发整轮
+        模型重置,大历史高频刷新下的纯无效功)。"""
         cur = self.cmb_src.currentData() or ""
         apps = self.app.core.source_apps()[:40]
         if cur and cur not in apps:
             self.app.src_filter = ""       # 来源已被清理,过滤条件同步失效
             cur = ""
+        if (tuple(apps), cur) == getattr(self, "_src_sig", None):
+            return                         # 集合与选择未变:零成本返回
+        self._src_sig = (tuple(apps), cur)
         self.cmb_src.blockSignals(True)
         self.cmb_src.clear()
         self.cmb_src.addItem("全部来源", userData="")
@@ -927,28 +672,46 @@ class HistoryPage(QWidget):
         """兼容保留:页面高度由 FluentWindow 管理,无需自适应。"""
 
     # ---- 列表(卡片池复用:搜索/分类切换零重建) ----
+    # 渲染预算:单批新建卡片的时间上限;首批可见区(RENDER_FIRST)例外,
+    # 同步完成保证首屏一次画全,其余批次让出事件循环逐批补齐
+    WIN_INITIAL = 60
+    RENDER_BUDGET_MS = 10.0
+    RENDER_FIRST = 8
+    RENDER_MIN_BATCH = 10    # 后台批次最少推进张数(摊薄事件循环固定开销;
+                             # 这些批次在 GUI 空闲间隙执行,单批最长 ~60ms)
+    WIN_MAX = 480            # 物化卡片硬上限(超出触发上方远端释放;
+                             # QVBoxLayout activate 成本随条目数上涨,
+                             # 上限控制单次激活在几十毫秒内)
+    WIN_KEEP = 380           # 释放后保留的目标数量
+    TRIM_MARGIN = 1600       # 视口上方安全距离(px):之内的卡片不释放
+    IDLE_CAP = 140           # 闲置卡片池上限(多余 deleteLater)
+
     def set_view(self, view, history):
         """刷新 = 既有控件的重新排布 + 差量绑定,零销毁重建。
 
         - 卡片按 rec 身份配对回原控件(bind 幂等,同 rec 零开销),
           配不上的从 _idle 池取,池空才新建;
-        - 分组标签/尾部弹簧常驻复用,空组 hide;
+        - 新建超时间预算的记录转后台批次(_render_tick),视图再来时
+          在途批次整体作废(等价视图代数:旧任务不把旧记录回填新视图);
+        - 分组标签常驻复用(空组 hide),尾部件二选一(更多按钮/弹簧);
         - 视图序列与分组完全未变时连布局都不碰(重复 show/无效刷新零成本);
-        - 窗口化:大视图只物化前 _win_limit 张(滚动到底自动扩展,
-          见 _on_scroll_maybe_extend)——几万条过滤结果也只建 ~60 个控件。
+        - 窗口化:大视图只物化 [_win_lo, _win_limit) 段(滚动到底自动扩展,
+          深滚动超 WIN_MAX 时上方远端释放回池)——控件数有硬上限。
         """
+        self._render_pending.clear()        # 作废在途渲染批次
         self._last_view, self._last_history = view, history
         recs = [history[i] for i in view]
         all_seq = ([r for r in recs if r.get("pinned")]
                    + [r for r in recs if not r.get("pinned")])
         if [id(r) for r in self._full_seq] != [id(r) for r in all_seq]:
             self._full_seq = all_seq
-            self._win_limit = 60               # 新视图 → 重置窗口
-        seq = self._full_seq[:self._win_limit]
+            self._win_limit = self.WIN_INITIAL
+            self._win_lo = 0                # 新视图 → 重置窗口
+        seq = self._full_seq[self._win_lo:self._win_limit]
         pinned = [r for r in seq if r.get("pinned")]
         rest = [r for r in seq if not r.get("pinned")]
         ids = [id(r) for r in seq]
-        more = len(self._full_seq) - len(seq)
+        more = len(self._full_seq) - self._win_limit
 
         if ([id(c.rec) for c in self._cards] == ids
                 and self._lab_pinned.isVisible() == bool(pinned)
@@ -959,6 +722,11 @@ class HistoryPage(QWidget):
 
         cur = {id(c.rec): c for c in self._cards}
         idle = self._idle
+        # 视图外旧卡先整体视为可复用池(循环内即取即用,不等到循环后):
+        # 搜索→全量来回切换时全部走重绑(毫秒级),不再批量新建卡片。
+        # taken = 已被身份匹配占用的卡,复用弹出时跳过(防同一控件双用)
+        spare = list(self._cards)
+        taken = set()
         # 闲置卡也记得上一次绑的 rec:按身份捞回可连 bind 都跳过
         # (搜索过滤→清空的往返因此退化为纯重排)
         idle_by_rec = {}
@@ -966,19 +734,35 @@ class HistoryPage(QWidget):
             if c.rec is not None:
                 idle_by_rec.setdefault(id(c.rec), c)
         cards = []
-        for r in seq:
+        deadline = time.perf_counter() + self.RENDER_BUDGET_MS / 1000.0
+        for idx, r in enumerate(seq):
             c = cur.pop(id(r), None) or idle_by_rec.pop(id(r), None)
             if c is not None:
+                taken.add(id(c))
                 try:
                     idle.remove(c)
                 except ValueError:
                     pass
-            else:                       # 无身份匹配:先吃任意闲置,池空才新建
-                c = idle.pop() if idle else Card(self.app)
-            c.bind(r)
+            else:                       # 无身份匹配:闲置→旧卡→预算内新建
+                c = idle.pop() if idle else None
+                if c is None:
+                    while spare:
+                        cand = spare.pop()
+                        if id(cand) not in taken:
+                            c = cand
+                            break
+                    if c is not None:
+                        cur.pop(id(c.rec), None)   # 已被改绑:身份表除名
+                if c is not None:
+                    c.bind(r)
+                else:
+                    c = self._new_card(r, deadline)
+                    if c is None:       # 超预算:转后台批次(带序号)
+                        self._render_pending.append((r, self._win_lo + idx))
+                        continue
+            c._seq_i = self._win_lo + idx
             cards.append(c)
-        for c in cur.values():          # 本次视图外的 → 闲置池
-            idle.append(c)
+        idle.extend(cur.values())       # 循环后仍没配上的旧卡 → 闲置池
         # 置顶态只会随分组移动而变(bind 的同 rec 守卫跳过了字段刷新)
         for c, r in zip(cards, seq):
             grp = 1 if r.get("pinned") else 0
@@ -994,61 +778,322 @@ class HistoryPage(QWidget):
             if c.isHidden():
                 c.show()
 
-        # 重排布局:全部是既有控件,只挪位置(无创建无 polish 无销毁)
-        while self.cards_layout.count():
-            self.cards_layout.takeAt(0)
-        self._empty_box.setVisible(False)
-        if pinned:
-            self._lab_pinned.show()
+        # 重排布局:全部是既有控件,只挪位置(无创建无 polish 无销毁)。
+        # 布局序 = [lab_pinned][置顶卡…][lab_recent][最近卡…](标签常驻,
+        # 空组 hide;卡片插入下标据此计算,见 _insert_cards)。
+        # 拆建期间禁用布局与重绘,末尾一次激活(大列表防逐项布局级联)。
+        self.cards_layout.setEnabled(False)
+        self.scroll.setUpdatesEnabled(False)
+        try:
+            while self.cards_layout.count():
+                self.cards_layout.takeAt(0)
+            self._tail_owned = False
+            self._btn_in_layout = False
+            self._empty_box.setVisible(False)
             self.cards_layout.addWidget(self._lab_pinned)
-        else:
-            self._lab_pinned.hide()
-        for c in cards[:len(pinned)]:
-            self.cards_layout.addWidget(c)
-        if rest:
-            self._lab_recent.show()
+            for c in cards[:len(pinned)]:
+                self.cards_layout.addWidget(c)
             self.cards_layout.addWidget(self._lab_recent)
-        else:
-            self._lab_recent.hide()
-        for c in cards[len(pinned):]:
-            self.cards_layout.addWidget(c)
-        if more > 0:
-            # 窗口化截断:显示扩展入口(滚动到底也自动扩展)
-            self._btn_more.setText("继续滚动加载更多(还有 %d 条)"
-                                   % more)
-            self._btn_more.setVisible(True)
-            self.cards_layout.addWidget(self._btn_more)
-        else:
-            self._btn_more.setVisible(False)
-        if not seq:
-            filtered = bool(history)
-            self.empty_title.setText("没有找到匹配内容" if filtered else "暂无剪贴内容")
-            self.empty_hint.setText("试试其他关键词,或清除搜索与分类筛选" if filtered else
-                                    "复制文字、截图或文件后,按 Ctrl + Shift + V 打开")
-            self.btn_reset_filter.setVisible(filtered)
-            self._empty_box.setVisible(True)
-            self.cards_layout.addWidget(self._empty_box)
-        else:
-            self.cards_layout.addItem(self._tail_spacer)
+            for c in cards[len(pinned):]:
+                self.cards_layout.addWidget(c)
+            self._lab_pinned.setVisible(bool(pinned))
+            self._lab_recent.setVisible(bool(rest))
+            if more > 0:
+                # 窗口化截断:显示扩展入口(滚动到底也自动扩展)
+                self._btn_more.setText("继续滚动加载更多(还有 %d 条)"
+                                       % (more + self._win_lo))
+                self.cards_layout.addWidget(self._btn_more)
+                self._btn_in_layout = True
+                self._btn_more.setVisible(True)
+            else:
+                self._btn_more.setVisible(False)
+                self.cards_layout.addItem(self._tail_spacer)
+                self._tail_owned = True
+            if not seq:
+                filtered = bool(history)
+                self.empty_title.setText("没有找到匹配内容" if filtered else "暂无剪贴内容")
+                self.empty_hint.setText("试试其他关键词,或清除搜索与分类筛选" if filtered else
+                                        "复制文字、截图或文件后,按 Ctrl + Shift + V 打开")
+                self.btn_reset_filter.setVisible(filtered)
+                self._empty_box.setVisible(True)
+                self.cards_layout.addWidget(self._empty_box)
+        finally:
+            self.cards_layout.setEnabled(True)
+            self.scroll.setUpdatesEnabled(True)
+            self.cards_layout.activate()
         for c in idle:
             c.hide()
+        if self._render_pending:
+            self._render_timer.start()
+        self._trim_idle()
+
+    def _new_card(self, r, deadline):
+        """预算内新建卡片;超预算返回 None(调用方转后台批次)。"""
+        if time.perf_counter() > deadline:
+            return None
+        c = Card(self.app)
+        c.bind(r)
+        return c
+
+    def _render_tick(self):
+        """后台渲染批次:预算内新建若干卡片并按分组位置插入。
+        set_view 会清空 _render_pending,过时批次自然作废(等价视图代数)。"""
+        if not self._render_pending:
+            return
+        deadline = time.perf_counter() + self.RENDER_BUDGET_MS / 1000.0
+        newly = []
+        while self._render_pending:
+            if len(newly) >= self.RENDER_MIN_BATCH \
+                    and time.perf_counter() > deadline:
+                break                   # 每批至少推进 RENDER_MIN_BATCH 张,
+                                        # 再按预算截断(事件循环遍历全部
+                                        # qfluentwidgets 事件过滤器有固定
+                                        # 开销,单卡小批会被它吃满)
+            r, seq_i = self._render_pending.pop(0)
+            c = self._idle.pop() if self._idle else Card(self.app)
+            c.bind(r)
+            c._seq_i = seq_i
+            newly.append((r, c))
+        if newly:
+            self._insert_cards(newly)
+        if self._render_pending:
+            self._render_timer.start()
+        else:
+            self._trim_idle()
+
+    def _insert_cards(self, newly):
+        """把新建/复用的卡片按 _seq_i 顺序插入分组与布局(增量,不重排)。
+        newly: [(rec, card)],调用方已设好 card._seq_i(记录在 _full_seq
+        中的下标);置顶组/最近组各自保持序列顺序。
+
+        批量插入期间禁用布局与重绘、末尾一次激活——逐个 show() 在大列表
+        下每次都触发完整布局级联(600 存活卡实测 14ms/张 → 3.2ms/张)。"""
+        pinned_n = sum(1 for e in self._cards if e.rec.get("pinned"))
+        lay = self.cards_layout
+        lay.setEnabled(False)
+        self.scroll.setUpdatesEnabled(False)
+        try:
+            for r, c in newly:
+                c.show()
+                pinned = bool(r.get("pinned"))
+                c._grp = 1 if pinned else 0
+                c.update_pin()
+                if pinned:
+                    pos = pinned_n                     # 置顶组末尾
+                    for i in range(pinned_n):
+                        if self._cards[i]._seq_i > c._seq_i:
+                            pos = i
+                            break
+                else:
+                    pos = len(self._cards)             # 最近组末尾
+                    for i in range(pinned_n, len(self._cards)):
+                        if self._cards[i]._seq_i > c._seq_i:
+                            pos = i
+                            break
+                self._cards.insert(pos, c)
+                if pinned:
+                    pinned_n += 1
+                # 布局序 [lab_pinned][置顶卡][lab_recent][最近卡]:卡片下标
+                # 换算布局下标 = 前置标签数(置顶卡 1 / 最近卡 2)+ 组内位置
+                lay_idx = 1 + pos if pos < pinned_n else 2 + pos
+                lay.insertWidget(lay_idx, c)
+            self.app._card_widgets = self._cards
+            # 分组标签可见性随物化内容变化
+            self._lab_pinned.setVisible(pinned_n > 0)
+            self._lab_recent.setVisible(len(self._cards) - pinned_n > 0)
+        finally:
+            lay.setEnabled(True)
+            self.scroll.setUpdatesEnabled(True)
+            lay.activate()
+
+    def _queue_cards(self, recs, base, visible_first=False):
+        """物化一段记录(序列号从 base 起):身份捞回 > 任意闲置 >
+        预算内新建/重绑 > 后台批次(_render_tick 续建)。预算对重绑同样
+        生效——大段闲置重绑逐个也要毫秒级,不能整段同步做完。"""
+        deadline = time.perf_counter() + self.RENDER_BUDGET_MS / 1000.0
+        idle_by_rec = {}
+        for c in self._idle:
+            if c.rec is not None:
+                idle_by_rec.setdefault(id(c.rec), c)
+        newly, done = [], 0
+        for i, r in enumerate(recs):
+            c = idle_by_rec.pop(id(r), None)
+            if c is not None:
+                try:
+                    self._idle.remove(c)
+                except ValueError:
+                    pass
+            else:
+                c = self._idle.pop() if self._idle else None
+                if c is not None:
+                    c.bind(r)
+                else:
+                    if done and time.perf_counter() > deadline:
+                        self._render_pending.append((r, base + i))
+                        continue
+                    c = Card(self.app)
+                    c.bind(r)
+            if c.rec is not r and c._bound_id != id(r):
+                c.bind(r)               # 身份捞回的卡:确保绑定生效
+            c._seq_i = base + i
+            newly.append((r, c))
+            done += 1
+            if done >= (self.RENDER_FIRST if visible_first else 1) \
+                    and time.perf_counter() > deadline \
+                    and i + 1 < len(recs):
+                self._render_pending.extend(
+                    (rr, base + j) for j, rr in enumerate(recs[i + 1:], i + 1))
+                break
+        if newly:
+            self._insert_cards(newly)
+        if self._render_pending:
+            self._render_timer.start()
+
+    def _update_more_label(self):
+        more = len(self._full_seq) - self._win_limit
+        if more > 0:
+            self._btn_more.setText("继续滚动加载更多(还有 %d 条)"
+                                   % (more + self._win_lo))
+            if not self._btn_in_layout:
+                if self._tail_owned:
+                    self.cards_layout.removeItem(self._tail_spacer)
+                    self._tail_owned = False
+                self.cards_layout.addWidget(self._btn_more)
+                self._btn_in_layout = True
+            self._btn_more.setVisible(True)
+        else:
+            if self._btn_in_layout:
+                self.cards_layout.removeWidget(self._btn_more)
+                self._btn_in_layout = False
+            self._btn_more.setVisible(False)
+            if not self._tail_owned:
+                self.cards_layout.addItem(self._tail_spacer)
+                self._tail_owned = True
 
     def _extend_window(self):
-        """扩展物化窗口(+80)并增量重排;已到底时无操作。"""
+        """扩展物化窗口(+chunk),只追加新卡片(不拆除既有布局)。"""
         if self._win_limit >= len(self._full_seq):
             return
-        self._win_limit += self._win_chunk
-        self.set_view(self._last_view, self._last_history)
+        lo = self._win_limit
+        self._win_limit = min(lo + self._win_chunk, len(self._full_seq))
+        self._queue_cards(self._full_seq[lo:self._win_limit], base=lo)
+        self._update_more_label()
+        self._trim_window()
 
-    def _on_scroll_maybe_extend(self, value):
-        """滚动接近底部 → 自动扩展窗口(距底 <600px)。
-        滚动条未成形(max=0,内容未超视口或首次布局)与置顶态不触发,
-        防止视图刚建立就被整页自动展开。"""
-        if not self._full_seq or self._win_limit >= len(self._full_seq):
+    def _prepend_window(self):
+        """向上扩展物化窗口(滑窗回滚:向上滚动补回上方释放的卡片)。
+        上方释放的卡多在闲置池,身份捞回成本≈重绑;滚动值按行高估计
+        下移补偿,视口内容不跳。"""
+        if self._win_lo <= 0:
+            return
+        hi = self._win_lo
+        self._win_lo = max(0, hi - self._win_chunk)
+        recs = self._full_seq[self._win_lo:hi]
+        deadline = time.perf_counter() + self.RENDER_BUDGET_MS / 1000.0
+        idle_by_rec = {}
+        for c in self._idle:
+            if c.rec is not None:
+                idle_by_rec.setdefault(id(c.rec), c)
+        newly, created = [], 0
+        for i, r in enumerate(recs):
+            c = idle_by_rec.pop(id(r), None)
+            if c is not None:
+                try:
+                    self._idle.remove(c)
+                except ValueError:
+                    pass
+            else:
+                c = self._idle.pop() if self._idle else None
+                if c is not None:
+                    c.bind(r)
+                else:
+                    if created and time.perf_counter() > deadline:
+                        self._render_pending.insert(0, (r, self._win_lo + i))
+                        continue
+                    c = Card(self.app)
+                    created += 1
+                    c.bind(r)
+            c._seq_i = self._win_lo + i
+            newly.append((r, c))
+        if newly:
+            self._insert_cards(newly)
+        if self._render_pending:
+            self._render_timer.start()
+        sb = self.scroll.verticalScrollBar()
+        row = getattr(self, "_row_h_est", 84) + self.cards_layout.spacing()
+        delta = int(row * len(recs))
+        QTimer.singleShot(
+            0, lambda d=delta: sb.setValue(min(sb.maximum(), sb.value() + d)))
+
+    def _trim_window(self):
+        """物化超过 WIN_MAX 时,把视口上方远端的最近组卡片释放回闲置池。
+        置顶组不动(数量少且置顶语义要求常驻);滚动值按实际控件高度
+        补偿,视口内容不跳。"""
+        if len(self._cards) <= self.WIN_MAX:
             return
         sb = self.scroll.verticalScrollBar()
-        if sb.maximum() > 0 and value > 0 and sb.maximum() - value < 600:
+        if sb.maximum() <= 0:
+            return
+        vp = self.scroll.viewport()
+        pinned_n = sum(1 for c in self._cards if c.rec.get("pinned"))
+        released, freed_px = [], 0
+        i = pinned_n
+        while i < len(self._cards) \
+                and len(self._cards) - len(released) > self.WIN_KEEP:
+            c = self._cards[i]
+            # mapTo viewport:视口内容坐标(视口上方为负);卡片底边
+            # 距视口顶不足安全距离的不释放
+            y = c.mapTo(vp, QPoint(0, 0)).y()
+            if y + c.height() >= -self.TRIM_MARGIN:
+                break
+            released.append(c)
+            freed_px += c.height() + self.cards_layout.spacing()
+            i += 1
+        if not released:
+            return
+        first_i = self._cards.index(released[0])
+        self.cards_layout.setEnabled(False)
+        self.scroll.setUpdatesEnabled(False)
+        try:
+            for c in released:
+                c.hide()
+                self.cards_layout.removeWidget(c)
+        finally:
+            self.cards_layout.setEnabled(True)
+            self.scroll.setUpdatesEnabled(True)
+            self.cards_layout.activate()
+        del self._cards[first_i:first_i + len(released)]
+        self._win_lo += len(released)
+        self._row_h_est = max(40, round(freed_px / len(released)
+                                        - self.cards_layout.spacing()))
+        self._idle.extend(released)
+        self.app._card_widgets = self._cards
+        self._update_more_label()
+        QTimer.singleShot(
+            0, lambda v=freed_px: sb.setValue(max(0, sb.value() - v)))
+        self._trim_idle()
+
+    def _trim_idle(self):
+        """闲置池上限:超出的卡片销毁(新建成本低,长期驻留才贵)。"""
+        if len(self._idle) > self.IDLE_CAP:
+            for c in self._idle[self.IDLE_CAP:]:
+                c.deleteLater()
+            del self._idle[self.IDLE_CAP:]
+
+    def _on_scroll_maybe_extend(self, value):
+        """滚动接近底部 → 自动扩展窗口(距底 <600px);接近顶部且上方
+        有已释放段 → 向上补回(滑窗回滚)。
+        滚动条未成形(max=0,内容未超视口或首次布局)与置顶态不触发,
+        防止视图刚建立就被整页自动展开。"""
+        if not self._full_seq:
+            return
+        sb = self.scroll.verticalScrollBar()
+        if sb.maximum() <= 0 or value <= 0:
+            return
+        if sb.maximum() - value < 600 and self._win_limit < len(self._full_seq):
             self._extend_window()
+        elif value < 800 and self._win_lo > 0:
+            self._prepend_window()
 
     def card_at(self, vi):
         """视图索引 → 对应卡片控件。卡片列表顺序 = 置顶组+最近组(set_view),
@@ -1110,15 +1155,17 @@ class HistoryPage(QWidget):
             self.pv_img.clear()
             # 预览只用缓存缩略图(256px,后台生成);原图仅双击查看器加载,
             # 列表/预览路径不再同步解码原图(大图曾把选中卡成百毫秒级)
-            pm = (getattr(app, "_thumbs", None) or {}).get(path)
+            tc = getattr(app, "thumb_cached", None)
+            pm = tc(path) if tc is not None else \
+                (getattr(app, "_thumbs", None) or {}).get(path)
             if pm is not None:
                 self.pv_img.setPixmap(pm.scaled(
                     min(PANEL_W - 40, pm.width() * 8), 128,
                     Qt.KeepAspectRatio, Qt.SmoothTransformation))
             else:
-                loader = getattr(app, "_thumb_loader", None)
-                if loader is not None:
-                    loader.submit(path)      # 生成完下次选中即有;本次占位
+                rt = getattr(app, "request_thumb", None)
+                if rt is not None:
+                    rt(path, visible=True)  # 可见请求:生成完下次选中即有
                 self.pv_img.setText("生成缩略图中…")
             self.pv_badge.setText("截图 · 放大预览")
             self.pv_stats.setText("%s × %s · 双击可全屏查看" %
@@ -1331,19 +1378,20 @@ class PrivatePage(QWidget):
         ttl = TitleLabel("私密区")
         v.addWidget(ttl)
 
-        if cm.dpapi_available():
-            hint = CaptionLabel("以下内容经敏感识别后隔离保存,不出现在历史面板;"
-                                "使用 Windows DPAPI 绑定当前 Windows 用户加密。"
-                                "该机制主要保护静态磁盘数据(文件被拷走也读不出),"
-                                "不能抵御已获得当前用户权限的恶意程序。"
-                                "列表默认遮罩,点「显示明文」解锁,30 秒后自动遮回。")
-        else:
-            hint = CaptionLabel("⚠ 当前环境 DPAPI 不可用,私密区仅 Base64 编码存储(未加密),"
-                                "请勿在本机存放重要凭据。列表默认遮罩,"
-                                "点「显示明文」解锁,30 秒后自动遮回。")
+        hint = CaptionLabel("以下内容经敏感识别后隔离保存,不出现在历史面板;"
+                            "列表默认遮罩,点「显示明文」解锁,30 秒后自动遮回。"
+                            "实际存储状态见下方状态行——机制为 Windows DPAPI"
+                            "(绑定当前用户,拷走的文件读不出);DPAPI 不可用时"
+                            "保持原文件不覆写,不产生明文副本。")
         hint.setStyleSheet("color: %s;" % TER)
         hint.setWordWrap(True)
         v.addWidget(hint)
+
+        # 实际存储/保存状态行(DPAPI 已加密 / 旧明文未加密 / 无法读取 / 尚未保存)
+        self.lbl_state = CaptionLabel("")
+        self.lbl_state.setStyleSheet("color: %s;" % TER)
+        self.lbl_state.setWordWrap(True)
+        v.addWidget(self.lbl_state)
 
         self.lst = QListWidget()
         self.lst.setFont(font(13))
@@ -1409,6 +1457,33 @@ class PrivatePage(QWidget):
         self.lst.clear()
         for s in self.app.private:
             self.lst.addItem(self._mask_text(s))
+        self._sync_state()
+
+    def _sync_state(self):
+        """状态行如实反映实际存储/保存状态:不以"模块存在"推断加密。"""
+        core = self.app.core
+        st = getattr(core, "_private_load", None)
+        parts = []
+        if st is not None:
+            if st.status == "unreadable":
+                parts.append("当前存储:无法读取(原文件已保留未覆写;"
+                             "本会话新增/删除只暂存内存;如需放弃原数据,"
+                             "请执行「清空」的破坏性流程)")
+            elif st.status == "recovered":
+                parts.append("当前存储:已从备份 %s 恢复(主文件损坏,"
+                             "原件保留为 private.json.corrupt 供排查)" % st.source)
+            elif st.status == "ok" and st.mode == "dpapi":
+                parts.append("当前存储:DPAPI 已加密(绑定当前 Windows 用户)")
+            elif st.status == "ok" and st.mode == "plaintext":
+                parts.append("当前存储:旧明文/未加密(加密迁移失败或 DPAPI 不可用,"
+                             "不自动降级写明文)")
+        if getattr(core, "_private_dirty", False):
+            parts.append("尚有未保存的私密区变更(上次保存失败,原文件未动)")
+        if parts:
+            self.lbl_state.setText(";".join(parts))
+            self.lbl_state.show()
+        else:
+            self.lbl_state.hide()
 
     def do_copy(self):
         item = self.lst.currentItem()
@@ -1417,10 +1492,13 @@ class PrivatePage(QWidget):
         i = self.lst.row(item)
         if not 0 <= i < len(self.app.private):
             return
-        # 按钮就是「复制并粘贴」:用户显式要求回贴,不受 auto_paste 默认关影响
-        self.app.core.paste_text(self.app.private[i], force=True,
-                                 target_hwnd=getattr(self.app, "_paste_target",
-                                                     None))
+        # 按钮就是「复制并粘贴」:用户显式要求回贴,不受 auto_paste 默认关影响;
+        # 写入失败不派发回贴,如实提示
+        if not self.app.core.paste_text(
+                self.app.private[i], force=True,
+                target_hwnd=getattr(self.app, "_paste_target", None)):
+            InfoBar.error("粘贴失败", "剪贴板写入失败,请重试", parent=self,
+                          position=InfoBarPosition.TOP_RIGHT, duration=5000)
 
     def do_view(self):
         """私密条目 → 独立查看器(JWT 自动落解码视图;rec 带 private 标记,
@@ -1436,20 +1514,32 @@ class PrivatePage(QWidget):
 
     def do_del(self):
         item = self.lst.currentItem()
-        if item:
-            i = self.lst.row(item)
-            if not 0 <= i < len(self.app.private):
-                return
-            self.app.private.pop(i)
-            cm.save_private(self.app.private)
-            self.refresh()
+        if not item:
+            return
+        i = self.lst.row(item)
+        ok, err = self.app.core.delete_private(i)
+        self.refresh()
+        if not ok:
+            InfoBar.error("删除失败", "%s;条目保持原状" % err, parent=self,
+                          position=InfoBarPosition.TOP_RIGHT, duration=6000)
 
     def do_clear(self):
-        box = MessageBox("私密内容", "确定清空全部私密内容?", self)
+        st = getattr(self.app.core, "_private_load", None)
+        unreadable = st is not None and st.status == "unreadable"
+        box = MessageBox(
+            "私密内容",
+            "确定清空全部私密内容?"
+            + ("\n\n注意:原文件当前无法读取,此操作将一并丢弃其中无法读取"
+               "的内容(不可恢复)。" if unreadable else ""), self)
         if box.exec():
-            self.app.private.clear()   # 原地清空,保持核心引用有效
-            cm.save_private(self.app.private)
+            ok, err = self.app.core.clear_private()
             self.refresh()
+            if not ok:
+                InfoBar.error("清空失败", "%s;列表保持原状" % err, parent=self,
+                              position=InfoBarPosition.TOP_RIGHT, duration=6000)
+            else:
+                InfoBar.success("已清空", "私密区与备份已全部清除", parent=self,
+                                position=InfoBarPosition.TOP_RIGHT)
 
 
 # ============================================================
@@ -1778,16 +1868,21 @@ class SettingsPage(QWidget):
 
         c_enc = SwitchSettingCard(
             FIF.CERTIFICATE, "历史加密存储",
-            "history.json 用 Windows DPAPI 绑定当前用户加密(复制文件到别的"
-            "电脑读不出);主要保护静态磁盘数据,不抵御已获得当前用户权限的"
-            "恶意程序;关闭则明文存储,便于备份与迁移", parent=group3)
+            "历史正文与元数据用 Windows DPAPI 加密，并移除旧明文库；"
+            "图片文件不加密。保护静态磁盘数据，不抵御当前用户权限的"
+            "恶意程序；关闭则使用 SQLite 明文存储", parent=group3)
         c_enc.setChecked(bool(cfg.get("encrypt_history")))
 
         def on_enc(on):
-            # 即时双向切换:开 → 全量加密 JSON + 停库写透;
-            # 关 → 启用库(空库则迁入当前历史)。见 core.set_history_encryption
-            app.core.set_history_encryption(bool(on))
-            cm.save_config(cfg)
+            try:
+                app.core.set_history_encryption(bool(on))
+            except Exception as exc:
+                c_enc.blockSignals(True)
+                c_enc.setChecked(bool(cfg.get("encrypt_history")))
+                c_enc.blockSignals(False)
+                InfoBar.error("存储转换未完成", str(exc), parent=self,
+                              position=InfoBarPosition.TOP_RIGHT, duration=8000)
+                return
             InfoBar.success("历史加密已" + ("开启" if on else "关闭"),
                             "存储已转换为" + ("加密 JSON" if on else "SQLite 库")
                             + "格式", parent=self, position=InfoBarPosition.TOP_RIGHT)
@@ -2070,7 +2165,13 @@ class SettingsPage(QWidget):
             % (n_items, cm._fmt_size(blob_bytes + img_bytes)))
         body.setWordWrap(True)
         dlg.viewLayout.addWidget(body)
-        chk_priv = CheckBox("同时清空私密区(%d 条,含敏感内容)" % n_priv)
+        chk_priv = CheckBox("同时清空私密区(%d 条,含敏感内容;备份与无法读取"
+                            "的原文件一并删除)%s"
+                            % (n_priv,
+                               "【当前私密区文件不可读,勾选将丢弃其中内容】"
+                               if getattr(core, "_private_load", None) is not None
+                               and core._private_load.status == "unreadable"
+                               else ""))
         chk_cfg = CheckBox("同时重置全部设置(AI 服务密钥 / 工作流 / 主题等)")
         dlg.viewLayout.addWidget(chk_priv)
         dlg.viewLayout.addWidget(chk_cfg)
@@ -2104,7 +2205,7 @@ class SettingsPage(QWidget):
         done, ok = core.wipe_all_data(wipe_private=chk_priv.isChecked(),
                                       reset_config=chk_cfg.isChecked())
         # 前端联动:缩略图缓存/列表/私密区/来源下拉全部重建
-        self.app._thumbs.clear()
+        self.app.reset_thumbs()
         self.app.refresh_view()
         for page in (getattr(self.app.win, "private_page", None),):
             if page is not None and hasattr(page, "refresh"):
@@ -2127,7 +2228,10 @@ class SettingsPage(QWidget):
         try:
             text = diag.format_diagnostics(
                 diag.collect_diagnostics(self.app.core))
-            self.app.core.copy_text(text)
+            if not self.app.core.copy_text(text):
+                InfoBar.error("复制失败", "剪贴板写入失败,请重试", parent=self,
+                              position=InfoBarPosition.TOP_RIGHT, duration=5000)
+                return
             InfoBar.success("诊断信息已复制",
                             "共 %d 行,可直接粘贴给问题反馈"
                             % len(text.splitlines()),
@@ -2359,2728 +2463,6 @@ class SettingsPage(QWidget):
         self._refresh_excl_label()
 
 
-class CompressDialog(MessageBoxBase):
-    """压缩 / 格式转换对话框。
-
-    基于 MessageBoxBase:内容放 viewLayout(自适应高度);
-    「复制到剪贴板」复用 yesButton,点击时经 validate() 执行压缩。
-    (不能直接用 Dialog —— 它 setFixedSize 固定了尺寸,且已有顶层布局,
-    再套 QVBoxLayout 不会生效。)
-    """
-
-    def __init__(self, editor):
-        super().__init__(editor)
-        self.editor = editor
-
-        self.titleLabel = StrongBodyLabel("压缩 / 格式转换")
-        self.viewLayout.addWidget(self.titleLabel)
-        sub = CaptionLabel("JPG 体积小、质量可调;PNG 无损,适合截图。")
-        sub.setStyleSheet("color: %s;" % TER)
-        self.viewLayout.addWidget(sub)
-
-        qrow = QHBoxLayout()
-        qlab = BodyLabel("质量")
-        qlab.setStyleSheet("color: %s;" % SEC)
-        self.quality = Slider(Qt.Horizontal)
-        self.quality.setRange(10, 95)
-        self.quality.setValue(80)
-        self.valueLabel = BodyLabel("80")
-        self.valueLabel.setStyleSheet("color: %s;" % TEXT)
-        self.quality.valueChanged.connect(self.valueLabel.setNum)
-        qrow.addWidget(qlab)
-        qrow.addWidget(self.quality, 1)
-        qrow.addWidget(self.valueLabel)
-        self.viewLayout.addLayout(qrow)
-
-        self.radioJpg = RadioButton("JPG(体积小,质量可调)")
-        self.radioPng = RadioButton("PNG(无损)")
-        self.radioJpg.setChecked(True)
-        self.radioJpg.toggled.connect(self._on_format)
-        self.viewLayout.addWidget(self.radioJpg)
-        self.viewLayout.addWidget(self.radioPng)
-
-        self.saveButton = PushButton("💾 保存文件…", self)
-        self.saveButton.clicked.connect(self._on_save)
-        self.viewLayout.addWidget(self.saveButton, 0, Qt.AlignLeft)
-
-        self.yesButton.setText("复制到剪贴板")
-        self.cancelButton.setText("取消")
-        self.widget.setFixedWidth(380)
-
-    def _on_format(self, _):
-        # PNG 无损,质量滑条仅对 JPG 有效
-        on = self.radioJpg.isChecked()
-        self.quality.setEnabled(on)
-        self.valueLabel.setEnabled(on)
-
-    def _encode(self):
-        """按当前选项编码图片,返回字节流。"""
-        buf = io.BytesIO()
-        final = self.editor._final_image()   # 含全部矢量标注的合成图
-        if self.radioJpg.isChecked():
-            final.save(buf, "JPEG", quality=self.quality.value())
-        else:
-            final.save(buf, "PNG")
-        return buf.getvalue()
-
-    def validate(self):
-        """点「复制到剪贴板」时执行(qfluentwidgets 扩展点);True 才关闭。"""
-        try:
-            img = cm.Image.open(io.BytesIO(self._encode()))
-            ok = cm.set_dib_to_clipboard(self.editor.app.worker.hwnd,
-                                         cm.pil_to_dib(img))
-        except Exception:
-            MessageBox("WinClipboard", "压缩失败。", self).exec()
-            return False
-        if ok:
-            self.editor.lbl_status.setText("✅ 已压缩并复制到剪贴板")
-            if self.editor._layer_mode:
-                # 压缩产物是整图重编码:以新底图回写,标注层清空(已含在像素里)
-                self.editor._emit_layers(base_override=img, annos_override=[])
-            else:
-                self.editor._emit_result(img)   # 画布回写走压缩后的版本
-            return True
-        InfoBar.error("复制失败", "剪贴板被占用,请稍后重试", parent=self.editor,
-                      position=InfoBarPosition.BOTTOM_LEFT)
-        return False
-
-    def _on_save(self):
-        if self.radioJpg.isChecked():
-            path, _ = QFileDialog.getSaveFileName(
-                self, "保存图片", "clipboard_compressed.jpg",
-                "JPEG 图片 (*.jpg)")
-        else:
-            path, _ = QFileDialog.getSaveFileName(
-                self, "保存图片", "clipboard_compressed.png",
-                "PNG 图片 (*.png)")
-        if not path:
-            return
-        try:
-            Path(path).write_bytes(self._encode())
-        except Exception:
-            MessageBox("WinClipboard", "保存失败。", self).exec()
-            return
-        self.editor.lbl_status.setText("✅ 已保存: " + path)
-        self.accept()
-
-
-class ScaleDialog(MessageBoxBase):
-    """缩放对话框:滑条 + 数值框联动(替代原生 QInputDialog,跟随主题)。"""
-
-    def __init__(self, editor):
-        super().__init__(editor)
-        self.titleLabel = StrongBodyLabel("缩放图片")
-        self.viewLayout.addWidget(self.titleLabel)
-        sub = CaptionLabel("按百分比缩放(10% – 300%)")
-        sub.setStyleSheet("color: %s;" % TER)
-        self.viewLayout.addWidget(sub)
-
-        row = QHBoxLayout()
-        self.slider = Slider(Qt.Horizontal)
-        self.slider.setRange(10, 300)
-        self.slider.setValue(100)
-        self.spin = SpinBox()
-        self.spin.setRange(10, 300)
-        self.spin.setValue(100)
-        self.slider.valueChanged.connect(self.spin.setValue)
-        self.spin.valueChanged.connect(self.slider.setValue)
-        row.addWidget(self.slider, 1)
-        row.addWidget(self.spin)
-        self.viewLayout.addLayout(row)
-
-        self.yesButton.setText("应用")
-        self.cancelButton.setText("取消")
-        self.widget.setFixedWidth(360)
-
-    def value(self):
-        return self.spin.value()
-
-
-def _glyph_icon(kind, color=None, sz=18):
-    """编辑器工具的几何图形图标(矩形/圆/箭头/画笔/马赛克/撤销/对勾/粗细)。
-    库里没有这些语义图形,按工具本身的几何含义绘制;部件样式仍全部走库。"""
-    pm = QPixmap(sz, sz)
-    pm.fill(Qt.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.Antialiasing)
-    c = color if color is not None else QColor(TEXT)
-    pen = QPen(c, 1.6)
-    pen.setCapStyle(Qt.RoundCap)
-    p.setPen(pen)
-    m = 2.5
-    if kind == "rect":
-        p.drawRect(QRectF(m, m + 1, sz - 2 * m, sz - 2 * m - 2))
-    elif kind == "ellipse":
-        p.drawEllipse(QRectF(m, m + 1, sz - 2 * m, sz - 2 * m - 2))
-    elif kind == "arrow":
-        pen.setWidthF(1.8)
-        p.drawLine(QPointF(m + 1, sz - m - 1), QPointF(sz - m - 1, m + 1))
-        p.drawLine(QPointF(sz - m - 1, m + 1),
-                   QPointF(sz - m - 6, m + 2.5))
-        p.drawLine(QPointF(sz - m - 1, m + 1),
-                   QPointF(sz - m - 6.5, m + 7))
-    elif kind == "pen":
-        path = QPainterPath(QPointF(m, sz * 0.72))
-        path.cubicTo(QPointF(sz * 0.3, sz * 0.32), QPointF(sz * 0.55, sz * 0.88),
-                     QPointF(sz - m, sz * 0.28))
-        pen.setWidthF(1.9)
-        p.drawPath(path)
-    elif kind == "mosaic":
-        p.setPen(Qt.NoPen)
-        p.setBrush(c)
-        cell = (sz - 2 * m) / 3.0
-        for rr in range(3):
-            for cc in range(3):
-                p.drawRect(QRectF(m + cc * cell + 0.8, m + rr * cell + 0.8,
-                                  cell - 1.6, cell - 1.6))
-    elif kind == "undo":
-        path = QPainterPath(QPointF(sz * 0.78, sz * 0.60))
-        path.cubicTo(QPointF(sz * 0.74, sz * 0.18), QPointF(sz * 0.28, sz * 0.18),
-                     QPointF(sz * 0.26, sz * 0.52))
-        pen.setWidthF(1.8)
-        p.drawPath(path)
-        ex, ey = sz * 0.26, sz * 0.52
-        p.drawLine(QPointF(ex, ey), QPointF(ex + 5.5, ey - 3))
-        p.drawLine(QPointF(ex, ey), QPointF(ex + 5.5, ey + 5.5))
-    elif kind == "select":
-        p.setBrush(c)
-        p.setPen(Qt.NoPen)
-        p.drawPolygon(QPolygonF([
-            QPointF(m + 3, m), QPointF(m + 3, sz * 0.78),
-            QPointF(m + 7, sz * 0.58), QPointF(m + 9.2, sz - m),
-            QPointF(m + 11.2, sz - m - 0.8), QPointF(m + 9, sz * 0.52),
-            QPointF(m + 13.5, sz * 0.5)]))
-    elif kind == "check":
-        pen.setWidthF(2.2)
-        p.drawLine(QPointF(sz * 0.24, sz * 0.55), QPointF(sz * 0.44, sz * 0.74))
-        p.drawLine(QPointF(sz * 0.44, sz * 0.74), QPointF(sz * 0.78, sz * 0.28))
-    elif kind == "width":
-        for i, w in ((0, 1.2), (1, 2.2), (2, 3.4)):
-            pen.setWidthF(w)
-            y = m + 2 + i * ((sz - 2 * m - 4) / 2.0)
-            p.drawLine(QPointF(m + 1, y), QPointF(sz - m - 1, y))
-    p.end()
-    return QIcon(pm)
-
-
-def _qimage_to_pil(qimg):
-    """QImage(ARGB32) → PIL RGB(白底合成);编辑器场景渲染导出用。"""
-    w, h = qimg.width(), qimg.height()
-    rgba = cm.Image.frombuffer("RGBA", (w, h), bytes(qimg.constBits()),
-                               "raw", "BGRA", qimg.bytesPerLine(), 1)
-    out = cm.Image.new("RGB", (w, h), (255, 255, 255))
-    out.paste(rgba, mask=rgba.split()[3])
-    return out
-
-
-# ---- 标注项(矢量:可选中/可拖动/可删除;文字双击再编辑) ----
-_SEL_PEN = None          # 选中角标画笔(固定样式,模块级缓存,别在 paint 里反复构造)
-
-
-def _sel_border(item, painter, option):
-    """选中态虚线角标(所有标注项共用)。"""
-    global _SEL_PEN
-    if not (option.state & QStyle.State_Selected):
-        return
-    if _SEL_PEN is None:
-        _SEL_PEN = QPen(QColor("#00A2FF"), 1)
-        _SEL_PEN.setCosmetic(True)
-        _SEL_PEN.setStyle(Qt.DashLine)
-    painter.setPen(_SEL_PEN)
-    painter.setBrush(Qt.NoBrush)
-    painter.drawRect(item.boundingRect().adjusted(0.5, 0.5, -0.5, -0.5))
-
-
-class _AnnoMixin:
-    """标注通用行为:editor 反向引用 + 拖动起止记录(撤销 move 用)。"""
-
-    def _anno_init(self, editor):
-        self.editor = editor
-        self.setFlag(QGraphicsPixmapItem.ItemIsMovable, True)
-        self.setFlag(QGraphicsPixmapItem.ItemIsSelectable, True)
-        self._move_from = None
-
-    def mousePressEvent(self, e):
-        self._move_from = self.pos()
-        super().mousePressEvent(e)
-
-    def mouseReleaseEvent(self, e):
-        super().mouseReleaseEvent(e)
-        if self._move_from is not None and self._move_from != self.pos():
-            ed = getattr(self, "editor", None)
-            if ed is not None:
-                ed._record({"type": "move", "item": self, "pos": self._move_from})
-        self._move_from = None
-
-
-class AnnoRect(_AnnoMixin, QGraphicsRectItem):
-    def paint(self, p, o, w=None):
-        super().paint(p, o, w)
-        _sel_border(self, p, o)
-
-
-class AnnoEllipse(_AnnoMixin, QGraphicsEllipseItem):
-    def paint(self, p, o, w=None):
-        super().paint(p, o, w)
-        _sel_border(self, p, o)
-
-
-class AnnoPath(_AnnoMixin, QGraphicsPathItem):
-    def paint(self, p, o, w=None):
-        super().paint(p, o, w)
-        _sel_border(self, p, o)
-
-
-class AnnoMosaic(_AnnoMixin, QGraphicsPixmapItem):
-    def paint(self, p, o, w=None):
-        super().paint(p, o, w)
-        _sel_border(self, p, o)
-
-
-class AnnoText(_AnnoMixin, QGraphicsTextItem):
-    def paint(self, p, o, w=None):
-        super().paint(p, o, w)
-        _sel_border(self, p, o)
-
-    def mouseDoubleClickEvent(self, e):
-        self.setTextInteractionFlags(Qt.TextEditorInteraction)
-        self.setFocus()
-        super().mouseDoubleClickEvent(e)
-
-    def focusOutEvent(self, e):
-        super().focusOutEvent(e)
-        self.setTextInteractionFlags(Qt.NoTextInteraction)
-        if not self.toPlainText().strip():
-            ed = getattr(self, "editor", None)
-            if ed is not None:
-                ed._drop_anno(self, record=False)
-                ed._prune_add_record(self)
-
-
-class ImageEditor(QWidget):
-    """图片编辑器(QQ 风格矢量标注)。两种形态:
-    - 独立窗口(parent=None,兼容旧入口/测试)
-    - 内嵌组件(parent=查看器等容器,不新开窗口——查看↔编辑同窗切换)"""
-
-    finished = Signal()            # 内嵌形态:编辑结束(完成/Esc),容器收回
-
-    def __init__(self, app, rec, on_result=None, parent=None,
-                 annos=None, layer_mode=False):
-        super().__init__(parent)
-        self.app = app
-        self.rec = rec
-        self._on_result = on_result     # 编辑产出回调(图钉画布回写用);None=普通编辑
-        self._layer_mode = layer_mode   # 非破坏层回写(emit annotations 而非像素)
-        self._src_path = str(rec.get("content") or "")
-        self._base_dirty = False        # 裁剪/旋转/缩放等底图操作(需替换资产)
-        self._embedded = parent is not None
-        if not self._embedded:
-            self.setWindowTitle("图片处理%s — %s" % (
-                "(完成复制/保存后自动更新画布)" if on_result else "",
-                os.path.basename(rec["content"])))
-            self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
-            self.setWindowIcon(app.icon)
-            self.resize(940, 640)
-        self.setStyleSheet("QWidget { background: %s; }" % BG)   # 跟随主题(仅本部件子树)
-
-        try:
-            src = cm.Image.open(rec["content"])
-            if src.mode != "RGB":
-                bg = cm.Image.new("RGB", src.size, (255, 255, 255))
-                bg.paste(src, mask=src.split()[-1] if src.mode in ("RGBA", "LA") else None)
-                src = bg
-            self.base = src
-        except Exception:
-            MessageBox("WinClipboard", "无法打开图片文件。", self).exec()
-            self.base = cm.Image.new("RGB", (400, 300), (255, 255, 255))
-
-        self.undo_stack = []           # 撤销记录(add/del/move/img)
-        self.tool = None
-        self._drag_start = None
-        self._preview = None          # 拖动中的形状预览项(场景内)
-        self._preview_path = None     # 画笔预览路径
-        self._pen_pts = None          # 画笔采样点(视图坐标)
-        self.annos = []               # 标注矢量项(创建序即 z 序)
-        self._z = 0
-        self._color = QColor("#FF4040")     # 标注颜色(默认红,QQ 风格)
-        self._pen_w = 4                      # 线宽:细2 / 中4 / 粗8
-        self._font_px = 26                   # 标注文字像素高
-
-        v = QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-
-        self.view = QGraphicsView()
-        self.view.setRenderHint(QPainter.SmoothPixmapTransform)
-        self.view.setStyleSheet(
-            "QGraphicsView { background: #26292F; border: none; }")
-        self.view.setDragMode(QGraphicsView.RubberBandDrag)   # 选择模式=框选
-        self.scene = QGraphicsScene(self)
-        self.view.setScene(self.scene)
-        self._pix_item = QGraphicsPixmapItem()
-        self.scene.addItem(self._pix_item)
-        v.addWidget(self.view, 1)
-
-        # 状态角标(左上角小字):必须透明背景+鼠标穿透——CaptionLabel 脱离
-        # 布局后 parent 到窗口会带出 640×480 的默认尺寸,一旦有背景色/收
-        # 事件就是一张盖住画布的白卡(真机已踩)
-        self.lbl_status = CaptionLabel("")
-        self.lbl_status.setParent(self)
-        self.lbl_status.setFont(font(11))
-        self.lbl_status.setStyleSheet("color: %s; background: transparent;"
-                                      % SEC)
-        self.lbl_status.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.lbl_status.adjustSize()
-
-        self._build_toolbar()          # 底部悬浮工具条(QQ 截图编辑风格)
-
-        # 覆写视图鼠标事件做标注绘制;无工具(选择模式)时转发回默认处理器,
-        # 让场景项走 Qt 原生的选中/拖动/文字编辑
-        self._ovp = self.view.mousePressEvent
-        self._ovm = self.view.mouseMoveEvent
-        self._ovr = self.view.mouseReleaseEvent
-        self.view.mousePressEvent = self._press
-        self.view.mouseMoveEvent = self._move
-        self.view.mouseReleaseEvent = self._release
-        self._redraw()
-        if annos:
-            self.load_annotations(annos)   # 图钉画布回编:标注层原样恢复
-
-    # ---- 工具条(底部居中悬浮药丸) ----
-    COLORS = ("#000000", "#FFFFFF", "#FF4040", "#FF9500",
-              "#FFD60A", "#34C759", "#007AFF", "#AF52DE")
-    COLOR_NAMES = {"#000000": "黑", "#FFFFFF": "白", "#FF4040": "红",
-                   "#FF9500": "橙", "#FFD60A": "黄", "#34C759": "绿",
-                   "#007AFF": "蓝", "#AF52DE": "紫"}
-    PEN_WIDTHS = ((2, "细"), (4, "中"), (8, "粗"))
-
-    def _build_toolbar(self):
-        bar = CardWidget(self)
-        self._bar = bar
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(10, 7, 10, 6)
-        lay.setSpacing(0)
-        self._tbtns = {}
-
-        def tbtn(icon, text, tip, checkable=True, cb=None, primary=False):
-            # 竖排组合:图标按钮 + 下方小字(库原生 ToggleToolButton 有明确
-            # 选中态;QToolButton 的 textUnderIcon 样式与库 QSS 不合,图标
-            # 文字会叠压,实测不可用)
-            wrap = QWidget(bar)
-            wl = QVBoxLayout(wrap)
-            wl.setContentsMargins(0, 0, 0, 0)
-            wl.setSpacing(0)
-            b = (PrimaryToolButton if primary else
-                 ToggleToolButton if checkable else TransparentToolButton)(wrap)
-            b.setIcon(icon)
-            b.setToolTip(tip)
-            b.setCheckable(checkable)
-            b.setFixedSize(44, 38)
-            b.setIconSize(QSize(18, 18))
-            b.setCursor(Qt.PointingHandCursor)
-            if cb is not None:
-                b.clicked.connect(cb)
-            lb = CaptionLabel(text, wrap)
-            lb.setFont(font(10))
-            lb.setAlignment(Qt.AlignCenter)
-            wl.addWidget(b, 0, Qt.AlignHCenter)
-            wl.addWidget(lb, 0, Qt.AlignHCenter)
-            lay.addWidget(wrap)
-            return b
-
-        def vsep():
-            ln = QFrame(bar)
-            ln.setFixedSize(1, 44)
-            ln.setStyleSheet("background: %s;" % LINE)
-            lay.addWidget(ln)
-            lay.addSpacing(4)
-
-        tbtn(_glyph_icon("undo"), "撤销", "撤销上一步(Ctrl+Z)", False,
-             self._on_undo)
-        lay.addSpacing(2)
-        tools = (("select", _glyph_icon("select"), "选择", "点击选中标注后拖动移动,"
-                 "Del 删除;双击文字再编辑;空白拖动框选多个"),
-                 ("rect", _glyph_icon("rect"), "矩形", "拖动绘制矩形(可连续标注)"),
-                 ("ellipse", _glyph_icon("ellipse"), "圆形", "拖动绘制椭圆"),
-                 ("arrow", _glyph_icon("arrow"), "箭头", "拖动绘制箭头"),
-                 ("pen", _glyph_icon("pen"), "画笔", "按住拖动自由绘制"),
-                 ("text", FIF.FONT.icon(), "文字", "点击图片输入文字(双击可再编辑)"),
-                 ("mosaic", _glyph_icon("mosaic"), "马赛克", "拖动框选区域打马赛克"),
-                 ("crop", FIF.CUT.icon(), "裁剪", "拖动框选裁剪区域"))
-        for key, icon, text, tip in tools:
-            self._tbtns[key] = tbtn(icon, text, tip,
-                                    cb=lambda _=False, k=key: self._on_tool(k))
-        vsep()
-        self._btn_color = tbtn(self._color_icon(), "颜色", "标注颜色",
-                               False, self._pick_color)
-        self._btn_width = tbtn(_glyph_icon("width"), "粗细", "线条粗细",
-                               False, self._pick_width)
-        vsep()
-        self._btn_more = tbtn(FIF.MORE.icon(), "更多", "保存 / 压缩 / 旋转 / 缩放",
-                              False, self._more_menu)
-        self._btn_done = tbtn(_glyph_icon("check", QColor("#FFFFFF")), "完成",
-                              "复制到剪贴板并关闭(画布模式同时更新画布)",
-                              False, self._on_done, primary=True)
-
-    def _color_icon(self):
-        pm = QPixmap(18, 18)
-        pm.fill(Qt.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(QPen(QColor(TEXT), 1.2))
-        p.setBrush(self._color)
-        p.drawEllipse(2.5, 2.5, 13, 13)
-        p.end()
-        return QIcon(pm)
-
-    def _menu_at(self, btn):
-        """菜单弹出锚点(编辑器坐标系)。按钮包在容器里,geometry() 相对容器,
-        必须经 mapTo 从按钮自身坐标系换算——此前用 bar.mapFromParent 误把
-        容器坐标当父层坐标,菜单被双重偏移弹到屏幕外(表现为点了没反应)。"""
-        return btn.mapTo(self, btn.rect().center())
-
-    def _pick_color(self):
-        m = RoundMenu(parent=self)
-        for hexc in self.COLORS:
-            pm = QPixmap(16, 16)
-            pm.fill(Qt.transparent)
-            pp = QPainter(pm)
-            pp.setRenderHint(QPainter.Antialiasing)
-            pp.setPen(QPen(QColor(TEXT), 1))
-            pp.setBrush(QColor(hexc))
-            pp.drawEllipse(1.5, 1.5, 13, 13)
-            pp.end()
-            a = QAction("● " + self.COLOR_NAMES.get(hexc, hexc), m)
-            a.setIcon(QIcon(pm))
-            a.triggered.connect(lambda _=False, c=hexc: self._set_color(c))
-            m.addAction(a)
-        m.exec(self._menu_at(self._btn_color))
-
-    def _set_color(self, hexc):
-        self._color = QColor(hexc)
-        self._btn_color.setIcon(self._color_icon())
-        self._apply_style_selected()
-
-    def _pick_width(self):
-        m = RoundMenu(parent=self)
-        for w, name in self.PEN_WIDTHS:
-            mark = "● " if w == self._pen_w else ""
-            a = QAction("%s%s(%dpx)" % (mark, name, w), m)
-            a.triggered.connect(lambda _=False, v=w: self._set_width(v))
-            m.addAction(a)
-        m.exec(self._menu_at(self._btn_width))
-
-    def _set_width(self, w):
-        self._pen_w = int(w)
-        self._apply_style_selected()
-
-    def _apply_style_selected(self):
-        """把当前颜色/粗细应用到选中的标注(选中即改,可撤销);无选中只改
-        后续绘制参数。文字只改颜色;马赛克不适用。"""
-        old = []
-        col = QColor(self._color)
-        for it in self.annos:
-            if not it.isSelected():
-                continue
-            if isinstance(it, AnnoText):
-                old.append((it, "text", QColor(it.defaultTextColor())))
-                it.setDefaultTextColor(col)
-            elif not isinstance(it, AnnoMosaic):
-                pen = QPen(it.pen())
-                old.append((it, "pen", QPen(it.pen())))
-                pen.setColor(col)
-                pen.setWidthF(float(self._pen_w))
-                it.setPen(pen)
-        if old:
-            self._record({"type": "style", "old": old})
-
-    def _more_menu(self):
-        m = RoundMenu(parent=self)
-
-        def act(text, fn):
-            a = QAction(text, m)
-            a.triggered.connect(lambda _=False: fn())
-            m.addAction(a)
-
-        act("保存到文件…", self._on_save)
-        act("压缩导出…", self._on_compress)
-        m.addSeparator()
-        act("⟲ 向左旋转 90°", lambda: self._transform(
-            lambda im: im.rotate(90, expand=True)))
-        act("⟳ 向右旋转 90°", lambda: self._transform(
-            lambda im: im.rotate(-90, expand=True)))
-        act("按百分比缩放…", self._scale_dialog)
-        m.exec(self._menu_at(self._btn_more))
-
-    def _scale_dialog(self):
-        d = ScaleDialog(self)
-        if d.exec() and d.value() != 100:
-            vv = d.value()
-            self._transform(lambda im: im.resize(
-                (max(1, int(im.width * vv / 100)), max(1, int(im.height * vv / 100))),
-                cm.RESAMPLE))
-
-    def _layout_overlays(self):
-        if not hasattr(self, "_bar"):
-            return
-        self._bar.adjustSize()
-        self._bar.move(max(8, (self.width() - self._bar.width()) // 2),
-                       self.height() - self._bar.height() - 14)
-        self._bar.raise_()
-        self.lbl_status.move(14, 10)
-        self.lbl_status.raise_()
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self._layout_overlays()
-
-    def showEvent(self, e):
-        super().showEvent(e)
-        ensure_onscreen(self)
-        self._layout_overlays()
-
-    # ---- 工具 ----
-    def _on_tool(self, key):
-        self._clear_preview()
-        if key == "select":
-            self.tool = None
-        elif self.tool == key:
-            self.tool = None
-        else:
-            self.tool = key
-        # 选择模式开框选;绘制工具关掉避免和形状预览打架
-        self.view.setDragMode(QGraphicsView.RubberBandDrag
-                              if self.tool is None
-                              else QGraphicsView.NoDrag)
-        self._sync_tools()
-        self._status()
-
-    def _sync_tools(self):
-        for k, b in self._tbtns.items():
-            b.setChecked(k == self.tool or
-                         (k == "select" and self.tool is None))
-
-    def keyPressEvent(self, e):
-        if e.key() == Qt.Key_Escape:
-            if self.tool is not None:
-                self._on_tool("select")     # 先退工具,再按才退出(QQ 式)
-            elif self._embedded:
-                self.finished.emit()        # 内嵌形态:交还容器(查看器回查看态)
-            else:
-                self.close()
-        elif e.key() in (Qt.Key_Delete, Qt.Key_Backspace):
-            self._delete_selected()
-        elif e.key() == Qt.Key_Z and e.modifiers() & Qt.ControlModifier:
-            self._on_undo()
-        else:
-            super().keyPressEvent(e)
-
-    # ---- 文字标注(场景内直接输入,双击可再编辑;空文字失焦自动清除) ----
-    def _place_text(self, sp):
-        it = AnnoText("")
-        f = QFont(self.font())
-        f.setPixelSize(self._font_px)
-        f.setBold(True)
-        it.setFont(f)
-        it.setDefaultTextColor(QColor(self._color))
-        it.setPos(sp)
-        self.scene.addItem(it)
-        it._anno_init(self)
-        self._z += 1
-        it.setZValue(self._z)
-        self.annos.append(it)
-        self._record({"type": "add", "item": it})
-        it.setTextInteractionFlags(Qt.TextEditorInteraction)
-        it.setFocus()
-        self._status()
-
-    # ---- 预览项(拖动中的形状,场景坐标系) ----
-    def _clear_preview(self):
-        if self._preview is not None:
-            self.scene.removeItem(self._preview)
-            self._preview = None
-        self._preview_path = None
-
-    def _pen_style(self, dashed=False):
-        pen = QPen(QColor(self._color) if not dashed else QColor("#FF5252"),
-                   1.5 if dashed else self._pen_w)
-        pen.setCosmetic(True)          # 视觉线宽不随视图缩放
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
-        if dashed:
-            pen.setStyle(Qt.DashLine)
-        return pen
-
-    def _anno_pen(self):
-        pen = QPen(QColor(self._color), self._pen_w)   # 图像空间线宽
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
-        return pen
-
-    def _press(self, e):
-        if e.button() != Qt.LeftButton:
-            return
-        if self.tool is None:
-            self._ovp(e)               # 选择模式:交给 Qt 原生项交互
-            return
-        if self.tool == "text":
-            self._place_text(self.view.mapToScene(e.position().toPoint()))
-            return
-        if self.tool in ("crop", "rect", "ellipse", "arrow", "pen", "mosaic"):
-            self._drag_start = e.position()
-            self._pen_pts = [e.position()] if self.tool == "pen" else None
-
-    def _move(self, e):
-        if self._drag_start is None:
-            if self.tool is None:
-                self._ovm(e)
-            return
-        # 预览必须画在场景坐标系(mapToScene):视图缩放/平移后仍贴着鼠标
-        s1 = self.view.mapToScene(self._drag_start.toPoint())
-        s2 = self.view.mapToScene(e.position().toPoint())
-        if self.tool == "pen":
-            self._pen_pts.append(e.position())
-            if self._preview is None:
-                self._preview_path = QPainterPath(s1)
-                self._preview = QGraphicsPathItem(self._preview_path)
-                self._preview.setPen(self._pen_style())
-                self.scene.addItem(self._preview)
-            else:
-                self._preview_path.lineTo(s2)
-                self._preview.setPath(self._preview_path)
-            return
-        r = QRectF(s1, s2).normalized()
-        dashed = self.tool in ("crop", "mosaic")
-        need = (QGraphicsRectItem if self.tool in ("rect", "crop", "mosaic")
-                else QGraphicsEllipseItem if self.tool == "ellipse"
-                else QGraphicsLineItem)
-        if self._preview is None or not isinstance(self._preview, need):
-            self._clear_preview()
-            self._preview = need()
-            self._preview.setPen(self._pen_style(dashed=dashed))
-            self.scene.addItem(self._preview)
-        if isinstance(self._preview, QGraphicsLineItem):
-            self._preview.setLine(s1.x(), s1.y(), s2.x(), s2.y())
-        else:
-            self._preview.setRect(r)
-
-    def _release(self, e):
-        if self._drag_start is None:
-            if self.tool is None:
-                self._ovr(e)
-            return
-        start = self.view.mapToScene(self._drag_start.toPoint())
-        end = self.view.mapToScene(e.position().toPoint())
-        pen_pts = self._pen_pts
-        self._drag_start = None
-        self._pen_pts = None
-        self._clear_preview()
-        tool = self.tool
-        if tool == "pen":
-            pts = [self._to_img(self.view.mapToScene(p.toPoint()))
-                   for p in (pen_pts or [])]
-            if len(pts) >= 2 and (abs(pts[-1][0] - pts[0][0]) +
-                                  abs(pts[-1][1] - pts[0][1]) > 2):
-                self._finish_anno("pen", pts=pts)
-            self._status()
-            return
-        ix0, iy0 = self._to_img(start)
-        ix1, iy1 = self._to_img(end)
-        if tool == "arrow":
-            # 箭头有方向性:必须用原始 起点→终点;下面的 min/max 归一化
-            # 会把所有箭头掰成「往右下」,反向/斜向拖拽方向即错(真机已现)
-            if (ix1 - ix0) ** 2 + (iy1 - iy0) ** 2 >= 9:
-                self._finish_anno("arrow", (ix0, iy0), (ix1, iy1))
-            return
-        ix0, ix1 = sorted((ix0, ix1))
-        iy0, iy1 = sorted((iy0, iy1))
-        ix0, iy0 = max(0, ix0), max(0, iy0)
-        ix1, iy1 = min(self.base.width, ix1), min(self.base.height, iy1)
-        if ix1 - ix0 < 3 or iy1 - iy0 < 3:
-            return
-        if tool == "crop":
-            old_base, old_annos = self._flatten()
-            self.base = self.base.crop((ix0, iy0, ix1, iy1))
-            self._record({"type": "img", "base": old_base,
-                          "annos": old_annos})
-            self.tool = None
-            self._sync_tools()
-            self._redraw()
-            return
-        # 矢量标注:矩形/椭圆/箭头/马赛克 → 场景项,后续可选中/移动/删除
-        self._finish_anno(tool, (ix0, iy0), (ix1, iy1))
-        # QQ 式:标注工具保持激活,可连续标注;选择工具才可移动标注
-
-    def _finish_anno(self, kind, p0=None, p1=None, pts=None):
-        """按当前颜色/线宽把一个标注收成场景矢量项。"""
-        col = QColor(self._color)
-        r = QRectF(QPointF(p0[0], p0[1]),
-                   QPointF(p1[0], p1[1])).normalized() if p1 is not None else None
-        if kind == "rect":
-            it = AnnoRect(r)
-            it.setPen(self._anno_pen())
-            it.setBrush(Qt.NoBrush)
-        elif kind == "ellipse":
-            it = AnnoEllipse(r)
-            it.setPen(self._anno_pen())
-            it.setBrush(Qt.NoBrush)
-        elif kind == "arrow":
-            it = AnnoPath(self._arrow_path(QPointF(0, 0),
-                                           QPointF(p1[0] - p0[0],
-                                                   p1[1] - p0[1])))
-            it.setPos(p0[0], p0[1])
-            pen = self._anno_pen()
-            pen.setCosmetic(False)
-            it.setPen(pen)
-            it.setBrush(col)
-        elif kind == "pen":
-            path = QPainterPath(QPointF(0, 0))
-            for pt in pts[1:]:
-                path.lineTo(pt[0] - pts[0][0], pt[1] - pts[0][1])
-            it = AnnoPath(path)
-            it.setPos(pts[0][0], pts[0][1])
-            it.setPen(self._anno_pen())
-            it.setBrush(Qt.NoBrush)
-        elif kind == "mosaic":
-            pm = self._mosaic_patch(r)
-            if pm is None:
-                return
-            it = AnnoMosaic(pm)
-            it.setTransformationMode(Qt.FastTransformation)
-            it.setPos(r.topLeft())
-            it._factor = 12              # 块状因子(序列化用,重生成靠原图)
-        else:
-            return
-        it._kind = kind                  # 序列化标记(annotations.serialize_items)
-        self.scene.addItem(it)
-        it._anno_init(self)
-        self._z += 1
-        it.setZValue(self._z)
-        self.annos.append(it)
-        self._record({"type": "add", "item": it})
-        self._status()
-
-    @staticmethod
-    def _arrow_path(p0, p1):
-        return _anno_layer.arrow_path(p0, p1)
-
-    def _mosaic_patch(self, r, factor=12):
-        """区域马赛克:从原图裁剪 → 缩小 → 放大(块状),返回像素化贴片。
-        只存区域+因子(见 annotations),贴片每次从底图现算。"""
-        rect = r.toAlignedRect().intersected(
-            QRect(0, 0, self.base.width, self.base.height))
-        if rect.width() < 2 or rect.height() < 2:
-            return None
-        region = self.base.crop((rect.x(), rect.y(),
-                                 rect.right() + 1, rect.bottom() + 1))
-        small = region.resize((max(1, region.width // factor),
-                               max(1, region.height // factor)), cm.RESAMPLE)
-        pix = small.resize(region.size, cm.Image.NEAREST)
-        return QPixmap.fromImage(pil_to_qimage(pix))
-
-    # ---- 标注层序列化(非破坏模型:矢量参数,不含派生像素) ----
-    def annotations(self):
-        """当前标注 → 可持久化 dict 列表(图像像素坐标)。"""
-        return _anno_layer.serialize_items(self.annos)
-
-    def load_annotations(self, lst):
-        """恢复标注层(图钉画布回编):逐条重建为可交互编辑项。"""
-        loaded = []
-        for d in _anno_layer.sanitize(lst):
-            it = self._restore_anno(d)
-            if it is not None:
-                self.annos.append(it)
-                loaded.append(it)
-        if loaded:
-            self._status()
-        return loaded
-
-    def _restore_anno(self, d):
-        t = d.get("t")
-        col = QColor(d.get("c") or "#FF4040")
-        pw = float(d.get("pw") or 4.0)
-
-        def pen():
-            p = QPen(col, pw)
-            p.setCapStyle(Qt.RoundCap)
-            p.setJoinStyle(Qt.RoundJoin)
-            return p
-
-        if t in ("rect", "ellipse"):
-            r = QRectF(d["x"], d["y"], d["w"], d["h"])
-            it = AnnoRect(r) if t == "rect" else AnnoEllipse(r)
-            it.setPen(pen())
-            it.setBrush(Qt.NoBrush)
-        elif t == "arrow":
-            it = AnnoPath(self._arrow_path(
-                QPointF(0, 0),
-                QPointF(d["x2"] - d["x1"], d["y2"] - d["y1"])))
-            it.setPos(d["x1"], d["y1"])
-            p = pen()
-            p.setCosmetic(False)
-            it.setPen(p)
-            it.setBrush(col)
-        elif t == "pen":
-            pts = d["pts"]
-            path = QPainterPath(QPointF(0, 0))
-            for p in pts[1:]:
-                path.lineTo(p[0] - pts[0][0], p[1] - pts[0][1])
-            it = AnnoPath(path)
-            it.setPos(pts[0][0], pts[0][1])
-            it.setPen(pen())
-            it.setBrush(Qt.NoBrush)
-        elif t == "text":
-            it = AnnoText(str(d.get("s") or ""))
-            f = QFont(self.font())
-            f.setPixelSize(int(d.get("px") or 26))
-            f.setBold(True)
-            it.setFont(f)
-            it.setDefaultTextColor(col)
-            it.setPos(d["x"], d["y"])
-            it.setTextInteractionFlags(Qt.NoTextInteraction)
-        elif t == "mosaic":
-            pm = self._mosaic_patch(
-                QRectF(d["x"], d["y"], d["w"], d["h"]), int(d.get("f") or 12))
-            if pm is None:
-                return None
-            it = AnnoMosaic(pm)
-            it.setTransformationMode(Qt.FastTransformation)
-            it.setPos(d["x"], d["y"])
-            it._factor = int(d.get("f") or 12)
-        else:
-            return None
-        it._kind = t
-        self.scene.addItem(it)
-        it._anno_init(self)
-        self._z += 1
-        it.setZValue(self._z)
-        return it
-
-    # ---- 标注管理 / 撤销 ----
-    def _record(self, rec):
-        self.undo_stack.append(rec)
-        del self.undo_stack[:-40]
-
-    def _prune_add_record(self, item):
-        """空文字项自动清除时,弹掉它栈顶的 add 记录(撤销不该复活空项)。"""
-        if self.undo_stack and self.undo_stack[-1].get("type") == "add" \
-                and self.undo_stack[-1].get("item") is item:
-            self.undo_stack.pop()
-
-    def _drop_anno(self, it, record=True):
-        if it in self.annos:
-            self.annos.remove(it)
-        self.scene.removeItem(it)
-        if record:
-            self._record({"type": "del", "items": [it]})
-        self._status()
-
-    def _delete_selected(self):
-        sel = [i for i in self.annos if i.isSelected()]
-        if not sel:
-            return
-        for it in sel:
-            self.annos.remove(it)
-            self.scene.removeItem(it)
-        self._record({"type": "del", "items": sel})
-        self._status()
-
-    def _flatten(self):
-        """把全部标注栅格化进位图(变换/裁剪前),返回旧 (base, annos) 供撤销。
-        栅格化即底图变更:非破坏层回写时需替换资产。"""
-        old = (self.base, list(self.annos))
-        if self.annos:
-            self._clear_preview()
-            self.base = self._final_image()
-            for it in self.annos:
-                self.scene.removeItem(it)
-            self.annos = []
-        self._base_dirty = True
-        return old
-
-    def _final_image(self):
-        """导出图:无标注=原图;有标注=场景整体渲染(所见即所得,含文字)。"""
-        if not self.annos:
-            return self.base
-        w, h = self.base.size
-        sel = [(it, it.isSelected()) for it in self.annos]
-        for it, _ in sel:
-            it.setSelected(False)
-        img = QImage(w, h, QImage.Format_ARGB32)
-        img.fill(Qt.white)
-        p = QPainter(img)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
-        self.scene.render(p, QRectF(0, 0, w, h), QRectF(0, 0, w, h))
-        p.end()
-        for it, s in sel:
-            it.setSelected(s)
-        return _qimage_to_pil(img)
-
-    def _transform(self, fn):
-        old_base, old_annos = self._flatten()
-        self.base = fn(self.base)
-        self._base_dirty = True
-        self._record({"type": "img", "base": old_base, "annos": old_annos})
-        self._redraw()
-
-    def _to_img(self, sp):
-        r = self._pix_item.boundingRect()
-        sc = self._pix_item.scale()
-        # round 而非 int 截断:视图<->场景浮点往返有亚像素噪声,截断会整框偏 1px
-        return (round((sp.x() - r.x()) / sc), round((sp.y() - r.y()) / sc))
-
-    def _redraw(self):
-        w, h = self.base.size
-        self._pix_item.setPixmap(QPixmap.fromImage(pil_to_qimage(self.base)))
-        self.view.resetTransform()
-        self.scene.setSceneRect(QRectF(0, 0, w, h))
-        self.view.fitInView(self._pix_item, Qt.KeepAspectRatio)
-        self._status()
-
-    def _status(self):
-        w, h = self.base.size
-        tip = {"crop": "拖动框选裁剪区域", "rect": "拖动绘制矩形(可连续标注)",
-               "ellipse": "拖动绘制椭圆", "arrow": "拖动绘制箭头",
-               "pen": "按住拖动自由绘制", "text": "点击图片输入文字(双击可再编辑)",
-               "mosaic": "拖动框选区域打马赛克"}.get(
-                   self.tool, "选择:点击标注后拖动移动,Del 删除,双击文字再编辑")
-        self.lbl_status.setText("%s   |   标注 %d 个   |   尺寸: %s×%s   |   可撤销 %d 步" % (
-            tip, len(self.annos), w, h, len(self.undo_stack)))
-        self.lbl_status.adjustSize()
-
-    def _on_undo(self):
-        self._clear_preview()
-        if not self.undo_stack:
-            return
-        rec = self.undo_stack.pop()
-        t = rec["type"]
-        if t == "add":
-            it = rec["item"]
-            if it in self.annos:
-                self._drop_anno(it, record=False)
-        elif t == "del":
-            for it in rec["items"]:
-                self.scene.addItem(it)      # item 对象仍在,重新挂回场景
-                self.annos.append(it)
-        elif t == "move":
-            rec["item"].setPos(rec["pos"])
-        elif t == "style":
-            for it, kind, val in rec["old"]:
-                if it.scene() is not self.scene:   # 项已被删除则跳过
-                    continue
-                if kind == "text":
-                    it.setDefaultTextColor(val)
-                else:
-                    it.setPen(val)
-        elif t == "img":
-            self.base = rec["base"]
-            for it in self.annos:
-                self.scene.removeItem(it)
-            self.annos = []
-            for it in rec["annos"]:
-                self.scene.addItem(it)
-                self.annos.append(it)
-        self._redraw()
-
-    def _emit_result(self, result):
-        """把编辑产物(路径 str 或 PIL.Image)交给调用方;失败不影响编辑器本身。"""
-        if self._on_result is None:
-            return
-        try:
-            self._on_result(result)
-        except Exception:
-            cm.log("编辑结果回写失败:\n%s" % traceback.format_exc())
-
-    def _emit_layers(self, base_override=None, annos_override=None):
-        """非破坏层回写(图钉画布):标注层 + 原图引用;只有底图被
-        裁剪/旋转等破坏性操作改写过时才携带新底图像素。"""
-        if not self._layer_mode or self._on_result is None:
-            return
-        base = base_override
-        if base is None and self._base_dirty:
-            base = self.base               # 现底图(此前的标注已在破坏性操作时栅格化)
-        annos = self.annotations() if annos_override is None else annos_override
-        self._emit_result({"kind": "layers", "image": self._src_path,
-                           "annotations": annos, "base": base})
-
-    def _on_done(self):
-        """✓ 完成:复制到剪贴板(画布模式同时回写画布)并关闭编辑器。"""
-        self._clear_preview()
-        final = self._final_image()
-        ok = cm.set_dib_to_clipboard(self.app.worker.hwnd,
-                                     cm.pil_to_dib(final))
-        if not ok:
-            InfoBar.error("复制失败", "剪贴板被占用,可改用「更多 → 保存到文件」",
-                          parent=self, position=InfoBarPosition.TOP)
-            return
-        if self._layer_mode:
-            self._emit_layers()
-        else:
-            self._emit_result(final)
-        if self._embedded:
-            self.finished.emit()
-        else:
-            self.close()
-
-    def _on_save(self):
-        self._clear_preview()
-        p, _ = QFileDialog.getSaveFileName(
-            self, "保存图片", "clipboard_edit.png", "PNG 图片 (*.png);;JPEG 图片 (*.jpg)")
-        if p:
-            fmt = "JPEG" if p.lower().endswith((".jpg", ".jpeg")) else "PNG"
-            try:
-                self._final_image().save(p, fmt)
-                self.lbl_status.setText("✅ 已保存: " + p)
-                self.lbl_status.adjustSize()
-                if self._layer_mode:
-                    self._emit_layers()    # 画布走非破坏层;文件是合成导出
-                else:
-                    self._emit_result(p)
-            except Exception:
-                MessageBox("WinClipboard", "保存失败。", self).exec()
-
-    def _on_compress(self):
-        CompressDialog(self).exec()
-
-
-# ============================================================
-# 内容查看器(文本 / 代码全量查看 · pygments 语法高亮 · JSON 美化)
-# ============================================================
-# QScintilla 无 PySide6 官方绑定;此处用 PySide6 社区通行方案:
-# QPlainTextEdit + pygments 词法 + 自己上色(git-cola 同款思路)。
-# pygments 为可选依赖,缺失时退化为纯文本查看;高亮只做一次性整篇渲染
-# (文档只读且内容不变,不必用 QSyntaxHighlighter 逐块重算)。
-try:
-    from pygments.lexers import get_lexer_by_name as _pg_get_lexer
-    from pygments.styles import get_style_by_name as _pg_get_style
-except Exception:
-    _pg_get_lexer = None
-    _pg_get_style = None
-
-_HL_CHAR_LIMIT = 60000         # 超过该字符数不染色(pygments 纯 Python:60KB ≈ 250ms,
-                               # 旧上限 150KB 实测打开查看器可冻结 UI 超过 1 秒)
-
-
-_JSON_TOKEN_RE = None       # 惰性编译:键/字符串/数字/常量 单遍正则
-
-
-def _json_runs(text):
-    """JSON 快速染色:pygments 的 JsonLexer 对稠密 JSON 是病态慢
-    (实测 4KB 单行 ≈ 1.7s,选中预览直接冻结 UI),这里改单遍正则切 token,
-    颜色仍取自 pygments 样式(Name.Tag/String/Number/Keyword.Constant),
-    与其他语言的高亮观感一致。返回 runs 或 None(不染色)。"""
-    global _JSON_TOKEN_RE
-    if _pg_get_style is None:
-        return None
-    if _JSON_TOKEN_RE is None:
-        import re as _re
-        _JSON_TOKEN_RE = _re.compile(
-            r'"(?:[^"\\]|\\.)*"(?=\s*:)'          # 键(后跟冒号)
-            r'|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?'   # 数字
-            r'|\b(?:true|false|null)\b'            # 常量
-            r'|"(?:[^"\\]|\\.)*"',                 # 字符串
-        )
-    try:
-        from pygments.token import Token
-        style = _pg_get_style("monokai" if IS_DARK else "default")
-        kinds = [("key", Token.Name.Tag), ("num", Token.Number),
-                 ("const", Token.Keyword.Constant),
-                 ("str", Token.Literal.String.Double)]
-        fmts = {}
-        for name, tok in kinds:
-            st = style.style_for_token(tok)
-            f = QTextCharFormat()
-            if st.get("color"):
-                f.setForeground(QColor("#" + st["color"]))
-            if st.get("bold"):
-                f.setFontWeight(QFont.Bold)
-            if st.get("italic"):
-                f.setFontItalic(True)
-            fmts[name] = f
-    except Exception:
-        return None
-    runs = []
-    for m in _JSON_TOKEN_RE.finditer(text):
-        name = _json_kind(m, text)
-        if name is None:
-            continue
-        f = fmts.get(name)
-        if f is None or not f.foreground().style():
-            continue
-        s, e2 = m.span()
-        if runs and runs[-1][1] == s and runs[-1][2] is f:
-            runs[-1] = (runs[-1][0], e2, f)        # 相邻同色合并
-        else:
-            runs.append((s, e2, f))
-    return runs
-
-
-def _json_kind(m, text):
-    """判定正则命中片段的类型:键=字符串且其后(跳空白)是冒号。"""
-    v = m.group(0)
-    if v[0] == '"':
-        return "key" if _json_is_key(m, text) else "str"
-    if v[0] in "-0123456789":
-        return "num"
-    return "const"
-
-
-def _json_is_key(m, text):
-    end = m.end()
-    while end < len(text) and text[end] in " \t\r\n":
-        end += 1
-    return end < len(text) and text[end] == ":"
-
-
-def pygments_runs(text, lang, force=False):
-    """计算 pygments 染色 run 列表 [(start, end, QTextCharFormat)],不动文档。
-
-    只返回有视觉效果的 run(默认样式跳过);lang == "text"、pygments 缺失、
-    文本超长时返回 None。拆出本函数是为了让查看器缓存染色结果——
-    原文↔代码视图来回切换时只重放 runs,不重跑词法(25KB 文本≈400ms)。
-    """
-    if lang == "json":
-        if len(text) > _HL_CHAR_LIMIT and not force:
-            return None
-        return _json_runs(text)
-    if lang == "text" or _pg_get_lexer is None \
-            or (len(text) > _HL_CHAR_LIMIT and not force):
-        return None
-    try:
-        lexer = _pg_get_lexer(lang)
-        style = _pg_get_style("monokai" if IS_DARK else "default")
-    except Exception:
-        return None
-    fmt_cache = {}
-
-    def fmt_of(tok):
-        hit = fmt_cache.get(tok)
-        if hit is None:
-            # 部分 token(如 YAML 的 Literal.Scalar.Plain)在样式表无映射,
-            # 本版 pygments 的 style_for_token 会直接 KeyError(soak 实捕)——
-            # 沿 Token 父链回退到最近的有样式祖先,全链缺失则按无样式。
-            st = None
-            t = tok
-            while t is not None:
-                try:
-                    st = style.style_for_token(t)
-                    break
-                except KeyError:
-                    t = t.parent
-            if st is None:
-                st = {}
-            f = QTextCharFormat()
-            if st.get("color"):
-                f.setForeground(QColor("#" + st["color"]))
-            if st.get("bold"):
-                f.setFontWeight(QFont.Bold)
-            if st.get("italic"):
-                f.setFontItalic(True)
-            if st.get("underline"):
-                f.setFontUnderline(True)
-            hit = (f, bool(st.get("color") or st.get("bold")
-                           or st.get("italic") or st.get("underline")))
-            fmt_cache[tok] = hit
-        return hit
-
-    toks = []           # (start, end, token) 合并相邻同 token
-    pos = 0
-    limit = len(text)
-    for tok, val in lexer.get_tokens(text):
-        n = len(val)
-        if n == 0:
-            continue
-        end = min(pos + n, limit)
-        if end <= pos:
-            break
-        if toks and toks[-1][2] is tok:
-            toks[-1] = (toks[-1][0], end, tok)
-        else:
-            toks.append((pos, end, tok))
-        pos = end
-        if pos >= limit:
-            break
-    runs = []
-    for s, e2, tok in toks:
-        f, has_effect = fmt_of(tok)
-        if has_effect:
-            runs.append((s, e2, f))
-    return runs
-
-
-def apply_format_runs(doc, runs):
-    """把 pygments_runs 的结果批量落到文档(一次性游标重放)。
-
-    必须包在 beginEditBlock 里:单行长文本(如压缩 JSON)逐次 setCharFormat
-    每次都整块重排,600 个 run 实测 1.6s;批处理推迟重排,同场景 ~9ms。
-    """
-    if not runs:
-        return False
-    cur = QTextCursor(doc)
-    cur.beginEditBlock()
-    for s, e2, f in runs:
-        cur.setPosition(s)
-        cur.setPosition(e2, QTextCursor.KeepAnchor)
-        cur.setCharFormat(f)
-    cur.endEditBlock()
-    return True
-
-
-def apply_pygments_format(doc, text, lang, force=False):
-    """把 pygments 染色一次性应用到只读文档(预览面板等共用入口)。"""
-    runs = pygments_runs(text, lang, force)
-    return bool(runs) and apply_format_runs(doc, runs)
-
-
-class _LineArea(QWidget):
-    """行号栏:绘制回调交给宿主编辑器(经典 Qt 行号区模式)。"""
-
-    def __init__(self, editor):
-        super().__init__(editor)
-        self._ed = editor
-
-    def paintEvent(self, e):
-        self._ed.line_area_paint(self)
-
-    def mousePressEvent(self, e):        # 点行号 = 选中该行,顺手支持
-        self._ed.line_area_click(e.pos().y())
-
-
-class _CodeEdit(QPlainTextEdit):
-    """只读代码区:等宽字体 + 行号栏 + 行号点击选中整行 + Fluent 细滚动条。"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setReadOnly(True)
-        self.setUndoRedoEnabled(False)
-        self.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.setFrameShape(QFrame.NoFrame)
-        f = QFont()
-        f.setFamilies(["Cascadia Mono", "Consolas"])   # Win11 优先,缺失自动回退
-        f.setStyleHint(QFont.Monospace)
-        f.setPointSize(10)
-        self.setFont(f)
-        self._line_area = _LineArea(self)
-        self.blockCountChanged.connect(self._update_area_width)
-        self.updateRequest.connect(self._update_area)
-        self._update_area_width(0)
-        # Fluent 细滚动条替换系统粗滚动条;手柄悬停才展开
-        self._scroll_del = SmoothScrollDelegate(self, useAni=True)
-        for b in (self._scroll_del.vScrollBar, self._scroll_del.hScrollBar):
-            b.handleDisplayMode = ScrollBarHandleDisplayMode.ON_HOVER
-
-    def _update_area_width(self, _):
-        digits = max(3, len(str(max(1, self.blockCount()))))
-        w = self.fontMetrics().horizontalAdvance("9") * digits + 20
-        self._line_area.resize(w, self.height())
-        self.setViewportMargins(w, 12, 16, 12)
-
-    def _update_area(self, rect, dy):
-        if dy:
-            self._line_area.scroll(0, dy)
-        else:
-            self._line_area.update(0, rect.y(), self._line_area.width(), rect.height())
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        # 行号栏贴住视口左缘(视口本身已被 viewportMargins 右移),上下对齐视口
-        vg = self.viewport().geometry()
-        self._line_area.setGeometry(vg.left() - self._line_area.width(), vg.top(),
-                                    self._line_area.width(), vg.height())
-
-    def line_area_paint(self, area):
-        p = QPainter(area)
-        p.fillRect(area.rect(), QColor(GUTTER_BG))
-        p.setPen(QColor(FIELD_BORDER))
-        p.drawLine(area.width() - 1, 0, area.width() - 1, area.height())
-        blk = self.firstVisibleBlock()
-        n = blk.blockNumber()
-        top = round(self.blockBoundingGeometry(blk).translated(self.contentOffset()).top())
-        bottom = top + round(self.blockBoundingRect(blk).height())
-        p.setPen(QColor(TER))
-        while blk.isValid() and top <= area.height():
-            if blk.isVisible():
-                p.drawText(0, top, area.width() - 10, self.fontMetrics().height(),
-                           Qt.AlignRight, str(n + 1))
-            blk = blk.next()
-            n += 1
-            top = bottom
-            bottom = top + round(self.blockBoundingRect(blk).height())
-            if bottom == top:            # 空文档保护
-                break
-        p.end()
-
-    def line_area_click(self, y):
-        blk = self.cursorForPosition(QPoint(0, max(0, y))).block()
-        c = self.textCursor()
-        c.setPosition(blk.position())
-        c.setPosition(blk.position() + blk.length() - 1, QTextCursor.KeepAnchor)
-        self.setTextCursor(c)
-
-
-class ViewerWindow(QWidget):
-    """内容查看器(智能 Clipboard Inspector):按识别格式切换阅读视图。
-
-    结构 = 头部「标题+已识别信息」/ 工具栏(视图切换·换行·字号·查找 →
-    复制·更多) / 内容卡片(QStackedWidget:文本编辑器·JSON 结构树·
-    Markdown 预览·CSV 表格 + 浮动查找条) / 底部状态栏。
-    视图可用性由「识别层(cm.detect_lang) + 内容解析」决定:JSON→
-    原文/格式化/结构(带有效性),Markdown→原文/预览,CSV→原文/表格,
-    XML→原文/格式化,代码→原文/高亮,纯文本/文件→原文;语言可在「更多」
-    菜单手动覆盖。复制始终复制原始记录。
-    """
-
-    _ZOOMS = (75, 90, 100, 110, 125, 150)
-    _TREE_NODE_CAP = 3000          # 结构树总节点上限(超出部分显示省略行)
-    _TREE_LAZY_DEPTH = 2           # 首次只物化到该层,更深展开时再建
-    _TREE_WIDE = 400               # 超过该子项数的宽节点也走懒加载
-    _TABLE_ROW_CAP = 2000
-
-    def __init__(self, app, rec):
-        super().__init__(None)
-        self.app = app
-        self.rec = rec
-        if rec.get("type") == "files":
-            self._kind = "files"
-            self._raw = "\n".join(rec.get("content") or [])
-        else:
-            self._kind = "text"
-            self._raw = str(rec.get("content") or "")
-        # 内容识别管线:category/subtype/confidence(URL/JWT/Base64 等智能
-        # 视图的数据源;手动改语言后智能视图让位 → 见 _mode_table)
-        self._content = cm.detect_content(self._raw) if self._kind == "text" else None
-        # 用户类型纠正优先于自动识别(右键「类型」设置,仅本条目生效)
-        _ov = rec.get("type_override") if self._kind == "text" else None
-        if _ov and self._content is not None:
-            self._content = self._content._replace(subtype=_ov)
-        self._auto_lang = self._content.lang if self._content is not None else "text"
-        self._lang_index = 0                    # VIEW_LANGS 下标(0 = 自动识别)
-        self._base_pt = 10                      # 100% 时的字号(磅)
-        self._meta_suffix = ""
-        self._mode = "raw"
-        self._hl_cache = {}                  # (lang, 文本长度) → 染色 runs(切视图重放)
-        self._ed_text = None                 # 染色编辑器当前文本(相同则跳过重灌)
-        self._ed_raw_text = None             # 原文编辑器当前文本
-        self._ed_hl_state = None             # 染色编辑器已呈现的 (lang, 长度)
-        # 内容解析(原始文本不变,一次性算好供视图/元信息取用)
-        if self._kind == "text":
-            self._json_err = cm.json_error(self._raw)
-            self._xml_fmt = cm.xml_pretty(self._raw)
-            self._csv_delim = cm.csv_sniff(self._raw)
-            self._csv_rows = cm.parse_csv_rows(
-                self._raw, self._csv_delim or ",") if self._csv_delim else []
-            _sub = self._content.subtype if self._content is not None else ""
-            self._url_inf = cm.url_inspect(self._raw) if _sub == "web_url" else None
-            self._jwt_inf = cm.jwt_inspect(self._raw) if _sub == "jwt" else None
-            self._b64 = cm.b64_decode_auto(self._raw) if _sub == "base64" else None
-        else:
-            self._json_err = None
-            self._xml_fmt = None
-            self._csv_delim = None
-            self._csv_rows = []
-            self._url_inf = None
-            self._jwt_inf = None
-            self._b64 = None
-
-        self.setWindowTitle("查看 · WinClipboard")
-        self.setWindowIcon(app.icon)
-        self.setWindowFlags(Qt.Window)
-        self.setStyleSheet("QWidget { background: %s; }" % BG)
-        self.resize(960, 640)
-        self.setMinimumSize(720, 480)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        # ---- 头部:标题 + 已识别信息(只放文本,不放按钮) ----
-        head = QVBoxLayout()
-        head.setContentsMargins(16, 14, 16, 6)
-        head.setSpacing(2)
-        self.lbl_title = StrongBodyLabel(
-            "文件列表" if self._kind == "files" else "文本内容")
-        self.lbl_meta = CaptionLabel("")
-        head.addWidget(self.lbl_title)
-        head.addWidget(self.lbl_meta)
-        root.addLayout(head)
-
-        # ---- 工具栏:视图切换 + 高频操作;主按钮 = 复制/打开 ----
-        bar = QHBoxLayout()
-        bar.setContentsMargins(16, 2, 16, 8)
-        bar.setSpacing(8)
-        self.seg = SegmentedWidget()
-        self.seg.currentItemChanged.connect(
-            lambda k: self._set_view(k) if k else None)
-        self.btn_wrap = ToggleButton("自动换行")
-        if self._auto_lang == "text" and self._kind == "text":
-            self.btn_wrap.setChecked(True)      # 纯文本默认自动换行
-            # 注意:先设状态再接信号——此时编辑器尚未创建,toggled 会踩空
-        self.btn_wrap.toggled.connect(self._set_wrap)
-        self.cmb_zoom = ComboBox()
-        self.cmb_zoom.addItems(["%d%%" % z for z in self._ZOOMS])
-        self.cmb_zoom.setCurrentIndex(self._ZOOMS.index(100))
-        self.cmb_zoom.setFixedWidth(88)
-        self.cmb_zoom.currentIndexChanged.connect(
-            lambda i: self._apply_zoom(self._ZOOMS[i]))
-        self.btn_find = TransparentToolButton(FIF.SEARCH)
-        self.btn_find.setToolTip("查找 (Ctrl+F)")
-        self.btn_find.clicked.connect(self._open_find)
-        if self._kind == "files":
-            self.btn_copy = PushButton("复制")
-            self.btn_copy.setIcon(FIF.COPY.icon())
-            self.btn_open = PrimaryPushButton("打开")
-            self.btn_open.setIcon(FIF.FOLDER.icon())
-            self.btn_open.setToolTip("系统默认程序打开全部文件")
-            self.btn_open.clicked.connect(lambda: self.app.open_files(self.rec))
-        else:
-            self.btn_copy = PrimaryPushButton("复制")
-            self.btn_copy.setIcon(FIF.COPY.icon())
-            self.btn_open = None
-        self.btn_copy.setMinimumWidth(96)
-        self.btn_copy.clicked.connect(self._copy_all)
-        self.btn_more = TransparentToolButton(FIF.MORE)
-        self.btn_more.setToolTip("更多操作")
-        self.btn_more.clicked.connect(self._show_more_menu)
-        bar.addWidget(self.seg)
-        bar.addWidget(self.btn_wrap)
-        bar.addWidget(self.cmb_zoom)
-        bar.addWidget(self.btn_find)
-        bar.addStretch(1)
-        bar.addWidget(self.btn_copy)
-        if self.btn_open is not None:
-            bar.addWidget(self.btn_open)
-        bar.addWidget(self.btn_more)
-        root.addLayout(bar)
-
-        # ---- 内容卡片:多视图堆叠 + 浮动查找条 ----
-        # 两个文本页:editor_raw(原文,永不染色)与 editor(格式化/代码,染色
-        # 结果常驻文档)——原文↔代码切换是纯换页,不再清格式/重放 runs
-        # (实测 25KB 文本重放 4800 个 run 要 230ms,这就是切换卡顿的来源)。
-        _ed_qss = ("QPlainTextEdit { background: %s; border: none; color: %s;"
-                   " selection-background-color: %s; }"
-                   % (CARD_BG, TEXT, ACCENT_SOFT))
-        body = QHBoxLayout()
-        body.setContentsMargins(16, 2, 16, 10)
-        self.card = SimpleCardWidget()
-        cv = QVBoxLayout(self.card)
-        cv.setContentsMargins(0, 0, 0, 0)
-        self.stack = QStackedWidget(self.card)
-        self.editor_raw = _CodeEdit(self.card)
-        self.editor_raw.setStyleSheet(_ed_qss)
-        self.editor = _CodeEdit(self.card)
-        self.editor.setStyleSheet(_ed_qss)
-        self.tree = TreeWidget(self.card)
-        self.tree.setHeaderHidden(True)
-        self.tree.setColumnCount(1)
-        self.tree.itemExpanded.connect(self._on_tree_expand)   # 懒加载逐层建
-        self.md_view = TextEdit(self.card)
-        self.md_view.setReadOnly(True)
-        self.md_view.setViewportMargins(8, 8, 8, 8)
-        self.table = TableWidget(self.card)
-        self.table.verticalHeader().hide()
-        self.table.setBorderVisible(True)
-        self.table.setEditTriggers(TableWidget.NoEditTriggers)   # 只读
-        self.table.setWordWrap(False)
-        # 字段/值 信息页(URL/JWT 共用):右键或双击复制值
-        self.info = TreeWidget(self.card)
-        self.info.setColumnCount(2)
-        self.info.setHeaderLabels(["字段", "值"])
-        self.info.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.info.header().setStretchLastSection(True)
-        self.info.setBorderVisible(True)
-        self.info.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.info.customContextMenuRequested.connect(self._info_menu)
-        self.info.itemDoubleClicked.connect(
-            lambda it, _col: self.app.core.copy_text(str(it.data(1, Qt.UserRole) or "")))
-        # Base64 解码图片页
-        self.img_view = QLabel(self.card)
-        self.img_view.setAlignment(Qt.AlignCenter)
-        for pw in (self.editor_raw, self.editor, self.tree,
-                   self.md_view, self.table, self.info, self.img_view):
-            self.stack.addWidget(pw)
-        SmoothScrollDelegate(self.tree, useAni=True)
-        SmoothScrollDelegate(self.table, useAni=True)
-        SmoothScrollDelegate(self.info, useAni=True)
-        cv.addWidget(self.stack)
-        body.addWidget(self.card)
-        root.addLayout(body, 1)
-        if self._kind == "files":
-            self.editor_raw.viewport().installEventFilter(self)   # 双击行 = 打开
-
-        self._build_find_bar()
-        self._build_actions()
-        self._build_statusbar()
-        self._build_shortcuts()
-
-        self._copy_timer = QTimer(self)
-        self._copy_timer.setSingleShot(True)
-        self._copy_timer.setInterval(1400)
-        self._copy_timer.timeout.connect(self._copy_restore)
-        for ed in (self.editor, self.editor_raw):
-            ed.cursorPositionChanged.connect(self._refresh_pos)
-            ed.selectionChanged.connect(self._refresh_pos)
-        self._tree_nodes = 0
-        self._set_wrap(self.btn_wrap.isChecked())   # 初始换行态落到编辑器
-
-        self._render()
-
-    # ---- 局部构建 ----
-    def _build_find_bar(self):
-        """内容区右上角浮动查找条(默认隐藏,Ctrl+F 呼出)。"""
-        self._find = QFrame(self.card)
-        self._find.setObjectName("viewerFindBar")
-        self._find.setStyleSheet(
-            "QFrame#viewerFindBar { background: %s; border: 1px solid %s;"
-            " border-radius: 6px; }" % (CARD_BG, FIELD_BORDER))
-        fl = QHBoxLayout(self._find)
-        fl.setContentsMargins(8, 6, 8, 6)
-        fl.setSpacing(6)
-        self.ed_find = SearchLineEdit()
-        self.ed_find.setPlaceholderText("查找内容…")
-        self.ed_find.setFixedWidth(220)
-        self.ed_find.textChanged.connect(self._find_text_changed)
-        self.ed_find.searchSignal.connect(lambda: self._find_goto(False))
-        self.ed_find.installEventFilter(self)          # Esc 关闭
-        self.lbl_find_n = CaptionLabel("0/0")
-        self.lbl_find_n.setFixedWidth(44)
-        self.lbl_find_n.setAlignment(Qt.AlignCenter)
-        b_prev = TransparentToolButton(FIF.CARE_UP_SOLID)
-        b_prev.clicked.connect(lambda: self._find_goto(True))
-        b_next = TransparentToolButton(FIF.CARE_DOWN_SOLID)
-        b_next.clicked.connect(lambda: self._find_goto(False))
-        b_close = TransparentToolButton(FIF.CLOSE)
-        b_close.clicked.connect(self._close_find)
-        for w in (self.ed_find, self.lbl_find_n, b_prev, b_next, b_close):
-            fl.addWidget(w)
-        self._find.adjustSize()
-        self._find.hide()
-
-    def _build_actions(self):
-        """「更多」菜单用的常驻 action(窗口持有,菜单随建随删)。"""
-        self._lang_acts = []
-        for i, (key, name) in enumerate(cm.VIEW_LANGS):
-            a = QAction(name, self)
-            a.setVisible(self._kind == "text")
-            a.triggered.connect(lambda _=False, i=i: self._set_lang_index(i))
-            self._lang_acts.append(a)
-        self._act_hl = QAction("强制语法高亮", self)
-        self._act_hl.setToolTip("文本较长,自动高亮已跳过;点击强制染色"
-                                "(大文本会卡顿片刻)")
-        self._act_hl.setVisible(False)
-        self._act_hl.triggered.connect(self._force_highlight)
-        self._act_reveal = QAction("在资源管理器中显示", self)
-        self._act_reveal.setVisible(self._kind == "files")
-        self._act_reveal.triggered.connect(lambda: self.app.reveal_first(self.rec))
-
-    def _build_statusbar(self):
-        sb = QFrame()
-        sb.setObjectName("viewerStatusBar")
-        sb.setFixedHeight(30)
-        sb.setStyleSheet("QFrame#viewerStatusBar {"
-                         " border-top: 1px solid %s; }" % LINE)
-        sl = QHBoxLayout(sb)
-        sl.setContentsMargins(16, 0, 16, 0)
-        self.lbl_pos = CaptionLabel("")
-        self.lbl_state = CaptionLabel(
-            "双击行打开文件" if self._kind == "files" else "已保存到历史")
-        sl.addWidget(self.lbl_pos)
-        sl.addStretch(1)
-        sl.addWidget(self.lbl_state)
-        self.layout().addWidget(sb)
-        eol = ("CRLF" if "\r\n" in self._raw else
-               "CR" if "\r" in self._raw else "LF" if "\n" in self._raw else "")
-        self._pos_prefix = "UTF-8 · %s" % eol if eol else "UTF-8"
-
-    def _build_shortcuts(self):
-        QShortcut(QKeySequence.Find, self).activated.connect(self._open_find)
-        for seq in ("Ctrl+=", "Ctrl++"):
-            QShortcut(QKeySequence(seq), self).activated.connect(
-                lambda: self._zoom_step(1))
-        QShortcut(QKeySequence("Ctrl+-"), self).activated.connect(
-            lambda: self._zoom_step(-1))
-        QShortcut(QKeySequence("Ctrl+0"), self).activated.connect(
-            lambda: self._set_zoom(100))
-
-    # ---- 视图模型 ----
-    def _mode_table(self):
-        """当前语言/内容 → (默认模式, [(key,label),…]);单视图返回空表。"""
-        if self._kind != "text":
-            return "raw", []
-        # 智能视图(仅自动识别时;手动改语言 = 用户要按语言看,智能视图让位)
-        if self._lang_index == 0 and self._content is not None:
-            sub = self._content.subtype
-            if sub == "web_url" and self._url_inf:
-                return "url", [("raw", "原文"), ("url", "URL")]
-            if sub == "jwt" and self._jwt_inf:
-                return "jwt", [("raw", "原文"), ("jwt", "JWT")]
-            if sub == "base64" and self._b64:
-                return "b64", [("raw", "原文"), ("b64", "解码")]
-        lang = self._resolved_lang()
-        if lang == "json":
-            if self._json_err is None:
-                return "fmt", [("raw", "原文"), ("fmt", "格式化"), ("tree", "结构")]
-            return "raw", [("raw", "原文")]
-        if lang == "markdown":
-            return "preview", [("raw", "原文"), ("preview", "预览")]
-        if lang == "csv":
-            if self._csv_rows:
-                return "table", [("raw", "原文"), ("table", "表格")]
-            return "raw", [("raw", "原文")]   # 手动强选 CSV 但嗅探不出分隔符
-        if lang == "xml":
-            if self._xml_fmt:
-                return "fmt", [("raw", "原文"), ("fmt", "格式化")]
-            return "raw", [("raw", "原文")]
-        if lang == "text" or _pg_get_lexer is None:
-            return "raw", []
-        return "code", [("raw", "原文"), ("code", "代码")]
-
-    def _rebuild_modes(self):
-        default, modes = self._mode_table()
-        if self._mode not in [k for k, _ in modes]:
-            self._mode = default
-        self.seg.blockSignals(True)               # 重建期间不触发视图切换
-        self.seg.clear()
-        for key, label in modes:
-            self.seg.addItem(routeKey=key, text=label)
-        self.seg.setVisible(len(modes) > 1)
-        self.seg.setCurrentItem(self._mode)
-        self.seg.blockSignals(False)
-
-    def _set_view(self, key):
-        if not key or key == self._mode:
-            return
-        self._mode = key
-        self._apply_view()
-
-    def _apply_view(self):
-        """把当前模式落到堆叠页与内容(识别→选择对应查看器)。"""
-        mode = self._mode
-        if mode == "raw":
-            self.stack.setCurrentWidget(self.editor_raw)
-            if self._ed_raw_text != self._raw:
-                self.editor_raw.setPlainText(self._raw)
-                self._ed_raw_text = self._raw
-            self._meta_suffix = ""
-            self._act_hl.setVisible(False)
-        elif mode in ("fmt", "code"):
-            self.stack.setCurrentWidget(self.editor)
-            text = self._display_text()
-            if text != self._ed_text:            # 换语言/格式才重灌
-                self.editor.setPlainText(text)
-                self._ed_text = text
-                self._ed_hl_state = None
-            self._apply_highlight()
-        elif mode == "tree":
-            self.stack.setCurrentWidget(self.tree)
-            self._build_tree()
-        elif mode == "preview":
-            self.stack.setCurrentWidget(self.md_view)
-            self.md_view.setMarkdown(self._raw)
-        elif mode == "table":
-            self.stack.setCurrentWidget(self.table)
-            self._build_table()
-        elif mode in ("url", "jwt"):
-            self.stack.setCurrentWidget(self.info)
-            self._build_url_info() if mode == "url" else self._build_jwt_info()
-        elif mode == "b64":
-            kind, raw = self._b64 or (None, None)
-            if kind == "image":
-                self.stack.setCurrentWidget(self.img_view)
-                self._show_b64_image(raw)
-            else:
-                # 解码文本落到染色编辑器(不染色:解码后语言未知)
-                self.stack.setCurrentWidget(self.editor)
-                text = raw.decode("utf-8", "replace")
-                if text != self._ed_text:
-                    self.editor.setPlainText(text)
-                    self._ed_text = text
-                    self._ed_hl_state = None
-        self._refresh_meta()
-        self._refresh_pos()
-
-    def _active_edit(self):
-        """当前可见的文本编辑器(查找/行列信息都作用在它上面)。"""
-        return self.editor_raw if self.stack.currentWidget() is self.editor_raw \
-            else self.editor
-
-    def _display_text(self):
-        if self._mode == "fmt":
-            lang = self._resolved_lang()
-            if lang == "json":
-                return cm.json_reformat(self._raw) or self._raw
-            if lang == "xml":
-                return self._xml_fmt or self._raw
-        return self._raw
-
-    # ---- 结构树 / 表格 ----
-    def _build_tree(self):
-        self.tree.clear()
-        self._tree_nodes = 0
-        try:
-            obj = json.loads(self._raw)
-        except Exception:
-            return
-        self._fill_tree(None, "", obj, 0)
-        # 只展开非懒节点:expandToDepth 会连宽节点的占位也展开,
-        # 触发 _on_tree_expand 把懒加载又搬回打开时刻
-        for i in range(self.tree.topLevelItemCount()):
-            top = self.tree.topLevelItem(i)
-            if top.data(0, Qt.UserRole) is None:
-                top.setExpanded(True)
-                for j in range(top.childCount()):
-                    ch = top.child(j)
-                    if ch.data(0, Qt.UserRole) is None and ch.childCount():
-                        ch.setExpanded(True)
-
-    def _fill_tree(self, parent_item, key, val, depth):
-        if depth > 80:                       # 防 RecursionError
-            self._tree_add(parent_item, "…(嵌套过深,已截断)")
-            return
-        self._tree_nodes += 1
-        if isinstance(val, dict):
-            pairs = [(str(k), v) for k, v in val.items()]
-            label = ("%s  {%d}" % (key, len(pairs))) if key else "{ %d 项 }" % len(pairs)
-            item = self._tree_add(parent_item, label)
-            self._add_tree_kids(item, pairs, depth)
-        elif isinstance(val, list):
-            pairs = [("[%d]" % i, v) for i, v in enumerate(val)]
-            label = ("%s  [%d]" % (key, len(pairs))) if key else "[ %d 项 ]" % len(pairs)
-            item = self._tree_add(parent_item, label)
-            self._add_tree_kids(item, pairs, depth)
-        else:
-            vs = val if isinstance(val, str) else json.dumps(val, ensure_ascii=False)
-            if len(vs) > 80:
-                vs = vs[:80] + "…"
-            self._tree_add(parent_item, ("%s:  %s" % (key, vs)) if key else vs)
-
-    def _add_tree_kids(self, item, pairs, depth):
-        """子级物化规则:浅层小节点直接建;深层或宽节点(>400 项)挂占位,
-        展开时再建——保证大 JSON 打开即显,构建成本摊到用户点击时。"""
-        if not pairs:
-            return
-        if depth + 1 > self._TREE_LAZY_DEPTH or len(pairs) > self._TREE_WIDE:
-            self._tree_add(item, "… 共 %d 项(展开加载)" % len(pairs))
-            item.setData(0, Qt.UserRole, pairs)
-            return
-        for k, v in pairs:
-            if self._tree_nodes >= self._TREE_NODE_CAP:
-                self._tree_add(item, "… 其余已省略")
-                return
-            self._fill_tree(item, k, v, depth + 1)
-
-    def _on_tree_expand(self, item):
-        """展开带占位的节点:一次性物化其子级(受总节点上限约束)。"""
-        pairs = item.data(0, Qt.UserRole)
-        if not pairs:
-            return
-        item.setData(0, Qt.UserRole, None)
-        if item.childCount():
-            item.removeChild(item.child(0))          # 去掉占位行
-        depth = 0
-        p = item.parent()
-        while p is not None:
-            depth += 1
-            p = p.parent()
-        for k, v in pairs:
-            if self._tree_nodes >= self._TREE_NODE_CAP:
-                self._tree_add(item, "… 其余已省略")
-                return
-            self._fill_tree(item, k, v, depth + 1)
-
-    def _tree_add(self, parent_item, text):
-        it = QTreeWidgetItem([text])
-        if parent_item is None:
-            self.tree.addTopLevelItem(it)
-        else:
-            parent_item.addChild(it)
-        return it
-
-    def _build_table(self):
-        self.table.setUpdatesEnabled(False)          # 批量填充不逐行重绘
-        self.table.clear()
-        self.table.setRowCount(0)
-        self.table.setColumnCount(0)
-        rows = self._csv_rows
-        if rows:
-            header, data = rows[0], rows[1:]
-            ncol = max(len(r) for r in rows)
-            self.table.setColumnCount(ncol)
-            self.table.setHorizontalHeaderLabels(
-                [header[i] if i < len(header) else "" for i in range(ncol)])
-            self.table.setRowCount(min(len(data), self._TABLE_ROW_CAP))
-            for r, row in enumerate(data[:self._TABLE_ROW_CAP]):
-                for c in range(ncol):
-                    self.table.setItem(
-                        r, c, QTableWidgetItem(row[c] if c < len(row) else ""))
-            # 采样列宽(表头+前 60 行):全量 ResizeToContents 对 2000 行要几百 ms
-            self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-            fm = self.table.fontMetrics()
-            for c in range(ncol):
-                w = fm.horizontalAdvance(header[c] if c < len(header) else "")
-                for rr in range(min(60, self.table.rowCount())):
-                    it = self.table.item(rr, c)
-                    if it is not None:
-                        w = max(w, fm.horizontalAdvance(it.text()))
-                self.table.setColumnWidth(c, min(w + 28, 400))
-        self.table.setUpdatesEnabled(True)
-        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-
-    # ---- URL / JWT / Base64 Inspector ----
-    def _info_add(self, field, value, parent=None, full=None):
-        """加一行「字段/值」;超长值显示截断,完整值存 UserRole 供复制。"""
-        shown = value if value is not None else ""
-        if len(shown) > 160:
-            shown = shown[:160] + "…"
-        it = QTreeWidgetItem([field, shown])
-        it.setData(1, Qt.UserRole, value if full is None else full)
-        it.setToolTip(1, shown)
-        if parent is None:
-            self.info.addTopLevelItem(it)
-        else:
-            parent.addChild(it)
-        return it
-
-    def _build_url_info(self):
-        inf = self._url_inf or {}
-        self.info.clear()
-        self._info_add("Scheme", inf.get("scheme") or "")
-        self._info_add("主机", inf.get("host") or "")
-        if inf.get("port"):
-            self._info_add("端口", str(inf["port"]))
-        self._info_add("路径", inf.get("path") or "/")
-        q = inf.get("query") or []
-        if q:
-            g = self._info_add("Query 参数", "%d 项" % len(q))
-            for k, v in q:
-                self._info_add(k or "(空)", v, g)
-        if inf.get("fragment"):
-            self._info_add("Fragment", inf["fragment"])
-
-    def _build_jwt_info(self):
-        inf = self._jwt_inf or {}
-        self.info.clear()
-        head, pay = inf.get("header") or {}, inf.get("payload") or {}
-        self._info_add("算法 (alg)", str(head.get("alg", "?")))
-        warn = self._info_add("签名", "未验证")
-        warn.setForeground(1, QColor("#cf9a00"))
-        warn.setToolTip(1, "仅解码展示:没有密钥,无法判定令牌真伪")
-        g = self._info_add("Header", "%d 个字段" % len(head))
-        for k, v in head.items():
-            self._info_add(str(k), v if isinstance(v, str)
-                           else json.dumps(v, ensure_ascii=False), g)
-        g = self._info_add("Payload", "%d 个字段" % len(pay))
-        for k, v in pay.items():
-            if isinstance(v, str):
-                vs = v
-            else:
-                vs = json.dumps(v, ensure_ascii=False)
-            self._info_add(str(k), vs, g)
-        for label, key in (("签发时间 (iat)", "iat"), ("生效时间 (nbf)", "nbf"),
-                           ("过期时间 (exp)", "exp")):
-            ts = inf.get(key)
-            if ts:
-                self._info_add(label, time.strftime(
-                    "%Y-%m-%d %H:%M:%S", time.localtime(ts)))
-        exp = inf.get("exp")
-        if exp:
-            left = exp - time.time()
-            if left <= 0:
-                it = self._info_add("状态", "已过期")
-                it.setForeground(1, QColor("#e8493f"))
-            else:
-                hrs = left // 3600
-                self._info_add("状态", "约 %s 后过期" % (
-                    "%.1f 小时" % hrs if hrs >= 1 else "%d 分钟" % max(1, left // 60)))
-        else:
-            self._info_add("状态", "无 exp 字段(视为不过期)")
-
-    def _show_b64_image(self, raw):
-        img = QImage.fromData(raw)
-        if img.isNull():
-            self.img_view.setText("(解码出图像魔数,但无法解析像素)")
-            self.img_view.setPixmap(QPixmap())
-            return
-        pm = QPixmap.fromImage(img)
-        if pm.width() > 1600 or pm.height() > 1200:
-            pm = pm.scaled(1600, 1200, Qt.KeepAspectRatio,
-                           Qt.SmoothTransformation)
-        self.img_view.setPixmap(pm)
-        self.img_view.setToolTip("原始尺寸 %d × %d" % (img.width(), img.height()))
-
-    def _info_menu(self, pos):
-        it = self.info.itemAt(pos)
-        if it is None:
-            return
-        val = str(it.data(1, Qt.UserRole) or "")
-        field = it.text(0)
-        m = RoundMenu(parent=self.info)
-        a1 = QAction("复制「%s」" % field, m)
-        a1.triggered.connect(lambda _=False, v=val: self.app.core.copy_text(v))
-        m.addAction(a1)
-        if val and len(val) > 160:
-            a2 = QAction("复制完整值(%d 字符)" % len(val), m)
-            a2.triggered.connect(lambda _=False, v=val: self.app.core.copy_text(v))
-            m.addAction(a2)
-        m.exec(self.info.viewport().mapToGlobal(pos))
-        m.deleteLater()
-
-    def _inspector_actions(self):
-        """URL/JWT/Base64 的内容专属动作:INSPECTOR_ACTIONS 注册表按
-        subtype 过滤(返回 [(标题, 回调)])。"""
-        if self._lang_index != 0 or self._content is None:
-            return []
-        sub = self._content.subtype
-        out = []
-        for st, title, run, guard in INSPECTOR_ACTIONS:
-            if st == sub and (guard is None or guard(self)):
-                out.append((title, lambda r=run: r(self)))
-        return out
-
-    def _save_b64_image(self):
-        kind, raw = self._b64 or (None, None)
-        if not raw:
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "解码图另存为", "clipboard_decoded.png", "PNG 图片 (*.png)")
-        if not path:
-            return
-        try:
-            Path(path).write_bytes(raw)
-        except Exception:
-            MessageBox("WinClipboard", "保存失败。", self).exec()
-
-
-    # ---- 显示与渲染 ----
-    def showEvent(self, e):
-        super().showEvent(e)
-        ensure_onscreen(self)
-        self._place_find()
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self._place_find()
-
-    def keyPressEvent(self, e):
-        if e.key() == Qt.Key_Escape:
-            if self._find.isVisible():
-                self._close_find()
-            else:
-                self.close()
-            return
-        super().keyPressEvent(e)
-
-    def _resolved_lang(self):
-        key = cm.VIEW_LANGS[self._lang_index][0]
-        return self._auto_lang if key == "auto" else key
-
-    def _set_lang_index(self, i):
-        if i != self._lang_index:
-            self._lang_index = i
-            # 语言/自动档切换必然换模式表:直接跳默认视图(URL/JWT 等
-            # 智能视图的 lang 恒为 text,靠 _render 的语言变化检测捕捉不到)
-            self._mode = self._mode_table()[0]
-            self._render()
-
-    def _set_lang_key(self, key):
-        """按 VIEW_LANGS key 选语言(测试/内部调用入口)。"""
-        self._set_lang_index([k for k, _ in cm.VIEW_LANGS].index(key))
-
-    def _render(self):
-        # 换格式(语言)时跳到该格式的默认视图;同一格式下保留用户当前视图
-        lang = self._resolved_lang()
-        if lang != getattr(self, "_shown_lang", None):
-            self._mode = self._mode_table()[0]
-            self._shown_lang = lang
-        self._rebuild_modes()
-        self._apply_view()
-
-    def _refresh_meta(self):
-        if self._kind == "files":
-            base = "%d 个文件" % len(self.rec.get("content") or [])
-        else:
-            size = cm._fmt_size(len(self._raw.encode("utf-8")))
-            lang = self._resolved_lang()
-            if lang == "json":
-                valid = "无效(%s)" % self._json_err if self._json_err else "有效"
-                base = "已识别:JSON · %s · %d 行 · %s" % (
-                    valid, self._raw.count("\n") + 1, size)
-            elif lang == "csv" and self._csv_rows:
-                nrow = len(self._csv_rows)
-                shown = "≥%d" % self._TABLE_ROW_CAP \
-                    if nrow > self._TABLE_ROW_CAP else str(nrow)
-                ncol = max(len(r) for r in self._csv_rows)
-                base = "已识别:CSV 表格 · %s 行 × %d 列 · %s" % (shown, ncol, size)
-            elif self._lang_index == 0 and self._content is not None and \
-                    self._content.subtype == "web_url" and self._url_inf:
-                base = "已识别:URL · %s · %d 行 · %s" % (
-                    self._url_inf["host"], self._raw.count("\n") + 1, size)
-            elif self._lang_index == 0 and self._content is not None and \
-                    self._content.subtype == "jwt" and self._jwt_inf:
-                base = "已识别:JWT · 仅解码,签名未验证 · %s" % size
-            elif self._lang_index == 0 and self._content is not None and \
-                    self._content.subtype == "base64" and self._b64:
-                base = "已识别:Base64 · 解码为%s(%s) · %s" % (
-                    "图片" if self._b64[0] == "image" else "文本",
-                    cm._fmt_size(len(self._b64[1])), size)
-            else:
-                base = "已识别:%s · %d 行 · %s" % (
-                    self._lang_name(), self._raw.count("\n") + 1, size)
-        ts = self.rec.get("ts")
-        if ts:
-            t = time.localtime(ts)
-            now = time.localtime()
-            base += " · " + (time.strftime("%H:%M", t) if
-                             (t.tm_year, t.tm_yday) == (now.tm_year, now.tm_yday)
-                             else time.strftime("%m-%d %H:%M", t))
-        self.lbl_meta.setText(base + self._meta_suffix)
-
-    def _refresh_pos(self):
-        if self._kind != "text":
-            self.lbl_pos.setText(self._editor_pos_info())
-            return
-        prefix = self._pos_prefix + " · " + self._lang_name()
-        lang = self._resolved_lang()
-        if lang == "json":
-            prefix += " · " + ("无效" if self._json_err else "有效")
-        cur = self.stack.currentWidget()
-        if cur is self.tree:
-            info = "%d 个节点" % self._tree_nodes
-        elif cur is self.table and self._csv_rows:
-            info = "%d 行 × %d 列" % (
-                min(len(self._csv_rows), self._TABLE_ROW_CAP + 1),
-                max(len(r) for r in self._csv_rows))
-        elif cur is self.md_view:
-            info = "预览"
-        elif cur is self.info:
-            info = "%d 行" % self.info.topLevelItemCount()
-        elif cur is self.img_view:
-            info = "图像"
-        else:
-            info = self._editor_pos_info()
-        self.lbl_pos.setText("%s · %s" % (prefix, info))
-
-    def _editor_pos_info(self):
-        c = self._active_edit().textCursor()
-        if c.hasSelection():
-            return "已选择 %d 个字符" % len(c.selectedText())
-        return "Ln %d, Col %d" % (c.blockNumber() + 1, c.positionInBlock() + 1)
-
-    def eventFilter(self, obj, e):
-        if obj is self.ed_find and e.type() == QEvent.KeyPress \
-                and e.key() == Qt.Key_Escape:
-            self._close_find()
-            return True
-        if obj is self.editor_raw.viewport() \
-                and e.type() == QEvent.MouseButtonDblClick:
-            self._open_path_line(self.editor_raw.cursorForPosition(
-                e.position().toPoint()).block().text())
-            return True
-        return super().eventFilter(obj, e)
-
-    def _open_path_line(self, line):
-        p = line.strip().strip('"')
-        if p and os.path.exists(p):
-            cm.open_file_default(p)
-
-    def _lang_name(self):
-        key = self._resolved_lang()
-        return dict(cm.VIEW_LANGS).get(key, key)
-
-    def _apply_highlight(self):
-        """染色到当前文档:文档已按该 (lang, 长度) 染过就直接显示(0 成本);
-        未染过才跑词法(25KB≈110ms)+ 落 runs(≈230ms),染完常驻文档。"""
-        doc = self.editor.document()
-        lang = self._resolved_lang()
-        text = self.editor.toPlainText()
-        key = (lang, len(text))
-        if self._ed_hl_state == key:
-            return                                  # 原文↔代码来回切不再重染
-        runs = self._hl_cache.get(key)
-        if runs is None:
-            if lang != "text" and _pg_get_lexer is not None \
-                    and len(text) > _HL_CHAR_LIMIT:
-                self._act_hl.setVisible(True)       # 超长:菜单留强制入口
-                self._meta_suffix = " · 文本过长,未高亮"
-                self._refresh_meta()
-                return
-            runs = pygments_runs(text, lang) or []
-            self._hl_cache[key] = runs
-        self._ed_hl_state = key
-        self._act_hl.setVisible(False)
-        self._meta_suffix = ""
-        apply_format_runs(doc, runs)                # 新灌的文本无需先清格式
-        self._refresh_meta()
-
-    def _force_highlight(self):
-        """超长文本用户主动要求染色:接受一次性耗时(几百 KB 可达秒级)。"""
-        self._act_hl.setVisible(False)
-        text = self.editor.toPlainText()
-        lang = self._resolved_lang()
-        runs = pygments_runs(text, lang, force=True)
-        if runs:
-            self._hl_cache[(lang, len(text))] = runs
-            self._ed_hl_state = (lang, len(text))
-            apply_format_runs(self.editor.document(), runs)
-            self._meta_suffix = " · 已高亮"
-            self._refresh_meta()
-
-    # ---- 更多菜单 ----
-    def _show_more_menu(self):
-        m = RoundMenu(parent=self)
-        if self._kind == "text":
-            sub = RoundMenu("语言", self)
-            for i, a in enumerate(self._lang_acts):
-                a.setIcon(FIF.ACCEPT.icon() if i == self._lang_index else QIcon())
-                sub.addAction(a)
-            m.addMenu(sub)
-            if self._act_hl.isVisible():
-                m.addSeparator()
-                m.addAction(self._act_hl)
-            insp = self._inspector_actions()
-            if insp:
-                m.addSeparator()
-                for title, cb in insp:
-                    a = QAction(title, m)
-                    a.triggered.connect(lambda _=False, f=cb: f())
-                    m.addAction(a)
-        else:
-            m.addAction(self._act_reveal)
-        m.exec(self.btn_more.mapToGlobal(
-            QPoint(self.btn_more.width() // 2, self.btn_more.height() + 8)))
-        m.deleteLater()
-
-    # ---- 查找 ----
-    def _open_find(self):
-        if self.stack.currentWidget() not in (self.editor, self.editor_raw):
-            self._set_view("raw")                   # 查找定位在文本视图
-        if self._find.isVisible():
-            self.ed_find.setFocus()
-            self.ed_find.selectAll()
-            return
-        self._find.show()
-        self._find.raise_()
-        self._place_find()
-        self.ed_find.setFocus()
-        self._find_text_changed(self.ed_find.text())
-
-    def _close_find(self):
-        self._find.hide()
-        self._active_edit().setFocus()
-
-    def _place_find(self):
-        if not self._find.isVisible():
-            return
-        self._find.move(self.card.width() - self._find.width() - 12, 10)
-
-    def _find_matches(self):
-        """当前关键词的全部匹配起点(非重叠);超大文档放弃实时计数。"""
-        text = self.ed_find.text()
-        if not text:
-            return None
-        doc = self._active_edit().document()
-        if doc.characterCount() > 300000:
-            return None
-        out = []
-        c = doc.find(text, QTextCursor(doc))
-        while not c.isNull():
-            out.append(c.selectionStart())
-            nxt = doc.find(text, c)
-            if nxt.isNull() or nxt.position() <= c.position():
-                break
-            c = nxt
-        return out
-
-    def _find_text_changed(self, _):
-        ms = self._find_matches()
-        if ms is None:
-            self.lbl_find_n.setText("-/-")
-            return
-        cur = self._active_edit().textCursor().position()
-        idx = 0
-        while idx < len(ms) and ms[idx] < cur:
-            idx += 1
-        self.lbl_find_n.setText("%d/%d" % (min(idx + 1, len(ms)) if ms else 0,
-                                           len(ms)))
-
-    def _find_goto(self, back=False):
-        text = self.ed_find.text()
-        if not text:
-            return
-        ed = self._active_edit()
-        flags = (QTextDocument.FindFlag.FindBackward if back
-                 else QTextDocument.FindFlag(0))
-        if not ed.find(text, flags):                # 到头/尾回绕
-            c = ed.textCursor()
-            c.movePosition(QTextCursor.End if back else QTextCursor.Start)
-            ed.setTextCursor(c)
-            ed.find(text, flags)
-        self._find_text_changed("")
-
-    # ---- 工具 ----
-    def _set_wrap(self, on):
-        for ed in (self.editor, self.editor_raw):
-            ed.setLineWrapMode(
-                QPlainTextEdit.WidgetWidth if on else QPlainTextEdit.NoWrap)
-
-    def _apply_zoom(self, pct):
-        pt = max(6, round(self._base_pt * pct / 100))
-        for w in (self.editor, self.editor_raw, self.md_view,
-                  self.tree, self.table, self.info):
-            f = w.font()
-            f.setPointSize(pt)
-            w.setFont(f)
-        self.editor._update_area_width(0)
-        self.editor_raw._update_area_width(0)
-
-    def _set_zoom(self, pct):
-        self.cmb_zoom.setCurrentIndex(self._ZOOMS.index(pct))
-        self._apply_zoom(pct)                       # 索引未变时信号不来,手动兜底
-
-    def _zoom_step(self, d):
-        i = self.cmb_zoom.currentIndex() + d
-        self._set_zoom(self._ZOOMS[max(0, min(len(self._ZOOMS) - 1, i))])
-
-    def _copy_all(self):
-        # 查看器「复制」只写剪贴板:不排回贴队列,避免内容被 Ctrl+V
-        # 打进打开查看器之前聚焦的窗口(私密凭据与非私密一视同仁)
-        self.app.core.copy_text(self._raw)
-        self.btn_copy.setText("已复制")             # 按钮自身反馈,不弹提示层
-        self.btn_copy.setIcon(FIF.ACCEPT.icon())
-        self._copy_timer.start()
-
-    def _copy_restore(self):
-        self.btn_copy.setText("复制")
-        self.btn_copy.setIcon(FIF.COPY.icon())
-
-    def closeEvent(self, e):
-        try:
-            self.app._viewers.remove(self)
-        except ValueError:
-            pass
-        self.deleteLater()
-        e.accept()
-
-
-class DiffWindow(QWidget):
-    """内容对比窗口:unified 文本 diff + JSON 语义 diff(键序无关)。
-
-    入口:历史面板 Ctrl+点击选基准 → Ctrl+点击另一条;或卡片菜单
-    「选为对比基准 / 与基准对比」。A=基准(旧),B=所选(新);JSON 双方
-    都合法时默认语义视图,否则回退文本 unified diff。"""
-
-    def __init__(self, app, rec_a, rec_b):
-        super().__init__(None)
-        self.app = app
-        self.ra, self.rb = rec_a, rec_b
-        self.ta = self._text_of(rec_a)
-        self.tb = self._text_of(rec_b)
-        self._json_ok, self._json_changes = cm.json_semantic_diff(self.ta, self.tb)
-        self._diff_lines = cm.unified_diff_lines(self.ta, self.tb)
-
-        self.setWindowTitle("对比 · WinClipboard")
-        self.setWindowIcon(app.icon)
-        self.setWindowFlags(Qt.Window)
-        self.setStyleSheet("QWidget { background: %s; }" % BG)
-        self.resize(920, 620)
-        self.setMinimumSize(660, 420)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        head = QVBoxLayout()
-        head.setContentsMargins(16, 14, 16, 6)
-        head.setSpacing(2)
-        head.addWidget(StrongBodyLabel("内容对比"))
-        self.lbl_meta = CaptionLabel("")
-        head.addWidget(self.lbl_meta)
-        root.addLayout(head)
-
-        bar = QHBoxLayout()
-        bar.setContentsMargins(16, 2, 16, 8)
-        bar.setSpacing(8)
-        self.seg = SegmentedWidget()
-        self.seg.currentItemChanged.connect(
-            lambda k: self._set_view(k) if k else None)
-        bar.addWidget(self.seg)
-        bar.addStretch(1)
-        self.btn_copy = PushButton("复制结果")
-        self.btn_copy.setIcon(FIF.COPY.icon())
-        self.btn_copy.clicked.connect(self._copy_result)
-        bar.addWidget(self.btn_copy)
-        root.addLayout(bar)
-
-        body = QHBoxLayout()
-        body.setContentsMargins(16, 2, 16, 10)
-        card = SimpleCardWidget()
-        cv = QVBoxLayout(card)
-        cv.setContentsMargins(0, 0, 0, 0)
-        self.ed = _CodeEdit(card)
-        self.ed.setReadOnly(True)
-        self.ed.setStyleSheet(
-            "QPlainTextEdit { background: %s; border: none; color: %s; }"
-            % (CARD_BG, TEXT))
-        cv.addWidget(self.ed)
-        body.addWidget(card)
-        root.addLayout(body, 1)
-
-        self._mode = "sem" if self._json_ok else "text"
-        self._rebuild_modes()
-        self._render()
-
-    @staticmethod
-    def _text_of(rec):
-        c = rec.get("content")
-        if isinstance(c, list):
-            return "\n".join(str(p) for p in c)
-        return str(c or "")
-
-    def _stamp(self, rec):
-        ts = rec.get("ts")
-        if not ts:
-            return "?"
-        t = time.localtime(ts)
-        return time.strftime("%m-%d %H:%M", t)
-
-    def _rebuild_modes(self):
-        self.seg.blockSignals(True)
-        self.seg.clear()
-        if self._json_ok:
-            self.seg.addItem(routeKey="sem", text="语义")
-        self.seg.addItem(routeKey="text", text="文本")
-        self.seg.setCurrentItem(self._mode)
-        self.seg.blockSignals(False)
-
-    def _set_view(self, key):
-        if key and key != self._mode:
-            self._mode = key
-            self._render()
-
-    def _sem_lines(self):
-        ch = self._json_changes
-        if not ch:
-            return ["两个 JSON 语义相同(键顺序与空白无关)。"]
-        lines = []
-        for path, kind, old, new in ch:
-            if kind == "change":
-                lines.append("~ %s:  %s  →  %s" % (path, old, new))
-            elif kind == "add":
-                lines.append("+ %s:  %s" % (path, new))
-            elif kind == "del":
-                lines.append("- %s:  %s" % (path, old))
-            else:
-                lines.append(str(old))
-        return lines
-
-    def _render(self):
-        lines = self._sem_lines() if self._mode == "sem" else self._diff_lines
-        text = "\n".join(lines)
-        self.ed.setPlainText(text)
-        # 逐行配色:前缀 +/- 上色,@@ 与 ---/+++ 说明行置灰
-        fa = QTextCharFormat()
-        fa.setForeground(QColor(DIFF_ADD))
-        fd = QTextCharFormat()
-        fd.setForeground(QColor(DIFF_DEL))
-        fc = QTextCharFormat()
-        fc.setForeground(QColor(DIFF_CTX))
-        runs = []
-        pos = 0
-        for ln in lines:
-            n = len(ln) + 1
-            c = ln[:1]
-            if c == "+":
-                runs.append((pos, pos + n, fa))
-            elif c == "-":
-                runs.append((pos, pos + n, fd))
-            elif c in ("~", "@", "…") or ln.startswith(("---", "+++")):
-                runs.append((pos, pos + n, fc))
-            pos += n
-        apply_format_runs(self.ed.document(), runs)
-        n_add = sum(1 for l in self._diff_lines if l.startswith("+") and not l.startswith("+++"))
-        n_del = sum(1 for l in self._diff_lines if l.startswith("-") and not l.startswith("---"))
-        if self._mode == "sem":
-            detail = "语义差异 %d 处" % len(self._json_changes) \
-                if self._json_changes else "语义相同"
-        else:
-            detail = "+%d / -%d 行" % (n_add, n_del)
-        self.lbl_meta.setText(
-            "A(基准) %s · %s  ↔  B(所选) %s · %s · %s" % (
-                self._stamp(self.ra), cm._fmt_size(len(self.ta.encode("utf-8"))),
-                self._stamp(self.rb), cm._fmt_size(len(self.tb.encode("utf-8"))),
-                detail))
-
-    def _copy_result(self):
-        self.app.core.copy_text(self.ed.toPlainText())
-        self.btn_copy.setText("已复制")
-        QTimer.singleShot(1400, lambda: self.btn_copy.setText("复制结果"))
-
-    def keyPressEvent(self, e):
-        if e.key() == Qt.Key_Escape:
-            self.close()
-            return
-        super().keyPressEvent(e)
-
-    def closeEvent(self, e):
-        try:
-            self.app._diffs.remove(self)
-        except (ValueError, AttributeError):
-            pass
-        self.deleteLater()
-        e.accept()
-
-
-class ImageViewerWindow(QWidget):
-    """图片查看器(独立窗口,与文本查看器同族):适应窗口 / 1:1 / 滚轮缩放 /
-    拖拽平移;双击在 适应↔原始 间切换。「编辑标注」在本窗口内切换到内嵌
-    编辑器(不另开窗口),完成/Esc 自动回到查看态。"""
-
-    def __init__(self, app, rec, edit=False, on_result=None,
-                 annos=None, layer_mode=False):
-        super().__init__(None)
-        self.app = app
-        self.rec = rec
-        self._on_result = on_result       # 编辑产物直通回调(图钉画布回写)
-        self._init_annos = annos          # 初始标注层(图钉画布回编继续编辑)
-        self._layer_mode = layer_mode     # 非破坏回写(emit 标注层而非像素)
-        self._editor = None               # 内嵌编辑器(编辑态非 None)
-        path = str(rec.get("content") or "")
-        pm = QPixmap(path)
-        if pm.isNull():
-            raise ValueError("无法加载图片: %s" % path)
-        self._pm = pm
-
-        self.setWindowTitle("图片查看 · WinClipboard")
-        self.setWindowIcon(app.icon)
-        self.setWindowFlags(Qt.Window)
-        self.setStyleSheet("QWidget { background: %s; }" % BG)
-        self.resize(880, 620)
-
-        v = QVBoxLayout(self)
-        v.setContentsMargins(16, 14, 16, 12)
-        v.setSpacing(8)
-        self.v = v
-
-        # ---- 头部:统计 + 缩放控制 + 动作 ----
-        head = QHBoxLayout()
-        head.setSpacing(6)
-        self.lbl_title = StrongBodyLabel("图片查看")
-        self.lbl_title.setFont(font(15, QFont.DemiBold))
-        size_str = ""
-        try:
-            size_str = cm._fmt_size(os.path.getsize(path))
-        except Exception:
-            pass
-        ext = os.path.splitext(path)[1].lstrip(".").upper() or "IMG"
-        self.lbl_stats = CaptionLabel("%d × %d · %s · %s"
-                                      % (pm.width(), pm.height(), size_str, ext))
-        self.lbl_stats.setStyleSheet("color: %s;" % TER)
-        self.lbl_zoom = CaptionLabel("适应")
-        self.lbl_zoom.setStyleSheet("color: %s;" % SEC)
-        self.b_out = PushButton("−")
-        self.b_out.setFixedWidth(40)
-        self.b_out.setToolTip("缩小(滚轮/加减号)")
-        self.b_fit = PushButton("适应窗口")
-        self.b_fit.setCheckable(True)
-        self.b_fit.setChecked(True)
-        self.b_fit.setToolTip("缩放到完整可见(快捷键 0)")
-        self.b_100 = PushButton("1:1")
-        self.b_100.setToolTip("原始像素(快捷键 1)")
-        self.b_in = PushButton("+")
-        self.b_in.setFixedWidth(40)
-        self.b_in.setToolTip("放大(滚轮/加减号)")
-        b_copy = PushButton("复制")
-        b_copy.setIcon(FIF.COPY.icon())
-        b_pin = PushButton("置顶")
-        b_pin.setIcon(FIF.PIN.icon())
-        b_pin.setToolTip("钉到屏幕置顶画布:可多图自由拖动 / 缩放 / 排列")
-        b_pin.clicked.connect(self._pin)
-        self.b_edit = PushButton("✏ 编辑标注")
-        self.b_edit.setIcon(FIF.EDIT.icon())
-        self.b_edit.setToolTip("在本窗口内标注(矩形/圆形/箭头/画笔/文字/马赛克),"
-                               "完成后回到查看")
-        b_close = PushButton("关闭")
-        b_close.setIcon(FIF.CLOSE.icon())
-        for w in (self.lbl_title, self.lbl_stats, self.lbl_zoom):
-            head.addWidget(w)
-        self.lbl_title.setStyleSheet("color: %s;" % TEXT)
-        head.addSpacing(8)
-        head.addStretch(1)
-        for w in (self.b_out, self.b_fit, self.b_100, self.b_in,
-                  b_copy, b_pin, self.b_edit, b_close):
-            head.addWidget(w)
-        v.addLayout(head)
-
-        # ---- 画布 ----
-        self.view = QGraphicsView()
-        self.view.setRenderHint(QPainter.SmoothPixmapTransform)
-        self.view.setRenderHint(QPainter.Antialiasing)
-        self.view.setStyleSheet(
-            "QGraphicsView { background: #26292F; border: none; border-radius: 10px; }")
-        self.view.setDragMode(QGraphicsView.ScrollHandDrag)   # 放大后拖拽平移
-        self.scene = QGraphicsScene(self)
-        self._pix = QGraphicsPixmapItem(pm)
-        self._pix.setTransformationMode(Qt.SmoothTransformation)
-        self.scene.addItem(self._pix)
-        self.scene.setSceneRect(QRectF(0, 0, pm.width(), pm.height()))
-        self.view.setScene(self.scene)
-        v.addWidget(self.view, 1)
-
-        self._fitting = True
-        self.b_out.clicked.connect(lambda: self._zoom_by(0.8))
-        self.b_in.clicked.connect(lambda: self._zoom_by(1.25))
-        self.b_fit.clicked.connect(lambda on: self._do_fit() if on else self._do_100())
-        self.b_100.clicked.connect(self._do_100)
-        b_copy.clicked.connect(self._copy)
-        self.b_edit.clicked.connect(self._toggle_edit)
-        b_close.clicked.connect(self.close)
-        self.view.wheelEvent = self._wheel
-        self.view.mouseDoubleClickEvent = self._dbl
-        if edit:
-            self._enter_edit()
-
-    # ---- 查看 ↔ 编辑(同窗切换,不另开窗口) ----
-    def _toggle_edit(self):
-        self._exit_edit() if self._editor is not None else self._enter_edit()
-
-    def _enter_edit(self):
-        if self._editor is not None:
-            return
-        ed = ImageEditor(self.app, {"type": "image", "content": self.rec["content"],
-                                    "w": self._pm.width(), "h": self._pm.height()},
-                         on_result=self._edited, parent=self,
-                         annos=self._init_annos, layer_mode=self._layer_mode)
-        ed.finished.connect(self._exit_edit)
-        self._editor = ed
-        self.v.replaceWidget(self.view, ed)
-        self.view.hide()          # replaceWidget 不隐藏旧控件,会叠加渲染
-        ed.show()
-        ed.setFocus()
-        for w in (self.b_out, self.b_fit, self.b_100, self.b_in, self.lbl_zoom):
-            w.hide()
-        self.b_edit.setText("退出编辑")
-        self.lbl_title.setText("图片编辑")
-
-    def _exit_edit(self):
-        ed = self._editor
-        if ed is None:
-            return
-        self._editor = None
-        try:
-            ed.finished.disconnect(self._exit_edit)
-        except Exception:
-            pass
-        self.v.replaceWidget(ed, self.view)
-        ed.hide()                 # 同上:先藏再删,避免 deleteLater 前残留渲染
-        ed.deleteLater()
-        self.view.show()
-        for w in (self.b_out, self.b_fit, self.b_100, self.b_in, self.lbl_zoom):
-            w.show()
-        self.b_edit.setText("✏ 编辑标注")
-        self.lbl_title.setText("图片查看")
-        self.view.setFocus()
-
-    def _edited(self, result):
-        """编辑产物直通(画布回写等);历史场景产物经剪贴板自动回流。"""
-        if self._on_result is None:
-            return
-        try:
-            self._on_result(result)
-        except Exception:
-            cm.log("查看器编辑结果回写失败:\n%s" % traceback.format_exc())
-
-    # ---- 显示 / 缩放 ----
-    def showEvent(self, e):
-        super().showEvent(e)
-        ensure_onscreen(self)
-        QTimer.singleShot(0, self._do_fit)   # 需要最终窗口尺寸
-
-    def _do_fit(self):
-        self.view.resetTransform()
-        self.view.fitInView(self._pix, Qt.KeepAspectRatio)
-        if self.view.transform().m11() > 1.0:   # 小图不放大到模糊,封顶 100%
-            self.view.resetTransform()
-        self._fitting = True
-        self.b_fit.setChecked(True)
-        self._sync()
-
-    def _do_100(self):
-        self.view.resetTransform()
-        self._fitting = False
-        self.b_fit.setChecked(False)
-        self._sync()
-
-    def _zoom_by(self, f, anchor_mouse=False):
-        cur = self.view.transform().m11()
-        if not 0.02 <= cur * f <= 40:
-            return
-        self._fitting = False
-        self.b_fit.setChecked(False)
-        self.view.setTransformationAnchor(
-            QGraphicsView.AnchorUnderMouse if anchor_mouse
-            else QGraphicsView.AnchorViewCenter)
-        self.view.scale(f, f)
-        self._sync()
-
-    def _wheel(self, e):
-        self._zoom_by(1.25 if e.angleDelta().y() > 0 else 0.8, anchor_mouse=True)
-
-    def _dbl(self, e):
-        self._do_100() if self._fitting else self._do_fit()
-
-    def _sync(self):
-        s = self.view.transform().m11()
-        self.lbl_zoom.setText("适应" if self._fitting else "%d%%" % round(s * 100))
-
-    def keyPressEvent(self, e):
-        k = e.key()
-        if k == Qt.Key_Escape:
-            if self._editor is not None:
-                self._exit_edit()     # 编辑态:先退编辑,再按才关窗
-            else:
-                self.close()
-        elif self._editor is not None:
-            super().keyPressEvent(e)  # 编辑态让快捷键(Delete/Ctrl+Z)进编辑器
-        elif k in (Qt.Key_Plus, Qt.Key_Equal):
-            self._zoom_by(1.25)
-        elif k == Qt.Key_Minus:
-            self._zoom_by(0.8)
-        elif k == Qt.Key_0:
-            self._do_fit()
-        elif k == Qt.Key_1:
-            self._do_100()
-        else:
-            super().keyPressEvent(e)
-
-    # ---- 动作 ----
-    def _copy(self):
-        try:
-            img = cm.Image.open(self.rec["content"])
-            ok = cm.set_dib_to_clipboard(self.app.worker.hwnd, cm.pil_to_dib(img))
-        except Exception:
-            ok = False
-        if ok:
-            InfoBar.success("已复制", "图片已复制到剪贴板", parent=self,
-                            position=InfoBarPosition.BOTTOM_LEFT)
-        else:
-            InfoBar.error("复制失败", "剪贴板被占用", parent=self,
-                          position=InfoBarPosition.BOTTOM_LEFT)
-
-    def _pin(self):
-        # 钉到置顶画布(预览替身没有 pin_image,静默跳过)
-        f = getattr(self.app, "pin_image", None)
-        if f is not None:
-            f(self.rec)
-
-    def closeEvent(self, e):
-        try:
-            self.app._viewers.remove(self)
-        except ValueError:
-            pass
-        self.deleteLater()
-        e.accept()
-
-
 # ============================================================
 # AI 工作流(多模型协作 · 人在回路)
 # ============================================================
@@ -5151,42 +2533,136 @@ class UiHealthMonitor:
 class ThumbLoader(QObject):
     """后台生成缩略图:QImage 的加载/缩放线程安全,完成后经信号投回 GUI 线程
     转 QPixmap 并回填卡片。截图解码+平滑缩放单张可达几十毫秒,放 UI 线程会在
-    启动预热全量截图时把窗口冻住(30 张 ≈ 1.5 秒)。"""
+    启动预热全量截图时把窗口冻住(30 张 ≈ 1.5 秒)。
+
+    队列规则(2026-10 性能优化):
+    - 可见请求(卡片/预览绑定)优先于后台预热,同路径合并(_pending);
+    - 预热(低优先级)在途有上限(PREWARM_CAP),超出直接丢弃——
+      可见请求到来时仍会按高优先级提交,不会丢功能;
+    - 解码优先走 QImageReader 的解码期缩放 + EXIF 方向(格式支持时),
+      不支持自动回退 QImage 全解码后缩放;
+    - 失败路径进有界失败表,不再反复重试解码坏文件;
+    - 缓存统一经 app._thumbs_put 写入(LRU + 字节预算),不绕过淘汰;
+    - shutdown() 退出前排空队列。
+    """
 
     loaded = Signal(str, QImage)
+    PREWARM_CAP = 240              # 低优先级(预热)在途上限
+    FAILED_CAP = 200               # 解码失败路径表上限
 
     def __init__(self, app, parent=None):
         super().__init__(parent)
         self.app = app
-        self._q = queue.Queue()
+        self._q = queue.PriorityQueue()
         self._pending = set()
+        self._failed = set()
+        self._prewarm_backlog = 0
+        self._seq = 0
+        self._stop = False
         self.loaded.connect(self._on_loaded)
         threading.Thread(target=self._run, daemon=True).start()
 
-    def submit(self, path):
-        if path and path not in self._pending and path not in self.app._thumbs:
+    def submit(self, path, visible=True):
+        """提交缩略图请求:visible=True(卡片/预览可见)高优先级;
+        预热(visible=False)可被队列上限丢弃。"""
+        if not path or self._stop or path in self._failed:
+            return
+        if path in self._pending or path in self.app._thumbs:
+            return                          # 在途合并 / 已有缓存
+        if visible:
             self._pending.add(path)
-            self._q.put(path)
+            self._seq += 1
+            self._q.put((0, self._seq, path))
+        else:
+            if self._prewarm_backlog >= self.PREWARM_CAP:
+                return                      # 预热过载:丢弃,可见请求不受影响
+            self._prewarm_backlog += 1
+            self._pending.add(path)
+            self._seq += 1
+            self._q.put((1, self._seq, path))
+
+    def shutdown(self):
+        """退出:拒绝新任务并排空在途队列(daemon 线程随进程收尾)。"""
+        self._stop = True
+        try:
+            while True:
+                self._q.get_nowait()
+                self._q.task_done()
+        except queue.Empty:
+            pass
+
+    def _remember_failed(self, path):
+        f = self._failed
+        if len(f) >= self.FAILED_CAP:
+            for k in list(f)[:self.FAILED_CAP // 2]:
+                f.discard(k)
+        f.add(path)
 
     def _run(self):
-        while True:
-            path = self._q.get()
+        from PySide6.QtCore import QBuffer
+        from PySide6.QtGui import QImageReader
+        from pathlib import Path as _P
+        while not self._stop:
             try:
-                img = QImage(path)          # 线程安全;失败得到 null 图
-                if not img.isNull():
-                    # 256px 缓存:卡片(~92px)与底部预览(≤128px 高)共用,
-                    # 2x 余量;原图只在双击查看器时解码
-                    self.loaded.emit(path, img.scaled(
-                        256, 256, Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation))
+                prio, _seq, path = self._q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                if self._stop:
+                    break
+                try:
+                    data = _P(path).read_bytes()   # 一次读入,后台线程
+                except Exception:                  # 不长期持有文件句柄
+                    data = None                    # (删除/清理不与解码竞争)
+                if not data:
+                    self._remember_failed(path)
+                    continue
+                img = None
+                try:
+                    buf = QBuffer()
+                    buf.setData(data)
+                    buf.open(QBuffer.ReadOnly)
+                    reader = QImageReader()
+                    reader.setDevice(buf)
+                    reader.setAutoTransform(True)      # EXIF 方向
+                    sz = reader.size()
+                    if sz.isValid():
+                        sz.scale(256, 256, Qt.KeepAspectRatio)
+                        reader.setScaledSize(sz)       # 解码期缩放(格式支持时)
+                        img = reader.read()
+                except Exception:
+                    img = None
+                if img is None or img.isNull():
+                    # 回退:全解码后缩放(老格式/reader 不支持时)
+                    try:
+                        full = QImage.fromData(data)
+                        if not full.isNull():
+                            img = full.scaled(256, 256, Qt.KeepAspectRatio,
+                                              Qt.SmoothTransformation)
+                    except Exception:
+                        img = None
+                if img is not None and not img.isNull():
+                    self.loaded.emit(path, img)
+                else:
+                    self._remember_failed(path)
             except Exception:
                 pass
             finally:
+                if prio == 1:
+                    self._prewarm_backlog -= 1
                 self._pending.discard(path)
+                try:
+                    self._q.task_done()
+                except Exception:
+                    pass
 
     def _on_loaded(self, path, img):
         pm = QPixmap.fromImage(img)
-        self.app._thumbs[path] = pm
+        put = getattr(self.app, "_thumbs_put", None)
+        if put is not None:
+            put(path, pm)                   # 统一 LRU/字节预算(不绕过淘汰)
+        else:
+            self.app._thumbs[path] = pm     # 测试替身:直写
         for c in self.app._card_widgets:
             if c.rec.get("type") == "image" and c.rec.get("content") == path:
                 c.set_thumb(pm)
@@ -5198,58 +2674,12 @@ class ThumbLoader(QObject):
                 pass
 
 
-class AIWorker(QThread):
-    """后台调用 AI(阻塞的 cm.ai_chat 放到线程里,不冻结 UI)。"""
-    done = Signal(int, bool, str)     # step_idx, ok, text
-
-    def __init__(self, service, prompt, step_idx=-1, parent=None):
-        super().__init__(parent)
-        self.service = service
-        self.prompt = prompt
-        self.step_idx = step_idx
-
-    def run(self):
-        ok, text = cm.ai_chat(self.service, self.prompt)
-        self.done.emit(self.step_idx, ok, text)
+from workflow_ui import (ServicesPage, WorkflowPage, WorkflowEditorWindow,  # noqa: F401
+                        WorkflowRunner, WorkflowRunInspector,
+                        ServiceEditorDialog, ProviderCard, PrivacyGateDialog,
+                        AIWorker, ModelWorker)
 
 
-class PrivacyGateDialog(MessageBoxBase):
-    """AI 发送前隐私门:提示词含敏感内容时三选一(人在回路)。
-
-    [自动遮盖后发送](主按钮) [本次原样发送] [取消]——关闭窗口/Esc 视为取消。
-    choice ∈ {"mask", "raw", "cancel"};遮盖文本由 cm.privacy_scan 产生。"""
-
-    def __init__(self, parent, hits, masked_preview, endpoint):
-        super().__init__(parent)
-        self.choice = "cancel"
-
-        title = StrongBodyLabel("⚠ 内容可能包含敏感信息")
-        title.setStyleSheet("color: #C4820A;")
-        self.viewLayout.addWidget(title)
-        body = BodyLabel("即将发送至 %s 的提示词中检测到:" % (endpoint or "AI 服务"))
-        body.setStyleSheet("color: %s;" % TEXT)
-        self.viewLayout.addWidget(body)
-        for lb in hits:
-            row = BodyLabel("•  %s" % lb)
-            row.setStyleSheet("color: #C4820A; padding-left: 12px;")
-            self.viewLayout.addWidget(row)
-        prev = CaptionLabel("遮盖预览:%s" % (masked_preview[:160] + ("…" if len(masked_preview) > 160 else "")))
-        prev.setWordWrap(True)
-        prev.setStyleSheet("color: %s;" % TER)
-        self.viewLayout.addWidget(prev)
-
-        self.btn_raw = PushButton("本次原样发送", self)
-        self.btn_raw.clicked.connect(lambda: self._pick("raw"))
-        self.buttonLayout.insertWidget(0, self.btn_raw)
-        self.buttonLayout.insertStretch(1)
-        self.yesButton.setText("自动遮盖后发送")
-        self.yesButton.clicked.connect(lambda: self._pick("mask"))
-        self.cancelButton.setText("取消")
-        self.widget.setFixedWidth(460)
-
-    def _pick(self, choice):
-        self.choice = choice
-        self.accept()
 
 
 class UpdateWorker(QThread):
@@ -5258,1507 +2688,6 @@ class UpdateWorker(QThread):
 
     def run(self):
         self.done.emit(*cm.fetch_latest_release())
-
-
-class ModelWorker(QThread):
-    """后台拉取端点模型清单(GET /models,OpenAI 标准发现端点)。"""
-    done = Signal(bool, object)     # ok, [模型 id] 或 错误文本
-
-    def __init__(self, service, parent=None):
-        super().__init__(parent)
-        self.service = service
-
-    def run(self):
-        ok, payload = cm.list_models(self.service)
-        self.done.emit(ok, payload)
-
-
-class ServiceEditorDialog(MessageBoxBase):
-    """API 端点配置表单(hermes 风格):Name / Provider ID / Endpoint URL /
-    Default Model(可「发现模型」自动拉取)/ API 密钥(可留空)+ ⚡测试。
-
-    聚合引擎见 cm.ai_chat:openai SDK 统一客户端(OpenAI 兼容端点通吃,
-    含 Ollama 与 one-api 类本地网关),SDK 缺席时退回零依赖 urllib。
-    provider 字段为路由前缀预留(anthropic/gemini 原生协议),OpenAI 兼容
-    端点保持 openai 即可。
-    """
-
-    # 常用 litellm 风格路由前缀(可自由输入)
-    _PIDS = ("openai", "deepseek", "anthropic", "gemini", "groq", "mistral", "ollama", "azure")
-
-    def __init__(self, parent, svc=None, preset=None):
-        super().__init__(parent)
-        self.svc = dict(svc) if svc else dict(preset or {})
-        self.result = None
-        self._presets = {p["name"]: p for p in cm.AI_PRESET_SERVICES}
-        self._model_worker = None
-        self._chat_worker = None
-
-        self.titleLabel = StrongBodyLabel("API 端点")
-        self.viewLayout.addWidget(self.titleLabel)
-        sub = CaptionLabel("OpenAI 兼容接口;「发现模型」自动拉取端点的模型清单(本地网关 / Ollama 同样适用)。")
-        sub.setWordWrap(True)
-        sub.setStyleSheet("color: %s;" % TER)
-        self.viewLayout.addWidget(sub)
-
-        # ---- 供应商(预设一键预填;自定义则手填全部字段) ----
-        self.cmb_provider = ComboBox()
-        self.cmb_provider.addItems([p["name"] for p in cm.AI_PRESET_SERVICES] + ["自定义"])
-        init_name = str(self.svc.get("name") or "")
-        self.cmb_provider.setCurrentText(init_name if init_name in self._presets else "自定义")
-        self.cmb_provider.setMinimumWidth(220)
-        self.cmb_provider.currentTextChanged.connect(self._on_provider)
-        self._row("供应商", self.cmb_provider)
-
-        # ---- 名称(仅自定义,hermes: Name) ----
-        self.e_name = LineEdit()
-        self.e_name.setPlaceholderText("如 公司中转 / Axet Proxy")
-        self.e_name.setText("" if init_name in self._presets else init_name)
-        self.row_name, _lbl = self._row("名称", self.e_name)
-
-        # ---- Provider ID(hermes 同名字段:路由前缀,openai=OpenAI 兼容直连) ----
-        self.cmb_pid = EditableComboBox()
-        self.cmb_pid.addItems(list(self._PIDS))
-        self.cmb_pid.setText(str(self.svc.get("provider") or "openai"))
-        self.cmb_pid.setMinimumWidth(160)
-        self.cmb_pid.setToolTip("openai = 按 OpenAI 兼容协议直连接口地址;"
-                                "其余为原生协议路由前缀预留")
-        self._row("Provider ID", self.cmb_pid)
-
-        # ---- 接口地址(hermes: Endpoint URL,主表单位置) ----
-        self.e_url = LineEdit()
-        self.e_url.setPlaceholderText("http://127.0.0.1:8081/v1(自定义必填)")
-        self._row("接口地址", self.e_url)
-
-        # ---- 默认模型 + 发现模型(hermes: Default Model / Discover models) ----
-        self.cmb_model = EditableComboBox()
-        self.cmb_model.setMinimumWidth(180)
-        self.cmb_model.currentTextChanged.connect(self._update_model_note)
-        self.btn_discover = PushButton("发现模型", self)
-        self.btn_discover.setIcon(FIF.SYNC.icon())
-        self.btn_discover.setFixedHeight(28)
-        self.btn_discover.setCursor(Qt.PointingHandCursor)
-        self.btn_discover.setToolTip("从接口地址拉取可用模型清单(GET /models)")
-        self.btn_discover.clicked.connect(self._discover)
-        mrow = QWidget()
-        mh = QHBoxLayout(mrow)
-        mh.setContentsMargins(0, 0, 0, 0)
-        mh.setSpacing(8)
-        mh.addWidget(self.cmb_model, 1)
-        mh.addWidget(self.btn_discover, 0)
-        self._row("默认模型", mrow)
-        self.lbl_model_note = CaptionLabel("")
-        self.lbl_model_note.setStyleSheet("color: %s;" % TER)
-        self.viewLayout.addWidget(self.lbl_model_note)
-
-        # ---- API 密钥(可留空:本地网关 / Ollama / 网页 AI 优先) ----
-        self.e_key = LineEdit()
-        self.e_key.setEchoMode(QLineEdit.Password)
-        self.e_key.setText(str(self.svc.get("api_key") or ""))
-        self._kw, self.lbl_key = self._row("API 密钥", self.e_key)
-        key_note = CaptionLabel("可留空;保存于本机(DPAPI 加密),只用于发起 API 请求")
-        key_note.setStyleSheet("color: %s;" % TER)
-        self.viewLayout.addWidget(key_note)
-
-        # ---- 按钮区:⚡测试(hermes: Test)+ 取消 / 保存 ----
-        self.btn_test = PushButton("⚡ 测试", self)
-        self.btn_test.setFixedHeight(28)
-        self.btn_test.setCursor(Qt.PointingHandCursor)
-        self.btn_test.clicked.connect(self._test_now)
-        self.buttonLayout.insertWidget(0, self.btn_test)
-        self.buttonLayout.insertStretch(1)
-        self.yesButton.setText("保存")
-        self.cancelButton.setText("取消")
-        self.widget.setFixedWidth(500)
-
-        # 按当前供应商填充,再把已有配置覆盖进去
-        self._on_provider(self.cmb_provider.currentText())
-        if self.svc:
-            self.e_url.setText(str(self.svc.get("base_url") or ""))
-            if self.svc.get("model"):
-                self.cmb_model.setText(str(self.svc["model"]))
-            self._update_model_note()
-
-    # ---- 行辅助:返回 (行容器, 标签),容器可整体显隐,标签可改文字 ----
-    def _row(self, label_text, field):
-        w = QWidget()
-        h = QHBoxLayout(w)
-        h.setContentsMargins(0, 0, 0, 0)
-        lab = BodyLabel(label_text)
-        lab.setStyleSheet("color: %s;" % SEC)
-        lab.setMinimumWidth(72)
-        h.addWidget(lab, 0)
-        h.addWidget(field, 1)
-        self.viewLayout.addWidget(w)
-        return w, lab
-
-    def _on_provider(self, name):
-        p = self._presets.get(name)
-        self.row_name.setVisible(name == "自定义")
-        self.lbl_key.setText("%s API 密钥" % name if p else "API 密钥")
-        self.cmb_model.clear()
-        if p:
-            self.e_url.setText(p["base_url"])
-            self.cmb_pid.setText("openai")   # 预设均为 OpenAI 兼容端点
-            self.cmb_model.addItems([m["id"] for m in p.get("models") or []])
-            self.cmb_model.setCurrentIndex(0)
-        else:
-            self.cmb_model.setText("")   # EditableComboBox 的 setCurrentText 只认列表内文本
-        self._update_model_note()
-
-    def _update_model_note(self, *_):
-        cur = self.cmb_model.currentText().strip()
-        p = self._presets.get(self.cmb_provider.currentText())
-        note = ""
-        if p:
-            for m in p.get("models") or []:
-                if m["id"] == cur:
-                    note = m["note"]
-                    break
-        self.lbl_model_note.setText(note)
-        self.lbl_model_note.setVisible(bool(note))
-
-    # ---- 发现模型(后台 GET /models) ----
-    def _discover(self):
-        if self._model_worker is not None:
-            return
-        base = self.e_url.text().strip()
-        if not base:
-            InfoBar.warning("缺少接口地址", "先填写接口地址,再发现模型", parent=self,
-                            position=InfoBarPosition.TOP_RIGHT)
-            return
-        self.btn_discover.setEnabled(False)
-        self.btn_discover.setText("发现中…")
-        self._model_worker = ModelWorker(
-            {"base_url": base, "api_key": self.e_key.text().strip()}, self)
-
-        def on_done(ok, payload):
-            self.btn_discover.setEnabled(True)
-            self.btn_discover.setText("发现模型")
-            self._model_worker = None
-            if not ok:
-                InfoBar.error("发现失败", str(payload)[:200], parent=self,
-                              position=InfoBarPosition.TOP_RIGHT, duration=-1)
-                return
-            self._apply_models(payload)
-            InfoBar.success("发现完成", "从该端点拉取到 %d 个模型" % len(payload),
-                            parent=self, position=InfoBarPosition.TOP_RIGHT)
-
-        self._model_worker.done.connect(on_done)
-        self._model_worker.start()
-
-    def _apply_models(self, models):
-        """把发现到的模型清单填进下拉(保留已输入的模型名,若有)。"""
-        cur = self.cmb_model.currentText().strip()
-        self.cmb_model.clear()
-        self.cmb_model.addItems(models)
-        if cur in models:
-            self.cmb_model.setCurrentText(cur)
-        else:
-            self.cmb_model.setText(cur or (models[0] if models else ""))
-        self._update_model_note()
-
-    # ---- ⚡ 测试(不关对话框;后台真实调用当前表单配置) ----
-    def _temp_service(self):
-        return {"name": "test", "base_url": self.e_url.text().strip(),
-                "model": self.cmb_model.currentText().strip(),
-                "api_key": self.e_key.text().strip(),
-                "provider": self.cmb_pid.currentText().strip() or "openai"}
-
-    def _test_now(self):
-        if self._chat_worker is not None:
-            return
-        svc = self._temp_service()
-        if not svc["base_url"] or not svc["model"]:
-            InfoBar.warning("无法测试", "先填写 接口地址 和 模型 再测试", parent=self,
-                            position=InfoBarPosition.TOP_RIGHT)
-            return
-        self.btn_test.setEnabled(False)
-        self.btn_test.setText("测试中…")
-        self._chat_worker = AIWorker(svc, "请只回复两个字母:OK", -1, self)
-
-        def on_done(_idx, ok, text):
-            self.btn_test.setEnabled(True)
-            self.btn_test.setText("⚡ 测试")
-            self._chat_worker = None
-            if ok:
-                InfoBar.success("连接成功", "模型回复:%s" % text[:60], parent=self,
-                                position=InfoBarPosition.TOP_RIGHT)
-            else:
-                InfoBar.error("连接失败", text[:200], parent=self,
-                              position=InfoBarPosition.TOP_RIGHT, duration=-1)
-
-        self._chat_worker.done.connect(on_done)
-        self._chat_worker.start()
-
-    def validate(self):
-        provider = self.cmb_provider.currentText()
-        model = self.cmb_model.currentText().strip()
-        base = self.e_url.text().strip()
-        if provider == "自定义":
-            name = self.e_name.text().strip()
-            if not name or not base or not model:
-                InfoBar.error("无法保存", "自定义供应商需填写 名称 / 接口地址 / 模型",
-                              parent=self, position=InfoBarPosition.TOP_RIGHT)
-                return False
-        else:
-            name = provider
-            if not model:
-                InfoBar.error("无法保存", "请选择或输入模型", parent=self,
-                              position=InfoBarPosition.TOP_RIGHT)
-                return False
-            if not base:
-                base = self._presets[provider]["base_url"]
-        self.result = {"name": name, "base_url": base, "model": model,
-                       "api_key": self.e_key.text().strip(),
-                       "provider": self.cmb_pid.currentText().strip() or "openai"}
-        return True
-
-
-class ProviderCard(SimpleCardWidget):
-    """AI 供应商卡片(OpenCode 风格):状态点 + 名称/模型/接口 + 编辑/测试/删除。"""
-
-    def __init__(self, page, svc):
-        super().__init__()
-        self.svc = svc
-        self.setBorderRadius(8)
-        h = QHBoxLayout(self)
-        h.setContentsMargins(16, 12, 16, 12)
-        h.setSpacing(14)
-
-        # 状态点:绿 = 已填密钥可用,灰 = 未配置(语义色,不随主题派生)
-        self.dot = QLabel()
-        self.dot.setFixedSize(8, 8)
-        self.dot.setStyleSheet(
-            "background: %s; border-radius: 4px;"
-            % ("#3fb950" if svc.get("api_key") else NAV_BG))
-        h.addWidget(self.dot, 0, Qt.AlignVCenter)
-
-        left = QVBoxLayout()
-        left.setSpacing(3)
-        name = StrongBodyLabel(str(svc.get("name") or ""))
-        name.setFont(font(14, QFont.DemiBold))
-        sub = BodyLabel("%s · %s%s" % (
-            svc.get("model"), svc.get("base_url"),
-            "" if svc.get("api_key") else " · 未配置密钥"))
-        sub.setFont(font(12))
-        # 长 base_url 必须换行:否则卡片最小宽度被撑过视口,右侧按钮被裁掉
-        sub.setWordWrap(True)
-        left.addWidget(name)
-        left.addWidget(sub)
-        h.addLayout(left, 1)
-
-        self.btn_test = PushButton("测试", self)
-        self.btn_test.setIcon(FIF.SEND.icon())
-        self.btn_edit = PushButton("编辑", self)
-        self.btn_edit.setIcon(FIF.EDIT.icon())
-        self.btn_del = PushButton("删除", self)
-        self.btn_del.setIcon(FIF.DELETE.icon())
-        for b in (self.btn_test, self.btn_edit, self.btn_del):
-            b.setFixedHeight(30)
-            b.setCursor(Qt.PointingHandCursor)
-            h.addWidget(b)
-        self.btn_test.clicked.connect(lambda: page.test_service(svc, self))
-        self.btn_edit.clicked.connect(lambda: page.edit_service(svc))
-        self.btn_del.clicked.connect(lambda: page.del_service(svc))
-
-
-class ServicesPage(QWidget):
-    """AI 供应商管理(OpenCode 风格):供应商卡片 + 预设/自定义两种添加入口。"""
-
-    def __init__(self, app):
-        super().__init__()
-        self.app = app
-        self.setObjectName("servicesPage")
-        self._test_worker = None
-        self.cards = []
-
-        v = QVBoxLayout(self)
-        v.setContentsMargins(36, 24, 36, 16)
-        v.setSpacing(10)
-
-        head = QHBoxLayout()
-        head.addWidget(TitleLabel("AI 服务"))
-        head.addStretch(1)
-        b_cfg = PushButton("打开配置文件", self)
-        b_cfg.setIcon(FIF.DOCUMENT.icon())
-        b_cfg.clicked.connect(self._open_config)
-        head.addWidget(b_cfg)
-        v.addLayout(head)
-
-        hint = CaptionLabel("工作流每一步可指定不同服务,实现多模型协作。"
-                            "「添加提供方」从常用供应商一键预填;密钥经 DPAPI 加密保存在本机。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: %s;" % TER)
-        v.addWidget(hint)
-
-        self.scroll = ScrollArea(self)
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll.setStyleSheet(
-            "QScrollArea { border: none; background: transparent; }"
-            "QScrollArea > QWidget > QWidget { background: transparent; }")
-        self.scroll.viewport().setAutoFillBackground(False)
-        content = QWidget()
-        content.setStyleSheet("background: transparent;")
-        self.cards_layout = QVBoxLayout(content)
-        self.cards_layout.setContentsMargins(2, 4, 2, 4)
-        self.cards_layout.setSpacing(10)
-        self.cards_layout.setAlignment(Qt.AlignTop)
-        self.scroll.setWidget(content)
-        v.addWidget(self.scroll, 1)
-
-        self._empty_hint = CaptionLabel(
-            "还没有 AI 服务。点下方「添加提供方」选择常用供应商,或添加自定义 OpenAI 兼容接口。")
-        self._empty_hint.setAlignment(Qt.AlignCenter)
-        self._empty_hint.setStyleSheet("color: %s;" % TER)
-        self.cards_layout.addWidget(self._empty_hint)
-
-        # 底部双入口(OpenCode 同款):预设清单 / 自定义表单
-        addrow = QHBoxLayout()
-        addrow.setSpacing(12)
-        self.b_add_preset = PushButton("添加提供方", self)
-        self.b_add_preset.setIcon(FIF.ADD.icon())
-        self.b_add_preset.setCursor(Qt.PointingHandCursor)
-        self.b_add_preset.clicked.connect(self._add_preset)
-        self.b_add_custom = PushButton("添加自定义提供方", self)
-        self.b_add_custom.setIcon(FIF.ADD.icon())
-        self.b_add_custom.setCursor(Qt.PointingHandCursor)
-        self.b_add_custom.clicked.connect(lambda: self._edit(None))
-        for b in (self.b_add_preset, self.b_add_custom):
-            b.setFixedHeight(34)
-            addrow.addWidget(b, 1)
-        v.addLayout(addrow)
-
-        self.refresh()
-
-    def refresh(self):
-        for c in self.cards:
-            self.cards_layout.removeWidget(c)
-            c.deleteLater()
-        self.cards = []
-        svcs = self.app.cfg.get("ai_services") or []
-        self._empty_hint.setVisible(not svcs)
-        for s in svcs:
-            c = ProviderCard(self, s)
-            self.cards_layout.addWidget(c)
-            self.cards.append(c)
-
-    # ---- 添加 ----
-    def _add_preset(self):
-        """从常用供应商预设清单选择并预填(密钥留空,保存前填写)。"""
-        menu = RoundMenu(parent=self)
-        for p in cm.AI_PRESET_SERVICES:
-            # RoundMenu.addAction 只收 QAction(传 str 会在渲染时崩溃)
-            a = QAction("%s · %s" % (p["name"], p["model"]), menu)
-            a.triggered.connect(lambda _=False, p=p: self._add_from_preset(p))
-            menu.addAction(a)
-        menu.exec(self.b_add_preset.mapToGlobal(
-            QPoint(0, self.b_add_preset.height())))
-
-    def _add_from_preset(self, preset):
-        svcs = self.app.cfg.setdefault("ai_services", [])
-        if any(x.get("name") == preset["name"] for x in svcs):
-            InfoBar.error("已存在", "服务「%s」已在列表中,可直接编辑填写密钥" % preset["name"],
-                          parent=self, position=InfoBarPosition.TOP_RIGHT)
-            return
-        self._edit(None, preset=preset)
-
-    def _open_config(self):
-        try:
-            os.startfile(cm.CONFIG_FILE)
-        except Exception:
-            InfoBar.error("打开失败", "配置文件不存在或无法打开:\n%s" % cm.CONFIG_FILE,
-                          parent=self, position=InfoBarPosition.TOP_RIGHT)
-
-    # ---- 编辑 / 删除 / 测试 ----
-    def edit_service(self, svc):
-        self._edit(svc)
-
-    def del_service(self, svc):
-        if not MessageBox("删除服务", "确定删除服务「%s」?" % svc.get("name"), self).exec():
-            return
-        try:
-            self.app.cfg.get("ai_services", []).remove(svc)
-        except ValueError:
-            pass
-        self._save()
-
-    def test_service(self, svc, card):
-        if self._test_worker is not None:
-            return
-
-        def set_test_btn(text, enabled):
-            try:                    # 测试期间卡片可能已被刷新销毁
-                card.btn_test.setText(text)
-                card.btn_test.setEnabled(enabled)
-            except RuntimeError:
-                pass
-
-        set_test_btn("测试中…", False)
-        self._test_worker = AIWorker(svc, "请只回复两个字母:OK", -1, self)
-
-        def on_done(_idx, ok, text):
-            set_test_btn("测试", True)
-            self._test_worker = None
-            if ok:
-                InfoBar.success("连接成功", "「%s」回复:%s" % (svc.get("name"), text[:60]),
-                                parent=self, position=InfoBarPosition.TOP_RIGHT)
-            else:
-                InfoBar.error("连接失败", text[:200], parent=self,
-                              position=InfoBarPosition.TOP_RIGHT, duration=-1)
-
-        self._test_worker.done.connect(on_done)
-        self._test_worker.start()
-
-    def _save(self):
-        cm.save_config(self.app.cfg)
-        self.refresh()
-
-    def _edit(self, svc, preset=None):
-        dlg = ServiceEditorDialog(self, svc, preset)
-        if not dlg.exec():
-            return
-        r = dlg.result
-        svcs = self.app.cfg.setdefault("ai_services", [])
-        same = [x for x in svcs if x.get("name") == r["name"] and x is not svc]
-        if same:
-            InfoBar.error("名称重复", "已存在同名服务:%s" % r["name"], parent=self,
-                          position=InfoBarPosition.TOP_RIGHT)
-            return
-        if svc is not None:
-            old_name = svc.get("name")
-            svc.clear()
-            svc.update(r)
-            if old_name != r["name"]:   # 服务改名 → 同步工作流引用
-                for wf in self.app.cfg.get("ai_workflows") or []:
-                    for st in wf.get("steps") or []:
-                        if st.get("service") == old_name:
-                            st["service"] = r["name"]
-        else:
-            svcs.append(r)
-        self._save()
-
-
-class WorkflowEditorWindow(QWidget):
-    """工作流新建/编辑:步骤 = 服务 + 提示词模板({input} 占位)。"""
-
-    def __init__(self, app, wf=None, on_saved=None):
-        super().__init__(None)
-        self.app = app
-        self.wf = wf if wf is not None else None
-        self.on_saved = on_saved
-        self.setWindowTitle("编辑工作流" if wf else "新建工作流")
-        self.setWindowIcon(app.icon)
-        self.setWindowFlags(Qt.Window)
-        self.setStyleSheet("QWidget { background: %s; }" % BG)
-        self.resize(640, 580)
-        self._rows = []
-
-        v = QVBoxLayout(self)
-        v.setContentsMargins(36, 24, 36, 16)
-        v.setSpacing(10)
-
-        h = QHBoxLayout()
-        lab = BodyLabel("名称")
-        lab.setStyleSheet("color: %s;" % SEC)
-        self.e_name = LineEdit()
-        self.e_name.setPlaceholderText("如:翻译(G)→润色(D)")
-        if wf:
-            self.e_name.setText(wf.get("name", ""))
-        h.addWidget(lab)
-        h.addWidget(self.e_name, 1)
-        v.addLayout(h)
-
-        hint = CaptionLabel("步骤类型:本地 AI(API 调用)、网页 AI(提示词进剪贴板,可选自动打开网页)、"
-                            "人工确认(粘贴/编辑后继续)、复制到剪贴板、文本变换(本地白名单操作)、"
-                            "条件判断(命中正则继续,未命中停链)。提示词占位符:{input}/{previous} = "
-                            "上一步产出(首步=原始输入),{origin} = 原始输入。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: %s;" % TER)
-        v.addWidget(hint)
-
-        self.scroll = ScrollArea(self)
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        content = QWidget()
-        content.setStyleSheet("background: transparent;")
-        self.steps_box = QVBoxLayout(content)
-        self.steps_box.setContentsMargins(0, 0, 0, 0)
-        self.steps_box.setSpacing(10)
-        self.steps_box.setAlignment(Qt.AlignTop)
-        self.scroll.setWidget(content)
-        v.addWidget(self.scroll, 1)
-
-        b_add = PushButton("添加步骤", self)
-        b_add.setIcon(FIF.ADD.icon())
-        b_add.clicked.connect(lambda: self._add_row(None))
-        v.addWidget(b_add, 0, Qt.AlignLeft)
-
-        foot = QHBoxLayout()
-        b_save = PrimaryPushButton("保存", self)
-        b_save.setIcon(FIF.SAVE.icon())
-        b_cancel = PushButton("取消", self)
-        b_cancel.clicked.connect(self.close)
-        b_save.clicked.connect(self._save)
-        foot.addStretch(1)
-        foot.addWidget(b_cancel)
-        foot.addWidget(b_save)
-        v.addLayout(foot)
-
-        steps = (wf.get("steps") if wf else None) or [{}]
-        for st in steps:
-            self._add_row(st)
-
-    def showEvent(self, e):
-        super().showEvent(e)
-        ensure_onscreen(self)
-
-    # 种类下拉来自 Step Contract 注册表((label, kind) 序,索引约定沿用)
-    _KINDS = tuple((label, kind) for kind, label in wfs.EDITOR_KINDS)
-
-    def _add_row(self, step):
-        step = step or {}
-        kind = wfs.KIND_ALIASES.get(str(step.get("kind", "ai")).lower(),
-                                     step.get("kind", "ai"))
-        if kind not in (k for _, k in self._KINDS):
-            kind = "ai"
-        frame = QFrame()
-        frame.setObjectName("stepCard")
-        frame.setStyleSheet("QFrame#stepCard { background: %s; border-radius: 12px;"
-                            " border: 1px solid %s; }" % (CARD_BG, CARD_BORDER))
-        col = QVBoxLayout(frame)
-        col.setContentsMargins(12, 10, 12, 10)
-        col.setSpacing(8)
-
-        top = QHBoxLayout()
-        nlab = CaptionLabel("第 %d 步" % (len(self._rows) + 1))
-        nlab.setStyleSheet("color: %s; font-weight: 600;" % SEC)
-        kind_combo = ComboBox()
-        kind_combo.addItems([k[0] for k in self._KINDS])
-        kind_combo.setCurrentIndex([i for i, k in enumerate(self._KINDS) if k[1] == kind][0])
-        kind_combo.setMinimumWidth(100)
-
-        names = [s.get("name", "?") for s in self.app.cfg.get("ai_services") or []]
-        combo = ComboBox()
-        combo.addItems(names)
-        cur = step.get("service")
-        if cur in names:
-            combo.setCurrentText(cur)
-        combo.setMinimumWidth(130)
-
-        url_edit = LineEdit()
-        url_edit.setText(str(step.get("url") or ""))
-        url_edit.setPlaceholderText("https://chatgpt.com/?q={prompt}(留空=仅复制提示词)")
-
-        b_del = TransparentToolButton(FIF.DELETE, frame)
-        b_del.setFixedSize(28, 28)
-        b_del.setToolTip("移除此步骤")
-        top.addWidget(nlab)
-        top.addSpacing(6)
-        top.addWidget(kind_combo)
-        top.addWidget(combo)
-        top.addWidget(url_edit, 1)
-        top.addWidget(b_del)
-        col.addLayout(top)
-
-        # 变换/条件步骤的参数行(其余类型隐藏)
-        params = QHBoxLayout()
-        op_combo = ComboBox()
-        op_combo.addItems([wfs.TransformStep.OP_LABELS[o]
-                           for o in wfs.TransformStep.OPS])
-        op0 = step.get("op") or "trim"
-        if op0 in wfs.TransformStep.OPS:
-            op_combo.setCurrentText(wfs.TransformStep.OP_LABELS[op0])
-        op_combo.setMinimumWidth(110)
-        arg1 = LineEdit()
-        arg1.setText(str(step.get("arg1") or step.get("pattern") or ""))
-        arg2 = LineEdit()
-        arg2.setText(str(step.get("arg2") or ""))
-        params.addWidget(op_combo)
-        params.addWidget(arg1, 1)
-        params.addWidget(arg2, 1)
-        col.addLayout(params)
-
-        prompt = TextEdit()
-        prompt.setPlaceholderText("提示词 / 给操作者的说明:{input}/{previous} 为上一步产出(首步=原始输入),{origin} 为原始输入")
-        prompt.setPlainText(step.get("prompt", ""))
-        prompt.setFont(font(12))
-        prompt.setFixedHeight(84)
-        col.addWidget(prompt)
-
-        row_ref = {"frame": frame, "kind": kind_combo, "combo": combo,
-                   "url": url_edit, "prompt": prompt, "nlab": nlab,
-                   "op": op_combo, "arg1": arg1, "arg2": arg2}
-
-        def sync_kind():
-            k = self._KINDS[kind_combo.currentIndex()][1]
-            combo.setVisible(k == "ai")
-            url_edit.setVisible(k == "web")
-            op_combo.setVisible(k == "transform")
-            arg1.setVisible(k in ("transform", "if"))
-            arg2.setVisible(k == "transform")
-            prompt.setVisible(k != "clipboard")
-            if k == "transform":
-                arg1.setPlaceholderText("查找内容(替换的原文 / 正则模式)")
-                arg2.setPlaceholderText("替换为 / 加后缀内容")
-            elif k == "if":
-                arg1.setPlaceholderText("正则:当前内容命中则继续,未命中则停止自动串联")
-            prompt.setPlaceholderText(
-                "给操作者的说明(可选),显示在等待面板" if k == "human"
-                else "提示词,{input}/{previous} 为上一步产出,{origin} 为原始输入")
-        kind_combo.currentIndexChanged.connect(sync_kind)
-        sync_kind()
-        b_del.clicked.connect(lambda _=False, r=row_ref: self._del_row(r))
-        self._rows.append(row_ref)
-        self.steps_box.addWidget(frame)
-        self._renumber()
-
-    def _del_row(self, r):
-        if len(self._rows) <= 1:
-            InfoBar.warning("至少一步", "工作流至少保留一个步骤", parent=self,
-                            position=InfoBarPosition.TOP_RIGHT)
-            return
-        self._rows.remove(r)
-        self.steps_box.removeWidget(r["frame"])
-        r["frame"].deleteLater()
-        self._renumber()
-
-    def _renumber(self):
-        for i, r in enumerate(self._rows):
-            r["nlab"].setText("第 %d 步" % (i + 1))
-
-    def _save(self):
-        name = self.e_name.text().strip()
-        if not name:
-            InfoBar.error("无法保存", "请填写工作流名称", parent=self,
-                          position=InfoBarPosition.TOP_RIGHT)
-            return
-        steps = []
-        for r in self._rows:
-            k = self._KINDS[r["kind"].currentIndex()][1]
-            prompt = r["prompt"].toPlainText()
-            if k == "ai":
-                svc = r["combo"].currentText().strip()
-                if not svc:
-                    InfoBar.error("无法保存", "本地 AI 步骤需要先在「AI 服务」中添加服务",
-                                  parent=self, position=InfoBarPosition.TOP_RIGHT)
-                    return
-                steps.append({"kind": "ai", "service": svc, "prompt": prompt})
-            elif k == "web":
-                steps.append({"kind": "web", "prompt": prompt,
-                              "url": r["url"].text().strip()})
-            elif k == "human":
-                steps.append({"kind": "human", "prompt": prompt})
-            elif k == "clipboard":
-                steps.append({"kind": "clipboard"})
-            elif k == "transform":
-                steps.append(wfs.TransformStep(
-                    wfs.TransformStep.OPS[r["op"].currentIndex()],
-                    r["arg1"].text(), r["arg2"].text()).to_dict())
-            else:                                              # if
-                steps.append({"kind": "if", "pattern": r["arg1"].text().strip()})
-        wflist = self.app.cfg.setdefault("ai_workflows", [])
-        if self.wf is not None:
-            self.wf.clear()
-            self.wf.update({"name": name, "steps": steps})
-        else:
-            if any(w.get("name") == name for w in wflist):
-                InfoBar.error("名称重复", "已存在同名工作流:%s" % name, parent=self,
-                              position=InfoBarPosition.TOP_RIGHT)
-                return
-            wflist.append({"name": name, "steps": steps})
-        cm.save_config(self.app.cfg)
-        if self.on_saved:
-            self.on_saved()
-        self.close()
-        self.deleteLater()
-
-
-class WorkflowPage(QWidget):
-    """工作流管理(常驻单例):列表 + 新建/编辑/删除 + 填入示例 + 打开服务管理。"""
-
-    def __init__(self, app):
-        super().__init__()
-        self.app = app
-        self.setObjectName("workflowPage")
-
-        v = QVBoxLayout(self)
-        v.setContentsMargins(36, 24, 36, 16)
-        v.setSpacing(10)
-        ttl = TitleLabel("工作流")
-        v.addWidget(ttl)
-        hint = CaptionLabel("右键剪贴板页的文本条目 → 「工作流」即可运行。步骤可以是网页 AI(提示词进剪贴板、"
-                            "你去网页粘贴)、人工确认(把关/编辑)或本地 API,自由组合、逐步推进。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: %s;" % TER)
-        v.addWidget(hint)
-
-        self.lst = QListWidget()
-        self.lst.setFont(font(13))
-        self.lst.setStyleSheet(
-            "QListWidget { background: %s; border-radius: 12px;"
-            " border: 1px solid %s; outline: none; padding: 4px; }"
-            "QListWidget::item { color: %s; border-radius: 8px; padding: 9px 12px; }"
-            "QListWidget::item:hover { background: %s; }"
-            "QListWidget::item:selected { background: %s; color: %s; }"
-            % (FIELD_BG, FIELD_BORDER, TEXT, BADGE_BG, ACCENT_SOFT, ACCENT))
-        v.addWidget(self.lst, 1)
-
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        b_new = PushButton("新建", self)
-        b_new.setIcon(FIF.ADD.icon())
-        b_edit = PushButton("编辑", self)
-        b_edit.setIcon(FIF.EDIT.icon())
-        b_del = PushButton("删除", self)
-        b_del.setIcon(FIF.DELETE.icon())
-        b_seed = PushButton("填入示例模板", self)
-        b_seed.setIcon(FIF.LIBRARY.icon())
-        b_hist = PushButton("运行记录", self)
-        b_hist.setIcon(FIF.HISTORY.icon())
-        b_svc = PushButton("AI 服务…", self)
-        b_svc.setIcon(FIF.CLOUD.icon())
-        b_new.clicked.connect(self._new)
-        b_edit.clicked.connect(self._edit_current)
-        b_del.clicked.connect(self._del_current)
-        b_seed.clicked.connect(self._seed)
-        b_hist.clicked.connect(self._open_runs)
-        b_svc.clicked.connect(self.app.show_services)
-        for b in (b_new, b_edit, b_del, b_seed, b_hist, b_svc):
-            row.addWidget(b)
-        row.addStretch(1)
-        v.addLayout(row)
-        self._editors = []
-        self._runs_dlg = None
-        self.refresh()
-
-    def _open_runs(self):
-        """运行记录(Run Inspector):每步大小/耗时/状态 + 运行历史。"""
-        if self._runs_dlg is None:
-            self._runs_dlg = WorkflowRunInspector(self.app)
-        self._runs_dlg._reload()
-        self._runs_dlg.show()
-        self._runs_dlg.raise_()
-        self._runs_dlg.activateWindow()
-
-
-    def refresh(self):
-        self.lst.clear()
-        for wf in self.app.cfg.get("ai_workflows") or []:
-            parts = []
-            for st in wf.get("steps") or []:
-                k = st.get("kind", "ai")
-                parts.append("网页" if k == "web" else "人工" if k == "human"
-                             else (st.get("service") or "AI"))
-            self.lst.addItem("%s\n%d 步:%s" % (wf.get("name", "未命名"),
-                                               len(wf.get("steps") or []),
-                                               " → ".join(parts)))
-
-    def _current(self):
-        item = self.lst.currentItem()
-        if not item:
-            return None
-        i = self.lst.row(item)
-        wfs = self.app.cfg.get("ai_workflows") or []
-        return wfs[i] if 0 <= i < len(wfs) else None
-
-    def _new(self):
-        ed = WorkflowEditorWindow(self.app, None, self.refresh)
-        ed.show()
-        ed.raise_()
-        self._editors.append(ed)
-
-    def _edit_current(self):
-        wf = self._current()
-        if wf is not None:
-            ed = WorkflowEditorWindow(self.app, wf, self.refresh)
-            ed.show()
-            ed.raise_()
-            self._editors.append(ed)
-
-    def _del_current(self):
-        wf = self._current()
-        if wf is None:
-            return
-        if not MessageBox("删除工作流", "确定删除「%s」?" % wf.get("name"), self).exec():
-            return
-        try:
-            self.app.cfg.get("ai_workflows", []).remove(wf)
-        except ValueError:
-            pass
-        cm.save_config(self.app.cfg)
-        self.refresh()
-
-    def _seed(self):
-        cfg = self.app.cfg
-        svcs = cfg.setdefault("ai_services", [])
-        have_svc = {s.get("name") for s in svcs}
-        for s in cm.AI_SEED_SERVICES:
-            if s["name"] not in have_svc:
-                svcs.append(dict(s))
-        wfs = cfg.setdefault("ai_workflows", [])
-        have_wf = {w.get("name") for w in wfs}
-        added = 0
-        for wf in cm.AI_SEED_WORKFLOWS:
-            if wf["name"] not in have_wf:
-                wfs.append(json.loads(json.dumps(wf, ensure_ascii=False)))
-                added += 1
-        cm.save_config(cfg)
-        self.refresh()
-        InfoBar.success("示例已加入", "新增 %d 个工作流模板;请到「AI 服务」填入密钥后使用" % added,
-                        parent=self, position=InfoBarPosition.TOP_RIGHT)
-
-
-class WorkflowRunner(QWidget):
-    """工作流运行台:步骤经 workflow_steps 契约分发(ai/web/human/
-    clipboard/transform/if,见 STEP_REGISTRY)。
-
-    web:提示词进剪贴板(可自动打开网页),等人粘贴回答;
-    human:等待面板人工确认/编辑;ai:本地 API 自动调用;
-    clipboard:快照当前内容;transform:本地文本变换;if:条件闸。
-    所有步骤的产出都可编辑后再继续(人在回路)。
-    """
-
-    def __init__(self, app, wf, content):
-        super().__init__(None)
-        self.app = app
-        self.wf = wf
-        self.steps = wf.get("steps") or []
-        self.step_idx = 0
-        self._origin = content          # 工作流原始输入({origin})
-        self.cur = content                 # 链上当前内容(可能是人工编辑后的)
-        self.results = []                  # 每步产出的文本
-        self._worker = None
-        self._waiting = None               # 等待输入面板(卡部件)
-        self._wait_body = None
-        self._wait_confirm = None
-        self._dead = False
-        self._auto = False
-        self._ctx = None                   # WorkflowContext(惰性,宿主回调注入)
-        self._cur_step = None              # 当前步骤实例(取消用)
-        # 运行记录(Run Inspector):只记大小/耗时/状态,正文不落盘;
-        # 关闭窗口或跑完全程时收尾保存(见 _maybe_finish_runlog/closeEvent)
-        self._runlog = wrl.RunRecorder(wf.get("name", ""), content,
-                                       len(self.steps))
-        self._runlog_saved = False
-
-        self.setWindowTitle("工作流 — " + wf.get("name", ""))
-        self.setWindowIcon(app.icon)
-        self.setWindowFlags(Qt.Window)
-        self.setStyleSheet("QWidget { background: %s; }" % BG)
-        self.resize(600, 540)
-
-        v = QVBoxLayout(self)
-        v.setContentsMargins(36, 24, 36, 16)
-        v.setSpacing(10)
-
-        head = QHBoxLayout()
-        icon = QLabel("🧩")
-        icon.setFont(font(16))
-        ttl = StrongBodyLabel(wf.get("name", "未命名"))
-        ttl.setFont(font(15, QFont.DemiBold))
-        ttl.setStyleSheet("color: %s;" % TEXT)
-        self.chip = CaptionLabel("")
-        self.chip.setStyleSheet(
-            "QLabel { background: %s; color: %s; border-radius: 8px; padding: 3px 8px; }"
-            % (ACCENT_SOFT, ACCENT))
-        head.addWidget(icon)
-        head.addSpacing(6)
-        head.addWidget(ttl)
-        head.addStretch(1)
-        head.addWidget(self.chip)
-        v.addLayout(head)
-
-        hint = CaptionLabel("「{input}」= 输入内容/上一步输出;网页步骤会把提示词放进剪贴板,"
-                            "网页回答粘贴回来即可;每步都可编辑后再继续。")
-        hint.setStyleSheet("color: %s;" % TER)
-        v.addWidget(hint)
-
-        self.scroll = ScrollArea(self)
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        content_w = QWidget()
-        content_w.setStyleSheet("background: transparent;")
-        self.flow = QVBoxLayout(content_w)
-        self.flow.setContentsMargins(2, 2, 6, 2)
-        self.flow.setSpacing(10)
-        self.flow.setAlignment(Qt.AlignTop)
-        self.scroll.setWidget(content_w)
-        v.addWidget(self.scroll, 1)
-
-        self.lbl_status = CaptionLabel("就绪")
-        self.lbl_status.setStyleSheet("color: %s;" % SEC)
-        v.addWidget(self.lbl_status)
-
-        foot = QHBoxLayout()
-        foot.setSpacing(8)
-        self.btn_next = PrimaryPushButton(self)
-        self.btn_next.clicked.connect(self._on_next)
-        self.btn_auto = PushButton("自动跑完", self)
-        self.btn_auto.clicked.connect(self._on_auto)
-        self.btn_copy = PushButton("复制最新结果", self)
-        self.btn_copy.setIcon(FIF.COPY.icon())
-        self.btn_copy.clicked.connect(self._copy_latest)
-        b_close = PushButton("关闭", self)
-        b_close.clicked.connect(self.close)
-        foot.addWidget(self.btn_next)
-        foot.addWidget(self.btn_auto)
-        foot.addWidget(self.btn_copy)
-        foot.addStretch(1)
-        foot.addWidget(b_close)
-        v.addLayout(foot)
-
-        self._add_block("输入 · 原始内容", content, kind="input")
-        self._update_ui()
-
-    def showEvent(self, e):
-        super().showEvent(e)
-        ensure_onscreen(self)
-
-    # ---- 步骤块 ----
-    @staticmethod
-    def _step_label(step):
-        return wfs.describe(step)
-
-    def _add_block(self, title, text, kind="result", idx=None):
-        card = QFrame()
-        card.setObjectName("aiCard")
-        card.setStyleSheet("QFrame#aiCard { background: %s; border-radius: 12px;"
-                           " border: 1px solid %s; }" % (CARD_BG, CARD_BORDER))
-        col = QVBoxLayout(card)
-        col.setContentsMargins(14, 10, 14, 12)
-        col.setSpacing(8)
-
-        head = QHBoxLayout()
-        dot = QLabel()
-        dot.setFixedSize(8, 8)
-        dot.setStyleSheet("background: %s; border-radius: 4px;"
-                          % (ACCENT if kind != "info" else BADGE_BG))
-        lab = CaptionLabel(title)
-        lab.setStyleSheet("color: %s; font-weight: 600;" % SEC)
-        head.addWidget(dot)
-        head.addSpacing(4)
-        head.addWidget(lab)
-        head.addStretch(1)
-        col.addLayout(head)
-
-        body = TextEdit()
-        body.setReadOnly(True)
-        body.setPlainText(text)
-        body.setFont(font(12))
-        body.setFixedHeight(max(56, 19 * min(text.count("\n") + 1, 12) + 14))
-        col.addWidget(body)
-
-        if kind in ("result", "info"):
-            state = {"text": text}
-            row = QHBoxLayout()
-            row.setSpacing(6)
-            b_copy = PushButton("复制", card)
-            b_copy.setIcon(FIF.COPY.icon())
-            b_copy.clicked.connect(lambda: self._copy_text(state["text"]))
-            row.addWidget(b_copy)
-            if kind == "result":
-                b_edit = PushButton("编辑", card)
-                b_edit.setIcon(FIF.EDIT.icon())
-                b_save = PrimaryPushButton("保存修改", card)
-                b_save.setVisible(False)
-                row.addWidget(b_edit)
-                row.addWidget(b_save)
-
-                def do_edit():
-                    body.setReadOnly(False)
-                    body.setMinimumHeight(max(120, body.height()))
-                    b_edit.setVisible(False)
-                    b_save.setVisible(True)
-                    body.setFocus()
-
-                def do_save():
-                    body.setReadOnly(True)
-                    b_edit.setVisible(True)
-                    b_save.setVisible(False)
-                    state["text"] = body.toPlainText()
-                    if idx is not None and 0 <= idx < len(self.results):
-                        self.results[idx] = state["text"]
-                        if idx == len(self.results) - 1:   # 只有最新结果能改写链上输入
-                            self.cur = state["text"]
-                            self._status("已保存修改,下一步将使用编辑后的内容")
-
-                b_edit.clicked.connect(do_edit)
-                b_save.clicked.connect(do_save)
-            row.addStretch(1)
-            col.addLayout(row)
-
-        self.flow.addWidget(card)
-        sb = self.scroll.verticalScrollBar()
-        QTimer.singleShot(0, lambda: sb.setValue(sb.maximum()))
-
-    def _show_wait_panel(self, idx, hint, prefill=""):
-        """人工/网页步骤的等待面板:粘贴/编辑 → 确认后进入链。"""
-        self._auto = False                  # 人工介入即停止自动串联
-        card = QFrame()
-        card.setObjectName("waitCard")
-        card.setStyleSheet("QFrame#waitCard { background: %s; border-radius: 12px;"
-                           " border: 1.5px dashed %s; }" % (CARD_BG, ACCENT))
-        col = QVBoxLayout(card)
-        col.setContentsMargins(14, 10, 14, 12)
-        col.setSpacing(8)
-
-        lab = CaptionLabel("✍️ 步骤 %d · 等待输入" % (idx + 1))
-        lab.setStyleSheet("color: %s; font-weight: 600;" % SEC)
-        col.addWidget(lab)
-        hintlab = CaptionLabel(hint)
-        hintlab.setWordWrap(True)
-        hintlab.setStyleSheet("color: %s;" % TER)
-        col.addWidget(hintlab)
-
-        body = TextEdit()
-        body.setPlainText(prefill)
-        body.setFont(font(12))
-        body.setFixedHeight(150)
-        col.addWidget(body)
-
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        b_paste = PushButton("📋 从剪贴板粘贴", card)
-        b_paste.setIcon(FIF.PASTE.icon())
-        b_ok = PrimaryPushButton("✓ 确认,继续", card)
-        row.addWidget(b_paste)
-        row.addWidget(b_ok)
-        row.addStretch(1)
-        col.addLayout(row)
-
-        def do_paste():
-            body.setPlainText(QApplication.clipboard().text())
-
-        def confirm():
-            text = body.toPlainText().strip()
-            if not text:
-                InfoBar.warning("内容为空", "请粘贴或输入内容后再继续", parent=self,
-                                position=InfoBarPosition.TOP_RIGHT)
-                return
-            body.setReadOnly(True)
-            b_paste.setVisible(False)
-            b_ok.setVisible(False)
-            lab.setText("✓ 步骤 %d · 完成" % (idx + 1))
-            card.setObjectName("aiCard")
-            card.setStyleSheet("QFrame#aiCard { background: %s; border-radius: 12px;"
-                               " border: 1px solid %s; }" % (CARD_BG, CARD_BORDER))
-            self.results.append(text)
-            self.cur = text
-            self.step_idx += 1
-            self._runlog.step_ok(idx, text)
-            self._waiting = None
-            self._wait_body = None
-            self._wait_confirm = None
-            if self.step_idx >= len(self.steps):
-                self._set_busy(False, "全部 %d 步完成,结果可复制" % len(self.steps))
-                InfoBar.success("工作流完成", "共 %d 步,最新结果已可复制" % len(self.steps),
-                                parent=self, position=InfoBarPosition.TOP_RIGHT)
-                self._maybe_finish_runlog()
-            else:
-                self._set_busy(False, "步骤 %d 完成;可继续下一步" % idx)
-
-        b_paste.clicked.connect(do_paste)
-        b_ok.clicked.connect(confirm)
-        self.flow.addWidget(card)
-        sb = self.scroll.verticalScrollBar()
-        QTimer.singleShot(0, lambda: sb.setValue(sb.maximum()))
-        self._waiting = card
-        self._wait_body = body
-        self._wait_confirm = confirm
-        self._set_busy(True, "等待人工输入(步骤 %d):网页端操作完成后回来粘贴/确认" % (idx + 1))
-        body.setFocus()
-
-    # ---- 状态 / 按钮 ----
-    def _status(self, msg):
-        self.lbl_status.setText(msg)
-
-    def _update_ui(self):
-        n, i = len(self.steps), self.step_idx
-        done = i >= n
-        self.chip.setText("已完成 %d 步" % n if done else "步骤 %d / %d" % (i + 1, n))
-        if done:
-            self.btn_next.setText("✔ 已完成")
-            self.btn_next.setEnabled(False)
-        else:
-            self.btn_next.setText("▶ 执行第 %d 步 · %s"
-                                  % (i + 1, self._step_label(self.steps[i])))
-            self.btn_next.setEnabled(True)
-        self.btn_auto.setEnabled(not done and self._worker is None and self._waiting is None)
-        self.btn_copy.setEnabled(bool(self.results))
-
-    def _set_busy(self, on, msg=None):
-        self._status(msg or "")
-        if on:
-            if self._waiting is not None:
-                self.btn_next.setText("等待输入…")
-            elif self._auto:
-                self.btn_next.setText("停止自动")
-                self.btn_next.setEnabled(True)
-            else:
-                self.btn_next.setText("运行中…")
-            self.btn_next.setEnabled(self._waiting is None)
-        else:
-            self._update_ui()
-        self.btn_auto.setEnabled(not on and self.step_idx < len(self.steps)
-                                 and self._waiting is None)
-        self.btn_copy.setEnabled(bool(self.results))
-
-    # ---- 运行 ----
-    def _on_next(self):
-        if self._worker is not None or self._waiting is not None:
-            if self._worker is not None and self._auto:      # 充当「停止自动」
-                self._auto = False
-                if self._cur_step is not None:
-                    self._cur_step.cancel()   # 契约取消:迟到结果作废
-                self._set_busy(False, "已停止:当前步骤结果将被丢弃")
-            return
-        self._run_step()
-
-    def _on_auto(self):
-        self._auto = True
-        self._run_step()
-
-    # ---- Step Contract 宿主侧:上下文与回调 ----
-    def _ensure_ctx(self):
-        if self._ctx is not None:
-            return
-        self._ctx = wfs.WorkflowContext(
-            input_text=self._origin,
-            find_service=lambda name: cm.ai_service_by_name(self.app.cfg, name),
-            privacy_gate=self._privacy_gate,
-            start_ai=self._start_ai,
-            copy_text=self.app.core.copy_text,
-            open_url=self._open_url)
-
-    def _open_url(self, url):
-        try:
-            import webbrowser
-            webbrowser.open(url)
-            return True
-        except Exception:
-            return False
-
-    def _start_ai(self, svc, prompt, on_done):
-        """起 AIWorker 线程;返回句柄(cancel 为尽力而为:HTTP 不可中断,
-        迟到结果由 Job.cancelled 丢弃)。"""
-        w = AIWorker(svc, prompt, self.step_idx)
-        w.done.connect(lambda _i, ok, text: on_done(ok, text))
-        w.finished.connect(self._worker_finished)
-        self._worker = w
-        w.start()
-        return w
-
-    def _run_step(self):
-        if self._worker is not None or self._waiting is not None \
-                or self.step_idx >= len(self.steps):
-            return
-        idx = self.step_idx
-        self._ensure_ctx()
-        self._ctx.index = idx
-        self._ctx.previous = self.cur
-        step = wfs.deserialize(self.steps[idx])
-        self._cur_step = step
-        self._runlog.step_start(idx, step.kind, step.describe(), self.cur)
-
-        err = step.validate(self._ctx)          # 契约:运行前检查
-        if err is not None:
-            self._auto = False
-            self._runlog.step_error(idx, "配置无效: " + err)
-            InfoBar.error("无法运行", err, parent=self,
-                          position=InfoBarPosition.TOP_RIGHT, duration=-1)
-            self._set_busy(False, "步骤 %d 配置无效,已停止" % (idx + 1))
-            return
-
-        res = step.execute(self._ctx)           # 契约:执行
-        if isinstance(res, wfs.Cancelled):
-            self._auto = False
-            self._runlog.step_cancelled(idx, res.reason)
-            self._set_busy(False, "步骤 %d 已取消(%s)" % (idx + 1, res.reason))
-            return
-        if isinstance(res, wfs.Wait):
-            if res.note is not None:
-                self._add_block("步骤 %d · %s" % (idx + 1, res.note[0]),
-                                res.note[1], "info")
-            self._show_wait_panel(idx, res.hint, res.prefill)
-            return
-        if isinstance(res, wfs.Job):
-            self._set_busy(True, "步骤 %d 正在执行(%s)…" % (idx + 1, step.describe()))
-            res.start(lambda ok, text, _i=idx: self._on_done(_i, ok, text))
-            return
-        if isinstance(res, wfs.Done):           # 同步步骤(clipboard/transform/if)
-            if res.note is not None:
-                self._add_block("步骤 %d · %s" % (idx + 1, res.note[0]),
-                                res.note[1], "info")
-            self._step_complete(idx, res.text, halt=res.halt)
-            if self._auto and self.step_idx < len(self.steps):
-                self._run_step()                # 自动模式:同步步骤直接链推
-
-    def _step_complete(self, idx, text, halt=False):
-        """一步成功收尾:记录产出、推进游标、刷新界面(halt=条件停链)。"""
-        self.results.append(text)
-        self.cur = text
-        self.step_idx = idx + 1
-        self._runlog.step_ok(idx, text, halt=halt)
-        self._add_block("步骤 %d · %s" % (idx + 1, self._step_label(self.steps[idx])),
-                        text, "result", idx)
-        if self.step_idx >= len(self.steps):
-            self._set_busy(False, "全部 %d 步完成,结果可复制" % len(self.steps))
-            InfoBar.success("工作流完成", "共 %d 步,最新结果已可复制" % len(self.steps),
-                            parent=self, position=InfoBarPosition.TOP_RIGHT)
-            self._maybe_finish_runlog()
-        elif halt:
-            self._auto = False
-            self._set_busy(False, "步骤 %d 条件不满足,自动串联已停(可手动继续)" % (idx + 1))
-        elif not self._auto:
-            self._set_busy(False, "步骤 %d 完成;可编辑结果或直接继续" % idx)
-
-    def _maybe_finish_runlog(self):
-        """全部步骤走完:收尾运行记录并落盘(只记大小/耗时/状态)。"""
-        if self._runlog_saved:
-            return
-        self._runlog_saved = True
-        try:
-            wrl.save_run(self._runlog.finish())
-        except Exception:
-            cm.log("运行记录保存失败:\n%s" % traceback.format_exc())
-
-    def _privacy_gate(self, prompt, svc):
-        """AI 发送前隐私门:命中敏感内容弹三选一(遮盖/原样/取消);
-        无命中原样放行。返回最终提示词,取消返回 None。"""
-        hits, masked = cm.privacy_scan(prompt)
-        if not hits:
-            return prompt
-        dlg = PrivacyGateDialog(self, hits, masked,
-                                str(svc.get("base_url") or ""))
-        dlg.exec()
-        if dlg.choice == "mask":
-            return masked
-        if dlg.choice == "raw":
-            return prompt
-        return None
-
-    def _on_done(self, idx, ok, text):
-        """异步步骤(Job)的完成回调(失败停在当前步可重试)。"""
-        if self._dead:
-            return
-        if not ok:
-            self._auto = False
-            self._runlog.step_error(idx, text)
-            self._set_busy(False, "步骤 %d 失败,可重试" % (idx + 1))
-            InfoBar.error("调用失败", text[:220], parent=self,
-                          position=InfoBarPosition.TOP_RIGHT, duration=-1)
-            return
-        self._step_complete(idx, text)
-
-    def _worker_finished(self):
-        self._worker = None
-        if self._dead:
-            self.close()                       # 此时 worker 已结束,closeEvent 会真正关闭
-        elif self._auto and self.step_idx < len(self.steps):
-            self._run_step()                   # 自动模式:链式推进
-        else:
-            self._update_ui()
-
-    # ---- 复制 / 关闭 ----
-    def _copy_text(self, text):
-        # 「复制」= 只写剪贴板(不派发 Ctrl+V);显式粘贴入口另行调用
-        # core.paste_text(force=True)
-        self.app.core.copy_text(text)
-
-    def _copy_latest(self):
-        if self.results:
-            self._copy_text(self.results[-1])
-            InfoBar.success("已复制", "结果已放入剪贴板",
-                            parent=self, position=InfoBarPosition.TOP_RIGHT)
-
-    def closeEvent(self, e):
-        if self._worker is not None and self._worker.isRunning():
-            self._dead = True
-            self.hide()                        # 等线程收尾,避免 QThread 析构崩溃
-            e.ignore()
-        else:
-            try:
-                self.app._ai_runners.remove(self)
-            except ValueError:
-                pass
-            # 中途关闭:运行记录以 partial 落盘(至少跑过一步才记,
-            # 零步关闭不污染历史)
-            if not self._runlog_saved and self._runlog.steps:
-                try:
-                    wrl.save_run(self._runlog.abort())
-                except Exception:
-                    cm.log("运行记录保存失败:\n%s" % traceback.format_exc())
-            self.deleteLater()
-            e.accept()
-
-
-# ============================================================
-# Workflow Run Inspector(运行记录查看,建议 18)
-# ============================================================
-class WorkflowRunInspector(QWidget):
-    """工作流运行历史:左列运行(最近在前),右侧选中运行的每步明细
-    (大小/耗时/状态)。数据来自 workflow_runlog——只记大小不记内容。"""
-
-    _STATUS_TXT = {"ok": "✓ 完成", "halt": "⛔ 停链(条件)", "error": "✗ 失败",
-                   "cancelled": "已取消", "running": "—"}
-    _RUN_TXT = {"done": "完成", "failed": "失败", "cancelled": "已取消",
-                "partial": "未跑完", "running": "进行中"}
-
-    def __init__(self, app):
-        super().__init__(None)
-        self.app = app
-        self.setWindowTitle("工作流运行记录")
-        self.setWindowIcon(app.icon)
-        self.setWindowFlags(Qt.Window)
-        self.setStyleSheet("QWidget { background: %s; }" % BG)
-        self.resize(780, 520)
-
-        v = QVBoxLayout(self)
-        v.setContentsMargins(28, 20, 28, 14)
-        v.setSpacing(10)
-        head = QHBoxLayout()
-        icon = QLabel("🧾")
-        icon.setFont(font(16))
-        ttl = StrongBodyLabel("运行记录(Run Inspector)")
-        ttl.setFont(font(15, QFont.DemiBold))
-        ttl.setStyleSheet("color: %s;" % TEXT)
-        head.addWidget(icon)
-        head.addSpacing(6)
-        head.addWidget(ttl)
-        head.addStretch(1)
-        v.addLayout(head)
-        hint = CaptionLabel("每次运行只记录每步的输入/输出大小、耗时与状态,不记录任何内容;"
-                            "错误文案已脱敏。最多保留 %d 条,超出丢最旧。" % wrl.KEEP_RUNS)
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: %s;" % TER)
-        v.addWidget(hint)
-
-        body = QHBoxLayout()
-        body.setSpacing(10)
-        self.lst = QListWidget()
-        self.lst.setFont(font(12))
-        self.lst.setFixedWidth(290)
-        self.lst.setStyleSheet(
-            "QListWidget { background: %s; border-radius: 12px;"
-            " border: 1px solid %s; outline: none; padding: 4px; }"
-            "QListWidget::item { color: %s; border-radius: 8px; padding: 8px 10px; }"
-            "QListWidget::item:selected { background: %s; color: %s; }"
-            % (FIELD_BG, FIELD_BORDER, TEXT, ACCENT_SOFT, ACCENT))
-        body.addWidget(self.lst)
-
-        right = QVBoxLayout()
-        right.setSpacing(8)
-        self.lbl_sum = CaptionLabel("选择左侧一条运行查看明细")
-        self.lbl_sum.setWordWrap(True)
-        self.lbl_sum.setStyleSheet("color: %s; font-weight: 600;" % SEC)
-        right.addWidget(self.lbl_sum)
-        self.tbl = TableWidget(self)
-        self.tbl.setColumnCount(6)
-        self.tbl.setHorizontalHeaderLabels(
-            ["步骤", "类型", "状态", "输入→输出", "耗时", "说明"])
-        self.tbl.verticalHeader().hide()
-        self.tbl.setEditTriggers(TableWidget.NoEditTriggers)
-        self.tbl.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
-        right.addWidget(self.tbl, 1)
-        body.addLayout(right, 1)
-        v.addLayout(body, 1)
-
-        foot = QHBoxLayout()
-        b_clear = PushButton("清空记录", self)
-        b_clear.setIcon(FIF.DELETE.icon())
-        b_clear.clicked.connect(self._clear)
-        foot.addWidget(b_clear)
-        foot.addStretch(1)
-        b_close = PushButton("关闭", self)
-        b_close.clicked.connect(self.close)
-        foot.addWidget(b_close)
-        v.addLayout(foot)
-
-        self.lst.currentRowChanged.connect(self._show_run)
-        self._runs = []
-        self._reload()
-
-    def showEvent(self, e):
-        super().showEvent(e)
-        ensure_onscreen(self)
-
-    def _reload(self):
-        self._runs = wrl.load_runs()
-        self.lst.blockSignals(True)
-        self.lst.clear()
-        for r in self._runs:
-            self.lst.addItem(self._run_line(r))
-        self.lst.blockSignals(False)
-        if self._runs:
-            self.lst.setCurrentRow(0)
-        else:
-            self._show_run(-1)
-
-    @staticmethod
-    def _run_line(r):
-        t = time.strftime("%m-%d %H:%M",
-                          time.localtime(r.get("started_at") or 0))
-        status = WorkflowRunInspector._RUN_TXT.get(
-            r.get("status"), str(r.get("status")))
-        return "#%s · %s\n%s · %d 步 · %s" % (
-            r.get("id") or "?", r.get("workflow") or "?", t,
-            r.get("total_steps") or 0, status)
-
-    def _show_run(self, row):
-        self.tbl.setRowCount(0)
-        if not (0 <= row < len(self._runs)):
-            self.lbl_sum.setText("暂无运行记录" if not self._runs
-                                 else "选择左侧一条运行查看明细")
-            return
-        r = self._runs[row]
-        dur = float(r.get("finished_at") or 0) - float(r.get("started_at") or 0)
-        self.lbl_sum.setText(
-            "「%s」 输入 %s 字符 → 输出 %s 字符 · 总耗时 %s"
-            % (r.get("workflow") or "?", r.get("input_chars", 0),
-               r.get("output_chars", 0), self._fmt_sec(dur)))
-        for s in r.get("steps") or []:
-            i = self.tbl.rowCount()
-            self.tbl.insertRow(i)
-            vals = (str((s.get("idx") or 0) + 1),
-                    s.get("label") or s.get("kind") or "?",
-                    self._STATUS_TXT.get(s.get("status"),
-                                         str(s.get("status"))),
-                    "%s → %s 字符" % (s.get("input_chars", 0),
-                                      s.get("output_chars", 0)),
-                    self._fmt_ms(s.get("ms")),
-                    s.get("error") or "")
-            for c, txt in enumerate(vals):
-                self.tbl.setItem(i, c, QTableWidgetItem(str(txt)))
-
-    @staticmethod
-    def _fmt_ms(ms):
-        if ms is None:
-            return "—"
-        return "%.1f s" % (ms / 1000.0) if ms >= 1000 else "%.0f ms" % ms
-
-    @staticmethod
-    def _fmt_sec(sec):
-        if sec < 0:
-            return "—"
-        if sec >= 60:
-            return "%d 分 %.0f 秒" % (sec // 60, sec % 60)
-        return "%.1f 秒" % sec
-
-    def _clear(self):
-        if not self._runs:
-            return
-        if MessageBox("清空运行记录",
-                      "确定删除全部 %d 条运行记录?此操作不可撤销。"
-                      % len(self._runs), self).exec():
-            try:
-                wrl.clear_runs()
-            except Exception:
-                cm.log("清空运行记录失败:\n%s" % traceback.format_exc())
-            self._reload()
 
 
 # ============================================================
@@ -6835,7 +2764,10 @@ class TransformDialog(MessageBoxBase):
 
     def _copy(self):
         out = cm.transform_text(self.rec.get("content") or "", self._key) or ""
-        self.app.core.copy_text(out)
+        if not self.app.core.copy_text(out):
+            InfoBar.error("复制失败", "剪贴板写入失败,请重试", parent=self.app.win,
+                          position=InfoBarPosition.TOP_RIGHT, duration=5000)
+            return
         InfoBar.success("已复制", "变换结果已放入剪贴板", parent=self.app.win,
                         position=InfoBarPosition.TOP_RIGHT)
 
@@ -6876,36 +2808,6 @@ CLIP_ACTIONS = [
 ]
 
 
-# 查看器内容专属动作:(subtype, 标题, run(viewer), 额外门槛(viewer)→bool|None)
-INSPECTOR_ACTIONS = [
-    ("web_url", "在浏览器打开", lambda v: cm.open_url(v._raw.strip()), None),
-    ("web_url", "复制主机名",
-     lambda v: v.app.core.copy_text(v._url_inf["host"]), None),
-    ("web_url", "复制路径",
-     lambda v: v.app.core.copy_text(v._url_inf["path"]), None),
-    ("web_url", "复制参数串",
-     lambda v: v.app.core.copy_text(urlsplit(v._raw.strip()).query),
-     lambda v: bool(v._url_inf["query"])),
-    ("web_url", "URL 解码并复制",
-     lambda v: v.app.core.copy_text(_unquote(v._raw.strip())), None),
-    ("web_url", "URL 编码并复制",
-     lambda v: v.app.core.copy_text(_quote(v._raw.strip(), safe=":/?&=#%+")), None),
-    ("jwt", "复制 Header (JSON)",
-     lambda v: v.app.core.copy_text(
-         json.dumps(v._jwt_inf["header"], ensure_ascii=False, indent=2)), None),
-    ("jwt", "复制 Payload (JSON)",
-     lambda v: v.app.core.copy_text(
-         json.dumps(v._jwt_inf["payload"], ensure_ascii=False, indent=2)), None),
-    ("jwt", "复制解码全文 (Header.Payload)",
-     lambda v: v.app.core.copy_text(
-         "%s.%s" % (json.dumps(v._jwt_inf["header"], ensure_ascii=False),
-                    json.dumps(v._jwt_inf["payload"], ensure_ascii=False))), None),
-    ("base64", "解码图另存为…", lambda v: v._save_b64_image(),
-     lambda v: v._b64 and v._b64[0] == "image"),
-    ("base64", "复制解码文本",
-     lambda v: v.app.core.copy_text(v._b64[1].decode("utf-8", "replace")),
-     lambda v: v._b64 and v._b64[0] == "text"),
-]
 
 
 # ============================================================
@@ -6968,6 +2870,7 @@ class WinClipboardApp(QObject):
         self._warned_hotkey = False
         self._editors = []
         self._thumbs = {}
+        self._thumbs_bytes = 0         # 缓存像素字节估算(_thumbs_put 维护)
         self._view_dirty = True            # 隐藏期间历史有变则置位,显示时才重建
 
         cm.ensure_dirs()
@@ -7191,17 +3094,32 @@ class WinClipboardApp(QObject):
     def paste_rec(self, rec):
         # 先收起主窗(焦点回到目标窗口),再排队粘贴;
         # 目标窗口取唤出主窗前的现场(粘贴事务校验,切换即取消)
+        if rec.get("type") == "files" \
+                and not any(os.path.exists(p) for p in rec["content"]):
+            MessageBox("WinClipboard", "文件已不存在,无法粘贴。", self.win).exec()
+            return
         self.win.hide()
         if not self.core.paste_record(
                 rec, target_hwnd=getattr(self, "_paste_target", None)):
-            MessageBox("WinClipboard", "文件已不存在,无法粘贴。", self.win).exec()
-            return
+            # 写入失败:不派发回贴;主窗拉回并如实提示(选择保留可重试)
+            self.win.show()
+            InfoBar.error("粘贴失败",
+                          "剪贴板写入失败,请重试(其他程序可能正占用剪贴板)",
+                          parent=self.win, position=InfoBarPosition.TOP_RIGHT,
+                          duration=5000)
 
     def _paste_text_now(self, text):
-        """变换粘贴的统一出口:收起主窗 + 强制回贴到意图目标窗口。"""
+        """变换粘贴的统一出口:收起主窗 + 强制回贴到意图目标窗口;
+        写入失败拉回主窗并提示,不派发回贴。"""
         self.win.hide()
-        self.core.paste_text(text, force=True,
-                             target_hwnd=getattr(self, "_paste_target", None))
+        if not self.core.paste_text(text, force=True,
+                                     target_hwnd=getattr(self, "_paste_target",
+                                                         None)):
+            self.win.show()
+            InfoBar.error("粘贴失败",
+                          "剪贴板写入失败,请重试(其他程序可能正占用剪贴板)",
+                          parent=self.win, position=InfoBarPosition.TOP_RIGHT,
+                          duration=5000)
 
     def _selected_text_rec(self):
         if self.selected is None or self.selected >= len(self._view):
@@ -7725,10 +3643,26 @@ class WinClipboardApp(QObject):
             except Exception:
                 pass
         try:
+            self._thumb_loader.shutdown()   # 缩略图后台队列:排空再退
+        except Exception:
+            pass
+        try:
             self.pinboard.save_now()       # 画布可见状态随 quit 落盘
         except Exception:
             pass
         self.core.save_all()
+        # 私密区保存失败:如实反馈并允许取消退出(未保存变更将随退出丢失;
+        # 原文件未被修改,仍是恢复来源)
+        if getattr(self.core, "_private_dirty", False) \
+                and getattr(self.core, "private_save_error", ""):
+            box = MessageBox(
+                "私密区未保存",
+                "私密区保存失败:%s\n原文件未被修改。"
+                "「确定」仍要退出(未保存的变更将丢失),"
+                "「取消」返回应用排查后重试。" % self.core.private_save_error,
+                self.win)
+            if not box.exec():
+                return
         self.worker.cmd_q.put(("quit",))
         self.qapp.quit()
 
@@ -7820,6 +3754,27 @@ class WinClipboardApp(QObject):
             elif act == "quit":
                 self.quit_app()
 
+    # ---- 缩略图缓存(统一 LRU + 字节预算;所有写入路径共用 _thumbs_put) ----
+    THUMB_CACHE_BUDGET = 48 * 1024 * 1024   # 像素字节预算(w*h*4)
+    THUMB_CACHE_COUNT = 400                 # 条目上限(次级保险)
+
+    def _thumbs_put(self, path, pm):
+        """统一写入:LRU 触碰 + 字节预算/条目上限淘汰。所有缓存写入
+        (后台生成回填 / 同步兜底)都必须走这里,不允许绕过淘汰逻辑。
+        占用按 w*h*4 估算,不含 QImageReader 原始解码与 Qt 平台侧的
+        纹理/缓存开销(实际原生占用会略高,预算已留余量)。"""
+        old = self._thumbs.pop(path, None)
+        if old is not None:
+            self._thumbs_bytes -= old.width() * old.height() * 4
+        self._thumbs[path] = pm
+        self._thumbs_bytes += pm.width() * pm.height() * 4
+        while ((self._thumbs_bytes > self.THUMB_CACHE_BUDGET
+                or len(self._thumbs) > self.THUMB_CACHE_COUNT)
+               and self._thumbs):
+            k = next(iter(self._thumbs))    # 插入序 FIFO(最近触碰的在尾)
+            v = self._thumbs.pop(k)
+            self._thumbs_bytes -= v.width() * v.height() * 4
+
     def thumb_cached(self, path):
         """仅查缓存(卡片构建用):未命中返回 None 并转后台生成,不阻塞 UI 线程。
 
@@ -7832,13 +3787,13 @@ class WinClipboardApp(QObject):
         if pm is not None:
             self._thumbs[path] = pm
             return pm
-        self.request_thumb(path)
+        self.request_thumb(path, visible=True)
         return None
 
-    def request_thumb(self, path):
+    def request_thumb(self, path, visible=True):
         loader = getattr(self, "_thumb_loader", None)
         if loader is not None and path:
-            loader.submit(path)
+            loader.submit(path, visible=visible)
 
     def thumb_for(self, path):
         if not path or not os.path.exists(path):
@@ -7858,12 +3813,26 @@ class WinClipboardApp(QObject):
                 return None
             pm = QPixmap.fromImage(img.scaled(
                 w * 2, h * 2, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            self._thumbs[path] = pm
-            while len(self._thumbs) > 300:    # FIFO 淘汰;整表清空会引发批量重解码
-                self._thumbs.pop(next(iter(self._thumbs)))
+            self._thumbs_put(path, pm)
         except Exception:
             return None
         return pm
+
+    def invalidate_thumb(self, path):
+        """条目删除/替换/清空后失效缓存(路径按内容寻址,通常无脏数据;
+        wipe/清理类批量场景调用 reset_thumbs)。"""
+        pm = self._thumbs.pop(path, None)
+        if pm is not None:
+            self._thumbs_bytes -= pm.width() * pm.height() * 4
+
+    def reset_thumbs(self):
+        """整表清空(清空全部数据 / 模式切换等)。"""
+        self._thumbs.clear()
+        self._thumbs_bytes = 0
+
+    def thumb_cache_stats(self):
+        """(条目数, 像素字节)——诊断与性能测试用。"""
+        return len(self._thumbs), self._thumbs_bytes
 
     def _cleanup_orphan_images(self):
         """启动 3 秒后的孤儿图片清理(core 侧自带引用快照与新文件时间窗)。"""
@@ -7886,17 +3855,25 @@ class WinClipboardApp(QObject):
 
         百张卡片的首次构建实测约 1 秒(QSS 解析 / 标签初始化),过去发生在
         第一次热键唤出时;挪到常驻托盘的空闲期做完,首次唤出直接走池复用(~10ms)。
+        缩略图只预热最近有限张(PREWARM_THUMBS):更早的滚到可见时按高
+        优先级现生成,不再把全量历史图片一次性排进后台队列。
         """
         try:
             if self._view_dirty:
                 self.refresh_view()
                 for c in self.panel._cards:
                     c.ensurePolished()   # 隐藏状态下提前完成 QSS 解析
+            n = 0
             for h in self.history:
                 if h.get("type") == "image":
-                    self._thumb_loader.submit(h["content"])
+                    self._thumb_loader.submit(h["content"], visible=False)
+                    n += 1
+                    if n >= self.PREWARM_THUMBS:
+                        break
         except Exception:
             cm.log("启动预热失败:\n%s" % traceback.format_exc())
+
+    PREWARM_THUMBS = 48     # 启动预热缩略图上限(最近优先)
 
 
 def _pop_to_front(w):

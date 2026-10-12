@@ -75,7 +75,7 @@ HISTORY = [
     {"type": "text", "content": "2026 年第三季度 OKR 进展\n华东区增长 23%,超额完成目标\n华南区持平,下周重点跟进渠道合作",
      "ts": TS},
     {"type": "image", "content": IMG1, "w": 820, "h": 500, "ts": TS - 300},
-    {"type": "text", "content": "https://github.com/haoshangyang/WinClipboard", "ts": TS - 900},
+    {"type": "text", "content": cm.REPO_URL, "ts": TS - 900},
     {"type": "files", "content": [FILE1, FILE2], "ts": TS - 3600},
     {"type": "text", "content": "会议纪要(固定置顶示例):周五 16:00 评审新版本 UI", "pinned": True, "ts": TS - 86400},
     {"type": "text", "content": "pip install PySide6 PySide6-Fluent-Widgets pywin32 Pillow", "ts": TS - 172800},

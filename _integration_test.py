@@ -1291,7 +1291,8 @@ check("虚拟化:大视图只物化窗口(≤80)",
       len(a.panel._cards) <= 80 and a.panel._btn_more.isVisible(),
       "cards=%d" % len(a.panel._cards))
 a.panel._extend_window()
-check("虚拟化:扩展窗口后卡片增长",
+pump(1.2)   # 扩展走后台批次(分批渲染,GUI 不整段阻塞),排空后应超过 80
+check("虚拟化:扩展窗口后卡片增长(批次排空)",
       len(a.panel._cards) > 80, "cards=%d" % len(a.panel._cards))
 a.query = ""; a.history[:] = a.history[:_n0]
 a.refresh_view(); pump(0.1)

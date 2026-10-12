@@ -26,6 +26,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ---- 隔离持久化路径 ----
 import clipboard_manager as cm
 
+# 假 AI 服务器在 127.0.0.1:openai SDK(httpx)默认读系统代理,本地回环
+# 被代理劫持时会偶发 502(测试进程内绕开全部代理,只影响本测试)
+os.environ["NO_PROXY"] = os.environ["no_proxy"] = "*"
+
 TMP = tempfile.mkdtemp(prefix="wclb_ai_test_")
 cm.APP_DIR = TMP
 cm.IMAGE_DIR = os.path.join(TMP, "images")
@@ -143,6 +147,7 @@ from PySide6.QtCore import QObject, Qt
 app = QApplication([])
 app.setQuitOnLastWindowClosed(False)
 import winclipboard_qt as wq
+import workflow_ui  # 阶段 8 拆分:运行台等在本模块命名空间(打桩须指向这里)
 from qfluentwidgets import setTheme, Theme
 setTheme(Theme.LIGHT)
 wq.init_palette(False)
@@ -351,8 +356,8 @@ def _make_stub_gate():
 _StubGate = _make_stub_gate()
 
 
-_orig_dlg = wq.PrivacyGateDialog
-wq.PrivacyGateDialog = _StubGate
+_orig_dlg = workflow_ui.PrivacyGateDialog   # 拆分后运行台在 workflow_ui 命名空间解析
+workflow_ui.PrivacyGateDialog = _StubGate
 try:
     out = gr._privacy_gate(_secret, CFG["ai_services"][0])
     check("Gate.mask-applied", "sk-" not in out and "▇▇▇[API 密钥]" in out)
@@ -381,7 +386,7 @@ try:
           and "sk-" not in gr2.results[0], str(gr2.results[:1]))
     gr2.close()
 finally:
-    wq.PrivacyGateDialog = _orig_dlg
+    workflow_ui.PrivacyGateDialog = _orig_dlg
 
 # ---- Step Contract:步骤统一契约(workflow_steps) ----
 import workflow_steps as wfs
