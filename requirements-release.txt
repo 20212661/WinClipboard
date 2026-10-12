@@ -1,0 +1,20 @@
+# WinClipboard 发布依赖基线(阶段 6.2)
+# 这是“实际验证过的版本组合”,不是兼容范围——兼容范围仍见 requirements.txt。
+# 重建发布产物时按本清单核对新版本,并重跑 run_checks.py + 性能基准。
+# 基线环境:Windows 11 x64 · Python 3.12.10(2026-10-06 验证)
+
+# ---- 运行依赖(EXE 内随 PyInstaller 打包) ----
+PySide6==6.11.2
+PySide6-Fluent-Widgets==1.11.3
+pywin32==312
+Pillow==12.3.0
+cryptography==50.0.1        # 可迁移加密备份(AES-256-GCM);缺失时功能禁用并提示
+
+# ---- 可选依赖(源码运行便利;EXE 不依赖) ----
+# 代码高亮:查看器在无 Pygments 时回退自写正则染色
+Pygments==2.21.0
+# AI 调用:openai SDK 缺失时自动回落 http.client 直连(urllib 路径)
+openai==3.16.2
+
+# ---- 构建工具(打包机安装;不进 EXE) ----
+PyInstaller==6.22.3

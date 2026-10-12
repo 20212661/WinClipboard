@@ -10,3 +10,6 @@ mimosa_rules.bin
 _mimosa_rules.bin
 build/
 dist/
+soak_check.py
+soak_report.md
+soak_state.json
