@@ -14,6 +14,7 @@ workflow_runs.json(最近在前,默认保留 50 条)。查看入口在工作流�
 import json
 import os
 import time
+import traceback
 from pathlib import Path
 
 import clipboard_manager as cm
@@ -118,17 +119,59 @@ def load_runs(path=None):
 
 
 def save_run(run, path=None, keep=KEEP_RUNS):
-    """追加一条运行记录(自动分配递增 id,最近在前,截断 keep 条);
-    返回分配的 id。"""
-    runs = load_runs(path)
+    """追加一条运行记录(自动分配递增 id,最近在前,截断 keep 条)。
+
+    临时文件 + 原子替换:写入失败保留原文件并返回 None(调用方如实反馈,
+    运行日志是低价值辅助数据,保存失败不打断工作流)。既有文件损坏时
+    **不隐式当作全新历史覆写**:改名 .corrupt 留档一份后从空白重建,
+    返回新 id(明确恢复结果,损坏原件可人工排查)。"""
+    fp = _runs_path(path)
+    runs = []
+    try:
+        runs = [r for r in json.loads(Path(fp).read_text(encoding="utf-8"))
+                if isinstance(r, dict)]
+    except FileNotFoundError:
+        runs = []
+    except Exception:
+        try:
+            os.replace(fp, fp + ".corrupt")
+            cm.log("workflow_runs.json 损坏:已留档为 .corrupt,运行历史从空白重建")
+        except Exception:
+            pass
+        runs = []
     run["id"] = max((int(r.get("id") or 0) for r in runs), default=0) + 1
     runs.insert(0, run)
     del runs[max(0, int(keep)):]
-    Path(_runs_path(path)).write_text(
-        json.dumps(runs, ensure_ascii=False), encoding="utf-8")
-    return run["id"]
+    tmp = fp + ".tmp"
+    try:
+        Path(tmp).write_text(json.dumps(runs, ensure_ascii=False),
+                             encoding="utf-8")
+        os.replace(tmp, fp)
+        return run["id"]
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        cm.log("运行记录保存失败,原文件保留:\n%s" % traceback.format_exc())
+        return None
 
 
 def clear_runs(path=None):
-    """清空运行历史(查看对话框「清空」用)。"""
-    Path(_runs_path(path)).write_text("[]", encoding="utf-8")
+    """清空运行历史(查看对话框「清空」用);临时文件 + 原子替换,
+    返回是否成功(失败保留原文件)。"""
+    fp = _runs_path(path)
+    tmp = fp + ".tmp"
+    try:
+        Path(tmp).write_text("[]", encoding="utf-8")
+        os.replace(tmp, fp)
+        return True
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        cm.log("运行记录清空失败,原文件保留:\n%s" % traceback.format_exc())
+        return False
