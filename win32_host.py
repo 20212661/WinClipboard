@@ -325,7 +325,15 @@ class TrayWorker(threading.Thread):
         self._nid = (self.hwnd, 0,
                      NIF_ICON | NIF_MESSAGE | NIF_TIP,
                      WM_TASKBAR, self.hicon, _hk_tip)
-        win32gui.Shell_NotifyIcon(NIM_ADD, self._nid)
+        try:
+            win32gui.Shell_NotifyIcon(NIM_ADD, self._nid)
+        except Exception as e:
+            # 图标注册失败(受限会话 error 5 / Explorer 未就绪):托盘图标
+            # 缺失,但热键/剪贴板监听/消息循环必须继续——图标是入口便利,
+            # 不是核心功能。实测裸抛会拖死整条工作线程:宿主窗口成为死
+            # 窗口,热键与捕获全部失联(2026-10-13 受监督会话实捕)。
+            log("托盘图标注册失败(%r),以无图标模式继续(热键可用)" % e)
+            self._nid = None
 
         # 剪贴板监听 + 全局热键 + 命令定时器
         user32.AddClipboardFormatListener(self.hwnd)

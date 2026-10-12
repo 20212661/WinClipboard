@@ -4012,6 +4012,11 @@ def main():
         except Exception:
             pass
         return 1
+    if os.environ.get("WCLB_SHOW_ON_START") == "1" and not safe:
+        # 受限/无托盘环境拉起即显示主窗(图标缺失时用户没有任何入口;
+        # 见 TrayWorker 图标失败降级)。延迟一拍让启动预热先走。
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(400, app.win.showWindow)
     rc = qapp.exec()
     cm.log("退出")
     cm.mark_clean_quit()         # 正常退出;崩溃到不了这里——这正是判据
