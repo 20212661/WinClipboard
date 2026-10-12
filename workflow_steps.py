@@ -236,8 +236,17 @@ class WebStep(WorkflowStep):
 
     def run(self, ctx):
         prompt = ctx.render(self.prompt)
+        copied = None
         if ctx.copy_text is not None:
-            ctx.copy_text(prompt)    # 只写剪贴板:自动 Ctrl+V 会打进当前窗口
+            # 只写剪贴板:自动 Ctrl+V 会打进当前窗口。
+            # 宿主回调必须返回真实成败(None 也按失败——不能拿"未声明"
+            # 当成功);失败时本步不宣称"提示词已复制",也不打开
+            # 依赖该复制操作的网页。
+            copied = ctx.copy_text(prompt)
+        if copied is False or copied is None:
+            return Done(ctx.previous, halt=True, note=(
+                "复制失败", "剪贴板写入失败,提示词未进入剪贴板;"
+                            "请重试本步骤(网页未打开)。"))
         opened = ""
         url = self.url.strip()
         if url:
@@ -290,13 +299,16 @@ class HumanStep(WorkflowStep):
 
 @register
 class ClipboardStep(WorkflowStep):
-    """把链上当前内容快照进剪贴板,链继续(不打断)。"""
+    """把链上当前内容快照进剪贴板,链继续(不打断);写失败停链并提示。"""
 
     kind, label = "clipboard", "复制到剪贴板"
 
     def run(self, ctx):
         if ctx.copy_text is not None:
-            ctx.copy_text(ctx.previous)
+            ok = ctx.copy_text(ctx.previous)
+            if ok is False or ok is None:      # None=宿主未声明成败,不当成功
+                return Done(ctx.previous, halt=True, note=(
+                    "复制失败", "剪贴板写入失败,内容未复制;请重试本步骤。"))
         return Done(ctx.previous)
 
     def describe(self):

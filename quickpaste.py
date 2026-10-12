@@ -204,9 +204,14 @@ class QuickPasteWindow(QWidget):
         path = rec.get("content")
         pm = (getattr(self.app, "_thumbs", None) or {}).get(path)
         if pm is None:
+            tc = getattr(self.app, "thumb_cached", None)
+            if tc is not None:
+                pm = tc(path)        # 可见请求:高优先级后台生成
+        if pm is None:
             loader = getattr(self.app, "_thumb_loader", None)
             if loader is not None:
-                loader.submit(path)      # 后台生成,完成后经 on_thumb 重绘
+                loader.submit(path, visible=True)
+                # 后台生成,完成后经 on_thumb 重绘
         return pm
 
     @staticmethod
@@ -404,13 +409,18 @@ class QuickPasteWindow(QWidget):
         if plain:
             rec = plain_rec(rec)
         target = self._prev_hwnd or getattr(self.app, "_paste_target", None)
-        # 先收起并还原焦点,再写剪贴板排队回贴;目标窗口传入粘贴事务,
-        # 发送前校验前台与剪贴板序列号,切换即取消(worker 内置宽限循环)
-        self.close_restore()
+        # 先写剪贴板:失败不按成功流程收起浮层(留在原地供重试/换条目),
+        # 也不派发回贴;成功才收起还原焦点。目标窗口传入粘贴事务,
+        # 发送前校验前台与剪贴板序列号,切换即取消(worker 内置宽限循环)。
         try:
-            self.app.core.paste_record(rec, force=True, target_hwnd=target)
+            ok = self.app.core.paste_record(rec, force=True, target_hwnd=target)
         except Exception:
             cm.log("快捷粘贴失败:\n%s" % __import__("traceback").format_exc())
+            ok = False
+        if not ok:
+            self.footer.setText("剪贴板写入失败,请重试(Enter 再试 / Esc 返回)")
+            return
+        self.close_restore()
 
     def act_view(self):
         hi, rec = self._rec_at(self._sel)
