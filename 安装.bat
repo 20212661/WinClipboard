@@ -11,9 +11,5 @@ if not exist "dist\WinClipboard\WinClipboard.exe" (
     pause
     exit /b 1
 )
-set "VER=1.0.0"
-if exist ".venv\Scripts\python.exe" (
-    for /f "usebackq delims=" %%v in (`.venv\Scripts\python.exe -c "import clipboard_manager as cm; print(cm.APP_VERSION)" 2^>nul`) do set "VER=%%v"
-)
-powershell -NoProfile -ExecutionPolicy Bypass -File installer.ps1 -Version "%VER%"
+powershell -NoProfile -ExecutionPolicy Bypass -File installer.ps1
 pause
