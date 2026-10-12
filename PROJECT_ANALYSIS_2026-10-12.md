@@ -289,3 +289,6 @@ git -C . status --porcelain && git diff --stat
 `docs/RECORD_IDENTITY_EVALUATION.md`(分页前置债务评估)、
 `PROJECT_ANALYSIS_2026-10-06.md`(上一轮分析,部分问题已由阶段 1-8 修复)、
 `ANALYSIS.md`(历史报告,已标注)。
+`CTX_PACK_PLAN.md`(feature/ctx-pack 分支,AI 上下文管理 Context Pack
+P0-P4 执行日志与进度表;分析报告之后的新增功能线)。
+
