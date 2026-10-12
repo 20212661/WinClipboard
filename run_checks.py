@@ -38,6 +38,7 @@ SUITES = [
     ("pagecount", "_pagecount_regression_test.py", 300, True),
     ("module-split", "_module_split_test.py", 600, True),
     ("perf-semantics", "_perf_regression_test.py", 600, True),
+    ("ctxpack", "_ctxpack_test.py", 300, True),
 ]
 OPTIONAL = {
     "benchmark": ("benchmark", "_benchmark_test.py", 1800),
