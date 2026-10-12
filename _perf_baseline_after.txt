@@ -1,0 +1,23 @@
+after    环境                                                img=300      N_HIST=4000 N_BIG=20000 TMP=C:\Users\HAOSHA~1\AppData\Local\Temp\wclb_perf_after_rwgr4ys8
+after    U1 首屏同步阻塞 ms(可见区优先)                                  20.1      max=32.9 n=5
+after    U1b 冷构建总完成 ms(含后台批次)                                529.5      物化卡片=60
+after    U2 热缓存重复刷新 ms(含批次排空)                                 1.11      p95=1.16 max=1.16 n=7
+after    U3 搜索切换往返 ms(过滤+两次重排)                                64.0      p95=71.5 n=5
+after    U4 扩展到500卡 累计ms(滚动到底+批次)                           7805.2      控件=472
+after    U4b 扩展到2000卡 累计ms(500→2000)                       22313.7      控件=520(物化=400 滑窗上限=480)
+after    U4c 单次 _extend_window(+80) 同步ms                      73.5      控件=520 待建=193
+after    U5 浮层刷新 ms(空查询,limit=60)                              1.3      p95=1.8 n=5
+after    U5b 浮层刷新 ms(关键词)                                      1.2      p95=1.7 n=5
+after    U6 sync_src_combo ms(全历史扫)                            0.0      p95=0.0 n=5
+after    C1 内存 query_view 全量 ms(20000条)                        6.3      p95=8.8 n=5
+after    C1b 内存 query_view limit=60 ms                         0.0      p95=0.0 n=5(限量未减全扫成本)
+after    C2 SQL query_view 全量 ms(20000条)                      55.8      p95=66.0 n=5
+after    C2b SQL query_view limit=60 ms                        2.2      p95=3.6 n=5(limit 未下推→全量ID+pos全映射)
+after    C2c SQL link 分类 limit=60 ms(内存二次过滤)                   8.5      p95=8.8 n=5
+after    C3 满历史新增条目 ms(4000条)                                 0.67      p95=3.61 n=15
+after    C3b 重复条目提升 ms                                        2.90      p95=4.63 n=15
+after    C3c _evict 完整计数 ms(超限100条)                           0.00      p95=0.00 n=10
+after    T1 预热提交 ms / 张数(复刻 _prewarm)                     0.2 / 48      提交后队列深度=48 上限=48
+after    T1b 缓存条目数(无淘汰路径)                                       48 项    
+after    T1c 缓存像素占用 MB                                         9.0      仅统计 256px 档位像素字节
+after    总耗时 s                                                46.4      

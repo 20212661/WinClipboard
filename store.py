@@ -16,7 +16,7 @@
   版本,先补戳再逐级 migrate_N_to_N+1,每级独立 commit,中断可续。
 
 兼容:敏感条目不入本表(私密区 private.json + DPAPI 独立存储);
-encrypt_history=True 时核心不启用本存储写透,继续走 JSON。
+encrypt_history=True 时核心以加密 JSON 为事实源，转换成功后移除旧明文库。
 """
 import json
 import os
@@ -113,6 +113,21 @@ class ClipboardStore:
         self._seq = int(self.db.execute(
             "SELECT COALESCE(MAX(seq), 0) AS m FROM clipboard_items"
         ).fetchone()["m"])
+        # 活跃行数缓存(None = 待重数):无过滤分页的 COUNT 走它,任何
+        # 改变活跃集的写操作都会失效缓存(见 _invalidate_counts)
+        self._active_count = None
+
+    def _invalidate_counts(self):
+        """活跃计数缓存失效(调用方须持锁;不重数,下次查询现算)。"""
+        self._active_count = None
+
+    def _active_count_locked(self):
+        """活跃行数(调用方须持锁);首次或写失效后现数一次并缓存。"""
+        if self._active_count is None:
+            self._active_count = int(self.db.execute(
+                "SELECT COUNT(*) AS c FROM clipboard_items "
+                "WHERE state='active'").fetchone()["c"])
+        return self._active_count
 
     def _user_version(self):
         r = self.db.execute("PRAGMA user_version").fetchone()
@@ -334,6 +349,7 @@ class ClipboardStore:
                 self._row_from_rec(rec, self._seq))
             rec["_db"] = cur.lastrowid
             self.db.commit()
+            self._invalidate_counts()
             return rec["_db"]
 
     def upsert_promote(self, rec):
@@ -355,6 +371,7 @@ class ClipboardStore:
                     (row[0], row[1], row[2], row[4], row[5], row[6],
                      row[9], row[11], row[16], row[17], dbid))
                 self.db.commit()
+                self._invalidate_counts()
                 return dbid
             return self.insert(rec)
 
@@ -377,6 +394,7 @@ class ClipboardStore:
                 "updated_at=? WHERE id = ?",
                 [(now, now, i) for i in ids])
             self.db.commit()
+            self._invalidate_counts()
 
     def restore(self, dbids):
         """撤销删除:行回 active 态并提升 seq 到最前(列表语义 = 最近)。"""
@@ -390,6 +408,7 @@ class ClipboardStore:
                     "UPDATE clipboard_items SET state='active', deleted_at=NULL, "
                     "seq=? WHERE id = ?", (self._seq, i))
             self.db.commit()
+            self._invalidate_counts()
 
     def collect_garbage(self, grace_seconds):
         """物理删除宽限期已过的 deleted 行;返回 [(id, blob_hash), …] 供
@@ -406,6 +425,7 @@ class ClipboardStore:
                 "DELETE FROM clipboard_items WHERE id = ?",
                 [(r["id"],) for r in rows])
             self.db.commit()
+            self._invalidate_counts()
             return [(r["id"], r["blob_hash"]) for r in rows]
 
     def blob_refcount(self, blob_hash):
@@ -490,6 +510,7 @@ class ClipboardStore:
             self.db.execute("DELETE FROM clipboard_items WHERE id = ?",
                             (dbid,))
             self.db.commit()
+            self._invalidate_counts()
 
     def delete_many(self, dbids):
         ids = [int(i) for i in dbids if i is not None]
@@ -499,6 +520,7 @@ class ClipboardStore:
             self.db.executemany(
                 "DELETE FROM clipboard_items WHERE id = ?", [(i,) for i in ids])
             self.db.commit()
+            self._invalidate_counts()
 
     def reset(self):
         """清空全部条目(含 FTS),seq 归零——加密→库模式切换时的整库重建。"""
@@ -506,6 +528,7 @@ class ClipboardStore:
             self.db.execute("DELETE FROM clipboard_items")
             self.db.commit()
             self._seq = 0
+            self._invalidate_counts()
 
     # ---- 查询(UI 视图直连通道;固定语句 + 空参数,不拼接 SQL 文本) ----
     def _filter_args(self, content_type, source_app, since, q, pinned):
@@ -536,21 +559,32 @@ class ClipboardStore:
         with self._lock:
             return [r["id"] for r in self.db.execute(sql, args).fetchall()]
 
+    def _guarded_total(self, a):
+        """过滤态命中总数(固定 guarded SQL + 参数绑定)。"""
+        return int(self.db.execute(
+            "SELECT COUNT(*) AS c FROM clipboard_items "
+            "WHERE state='active' "
+            "AND (? IS NULL OR content_type = ?) "
+            "AND (? IS NULL OR source_app = ?) "
+            "AND (? = 0 OR created_at >= ?) "
+            "AND (? IS NULL OR is_pinned = ?) "
+            "AND (? IS NULL OR search_text LIKE ?) "
+            "AND (? IS NULL OR created_at < ?)", a).fetchone()["c"])
+
     def query_page(self, content_type=None, source_app=None, since=0.0,
                    q=None, pinned=None, until=None, limit=200, offset=0):
         """分页查询:返回 (rec 列表, 命中总数)。rec 与内存条目同构(含 _db)。
-        until 为时间上界(created_at < until,None 不过滤)。"""
+        until 为时间上界(created_at < until,None 不过滤)。
+
+        无任何可选过滤时总数走活跃计数缓存(写失效,读 O(1))——10 万条
+        库的 COUNT 全表扫描实测 ~55ms,是分页预算的主要成本(阶段 6 证据);
+        有过滤仍走 guarded COUNT,语义完全一致。"""
         u = None if until is None else float(until)
         a = self._filter_args(content_type, source_app, since, q,
                               pinned) + (u, u)
-        total_sql = ("SELECT COUNT(*) AS c FROM clipboard_items "
-                     "WHERE state='active' "
-                     "AND (? IS NULL OR content_type = ?) "
-                     "AND (? IS NULL OR source_app = ?) "
-                     "AND (? = 0 OR created_at >= ?) "
-                     "AND (? IS NULL OR is_pinned = ?) "
-                     "AND (? IS NULL OR search_text LIKE ?) "
-                     "AND (? IS NULL OR created_at < ?)")
+        no_filter = (content_type is None and source_app is None
+                     and not since and pinned is None
+                     and not q and until is None)
         page_sql = ("SELECT id, seq, created_at, updated_at, content_type, "
                     "content_subtype, content_hash, source_app, source_window, "
                     "text_content, search_text, files_json, rich_json, "
@@ -565,7 +599,8 @@ class ClipboardStore:
                     "AND (? IS NULL OR created_at < ?) "
                     "ORDER BY seq DESC LIMIT ? OFFSET ?")
         with self._lock:
-            total = int(self.db.execute(total_sql, a).fetchone()["c"])
+            total = (self._active_count_locked() if no_filter
+                     else self._guarded_total(a))
             rows = self.db.execute(
                 page_sql, a + (int(limit), int(offset))).fetchall()
         return [self._rec_from_row(r) for r in rows], total
@@ -596,6 +631,7 @@ class ClipboardStore:
                         self._row_from_rec(rec, self._seq))
                     n += 1
                 self.db.commit()
+                self._invalidate_counts()
             except Exception:
                 self.db.rollback()
                 raise

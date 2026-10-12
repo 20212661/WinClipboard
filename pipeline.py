@@ -113,16 +113,25 @@ class CaptureTrace:
 @dataclass
 class Outcome:
     kind: str                    # SENSITIVE / DUPLICATE / PINNED_SKIP / KEEP
-    index: Optional[int] = None  # DUPLICATE:历史中命中条目的下标
+    index: Optional[int] = None  # DUPLICATE:历史中命中条目的下标(纯扫描路径)
     key: object = None           # 去重键(排障用)
+    rec: Optional[dict] = None   # DUPLICATE/PINNED_SKIP:命中条目本体(索引路径)
+    badge: Optional[str] = None  # KEEP:文本条目的子类型徽章(调用方复用,免二次分类)
 
 
 def run_capture(snap: Snapshot, cfg: dict, history: list,
                 sensitive_probe: Optional[Callable[[str], Optional[str]]] = None,
                 badge_probe: Optional[Callable[[str], Optional[str]]] = None,
-                sha1_fallback: Optional[Callable] = None):
+                sha1_fallback: Optional[Callable] = None,
+                dedup_lookup: Optional[Callable[[object], Optional[dict]]] = None,
+                dedup_kinds: frozenset = frozenset()):
     """纯决策管线:输入快照与当前状态(只读),输出 (Outcome, record, trace)。
-    不修改 history / cfg / 任何全局状态。"""
+    不修改 history / cfg / 任何全局状态。
+
+    dedup_lookup(可选):键 → 最近一条同指纹活跃记录;返回 None = 无重复。
+    仅当 snap.kind ∈ dedup_kinds 时使用(调用方保证这些类型的索引是完备的,
+    例如全部图片都带 hash);其余类型(含缺 hash 的旧图片条目)仍走线性扫描,
+    去重语义与旧实现逐条一致。"""
     trace = CaptureTrace()
     trace.add("snapshot", "%s src=%r rich=%s" % (snap.kind, snap.src,
                                                  sorted(snap.rich) if snap.rich else "-"))
@@ -138,20 +147,33 @@ def run_capture(snap: Snapshot, cfg: dict, history: list,
             return Outcome(SENSITIVE), None, trace
         else:
             trace.add("sensitive", "未命中")
-    # ---- 阶段 2:指纹 + 去重(纯读扫描,返回决策)----
+    # ---- 阶段 2:指纹 + 去重(纯读,返回决策)----
     key = fingerprint(snap)
     trace.add("fingerprint", repr(key)[:80])
-    for i, h in enumerate(history):
-        if fingerprint_of_rec(h, sha1_fallback) == key:
-            if h.get("pinned"):
-                trace.add("dedup", "命中置顶条目 #%d,跳过" % i)
-                return Outcome(PINNED_SKIP, index=i, key=key), None, trace
-            trace.add("dedup", "命中 #%d,提升到最前(替换式,新 ts)" % i)
-            return Outcome(DUPLICATE, index=i, key=key), make_record(snap), trace
-    trace.add("dedup", "无重复,入库")
-    # ---- 阶段 3:内容分类(轻量徽章;只进 trace,不写入持久化记录)----
+    badge = None
+    if dedup_lookup is not None and snap.kind in dedup_kinds:
+        hit = dedup_lookup(key)
+        if hit is None:
+            trace.add("dedup", "索引无重复,入库")
+        elif hit.get("pinned"):
+            trace.add("dedup", "索引命中置顶条目,跳过")
+            return Outcome(PINNED_SKIP, key=key, rec=hit), None, trace
+        else:
+            trace.add("dedup", "索引命中,提升到最前(替换式,新 ts)")
+            return Outcome(DUPLICATE, key=key, rec=hit), make_record(snap), trace
+    else:
+        for i, h in enumerate(history):
+            if fingerprint_of_rec(h, sha1_fallback) == key:
+                if h.get("pinned"):
+                    trace.add("dedup", "命中置顶条目 #%d,跳过" % i)
+                    return Outcome(PINNED_SKIP, index=i, key=key, rec=h), None, trace
+                trace.add("dedup", "命中 #%d,提升到最前(替换式,新 ts)" % i)
+                return Outcome(DUPLICATE, index=i, key=key, rec=h), \
+                    make_record(snap), trace
+        trace.add("dedup", "无重复,入库")
+    # ---- 阶段 3:内容分类(轻量徽章;只进 trace 与 Outcome,不写入持久化记录)----
     record = make_record(snap)
     if badge_probe is not None and snap.kind == "text":
         badge = badge_probe(snap.content)
         trace.add("classify", "徽章 %s" % badge if badge else "无子类型徽章")
-    return Outcome(KEEP, key=key), record, trace
+    return Outcome(KEEP, key=key, badge=badge), record, trace

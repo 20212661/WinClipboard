@@ -1,0 +1,23 @@
+before   环境                                                img=300      N_HIST=4000 N_BIG=20000 TMP=C:\Users\HAOSHA~1\AppData\Local\Temp\wclb_perf_before_2j89wl_e
+before   U1 首批卡片冷构建 ms(60卡窗口)                                558.1      max=616.9 n=5
+before   U1b 主面板首次 set_view ms                               575.6      
+before   U2 热缓存重复刷新 ms                                        1.08      p95=1.47 max=1.47 n=7
+before   U3 搜索切换往返 ms(过滤+两次重排)                                44.9      p95=49.9 n=5
+before   U4 扩展到500卡 累计ms                                    5274.5      控件=540
+before   U4b 扩展到2000卡 累计ms(500→2000)                       61829.8      控件=2060
+before   U4c 单次 _extend_window(+80) ms                      5530.3      控件=2860
+before   U5 浮层刷新 ms(空查询,limit=60)                              9.9      p95=11.3 n=5
+before   U5b 浮层刷新 ms(关键词)                                     15.9      p95=18.7 n=5
+before   U6 sync_src_combo ms(全历史扫)                            0.3      p95=0.4 n=5
+before   C1 内存 query_view 全量 ms(20000条)                        5.1      p95=6.1 n=5
+before   C1b 内存 query_view limit=60 ms                         5.2      p95=5.5 n=5(限量未减全扫成本)
+before   C2 SQL query_view 全量 ms(20000条)                      45.6      p95=48.2 n=5
+before   C2b SQL query_view limit=60 ms                       59.3      p95=68.4 n=5(limit 未下推→全量ID+pos全映射)
+before   C2c SQL link 分类 limit=60 ms(内存二次过滤)                  79.6      p95=88.7 n=5
+before   C3 满历史新增条目 ms(4000条)                               357.36      p95=379.90 n=15
+before   C3b 重复条目提升 ms                                        2.60      p95=3.15 n=15
+before   C3c _evict 完整计数 ms(超限100条)                           0.32      p95=0.52 n=10
+before   T1 预热全量提交 ms(300张)                                    0.6      提交后队列深度=300
+before   T1b 缓存条目数(无淘汰路径)                                      300 项    300 张全留存=无上限增长证据
+before   T1c 缓存像素占用 MB                                        56.2      仅统计 256px 档位像素字节
+before   总耗时 s                                               204.1      
