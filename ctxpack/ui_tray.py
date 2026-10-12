@@ -47,8 +47,8 @@ def refresh_tray(app):
         tray.refresh()
 
 
-def _toast(app, kind, title, body, duration=5000):
-    parent = getattr(app, "win", None) or getattr(app, "panel", None)
+def _toast(app, kind, title, body, duration=5000, parent=None):
+    parent = parent or getattr(app, "win", None) or getattr(app, "panel", None)
     fn = {"success": InfoBar.success, "warning": InfoBar.warning,
           "error": InfoBar.error}.get(kind, InfoBar.info)
     fn(title, body, parent=parent, position=InfoBarPosition.TOP_RIGHT,
@@ -332,6 +332,13 @@ class ContextTray(SimpleCardWidget):
         self.btn_preview.setFixedHeight(24)
         self.btn_preview.clicked.connect(self.preview)
         h.addWidget(self.btn_preview)
+        self.btn_ask = PushButton("带上下文提问")
+        self.btn_ask.setFont(font(10))
+        self.btn_ask.setFixedHeight(24)
+        self.btn_ask.setToolTip("把拼装结果 + 你的问题发给已配置的 AI 服务"
+                                "(发送前经隐私确认)")
+        self.btn_ask.clicked.connect(self.ask)
+        h.addWidget(self.btn_ask)
         self.btn_copy = PushButton("复制拼装")
         self.btn_copy.setFont(font(10))
         self.btn_copy.setFixedHeight(24)
@@ -339,7 +346,8 @@ class ContextTray(SimpleCardWidget):
         h.addWidget(self.btn_copy)
         root.addLayout(h)
         self._header_extras = (self.cmb_pack, self.btn_new,
-                               self.btn_preview, self.btn_copy)
+                               self.btn_preview, self.btn_ask,
+                               self.btn_copy)
 
         # ---- 预算进度条(展开态) ----
         pu = QHBoxLayout()
@@ -534,6 +542,13 @@ class ContextTray(SimpleCardWidget):
                             a.used_tokens))
         v.setAttribute(Qt.WA_DeleteOnClose)
         v.show()
+
+    def ask(self):
+        """带上下文提问(小对话框;延迟 import,不影响托盘导入)。"""
+        from .ui_ask import AskContextDialog
+        dlg = AskContextDialog(self.app)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.show()
 
     def copy_assembled(self):
         """复制拼装结果(走查看器 _copy_or_warn:失败如实提示)。"""

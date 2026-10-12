@@ -637,10 +637,41 @@ class WorkflowEditorWindow(QWidget):
         h.addWidget(self.e_name, 1)
         v.addLayout(h)
 
+        # 上下文包绑定:{context} 占位符注入拼装结果(预算/敏感规则见上下文篮)
+        h2 = QHBoxLayout()
+        lab2 = BodyLabel("上下文包")
+        lab2.setStyleSheet("color: %s;" % SEC)
+        self.cmb_ctx = ComboBox()
+        self._ctx_values = [""]
+        _ctx_items = ["不使用"]
+        try:
+            from ctxpack.ui_tray import tray_service
+            _svc = tray_service(app)
+            if _svc.packs:
+                self._ctx_values.append("@active")
+                _ctx_items.append("活动包(%s)" % _svc.active_pack().name
+                                  if _svc.active_pack() else "活动包")
+                for _p in _svc.packs:
+                    self._ctx_values.append(_p.pid)
+                    _ctx_items.append(_p.name)
+        except Exception:
+            pass
+        self.cmb_ctx.addItems(_ctx_items)
+        _cur_cp = (wf or {}).get("context_pack") or ""
+        self.cmb_ctx.setCurrentIndex(
+            self._ctx_values.index(_cur_cp) if _cur_cp in self._ctx_values else 0)
+        self.cmb_ctx.setToolTip(
+            "提示词里的 {context} 占位符替换为该包的拼装结果"
+            "(token 预算内自动截断;发送前仍经隐私确认)")
+        h2.addWidget(lab2)
+        h2.addWidget(self.cmb_ctx, 1)
+        v.addLayout(h2)
+
         hint = CaptionLabel("步骤类型:本地 AI(API 调用)、网页 AI(提示词进剪贴板,可选自动打开网页)、"
                             "人工确认(粘贴/编辑后继续)、复制到剪贴板、文本变换(本地白名单操作)、"
                             "条件判断(命中正则继续,未命中停链)。提示词占位符:{input}/{previous} = "
-                            "上一步产出(首步=原始输入),{origin} = 原始输入。")
+                            "上一步产出(首步=原始输入),{origin} = 原始输入,"
+                            "{context} = 绑定的上下文包拼装(若上方选择了包)。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: %s;" % TER)
         v.addWidget(hint)
@@ -827,15 +858,18 @@ class WorkflowEditorWindow(QWidget):
             else:                                              # if
                 steps.append({"kind": "if", "pattern": r["arg1"].text().strip()})
         wflist = self.app.cfg.setdefault("ai_workflows", [])
+        cp = self._ctx_values[self.cmb_ctx.currentIndex()]
         if self.wf is not None:
             self.wf.clear()
-            self.wf.update({"name": name, "steps": steps})
+            self.wf.update({"name": name, "steps": steps,
+                            "context_pack": cp or None})
         else:
             if any(w.get("name") == name for w in wflist):
                 InfoBar.error("名称重复", "已存在同名工作流:%s" % name, parent=self,
                               position=InfoBarPosition.TOP_RIGHT)
                 return
-            wflist.append({"name": name, "steps": steps})
+            wflist.append({"name": name, "steps": steps,
+                           "context_pack": cp or None})
         cm.save_config(self.app.cfg)
         if self.on_saved:
             self.on_saved()
@@ -978,6 +1012,32 @@ class WorkflowPage(QWidget):
                         parent=self, position=InfoBarPosition.TOP_RIGHT)
 
 
+def resolve_wf_context(app, wf):
+    """工作流 → ({context} 拼装文本, 错误说明)。
+
+    wf.context_pack:null(默认,不使用,行为完全不变)| 包 id | "@active"。
+    拼装包含已放行的敏感条目(发送前各 AI 步骤仍必经隐私门);
+    指令条目超预算 / 包不存在 / 没有启用条目 → 返回错误,运行台拒绝启动。"""
+    cp = (wf or {}).get("context_pack")
+    if not cp:
+        return "", ""
+    from ctxpack.ui_tray import tray_service
+    from ctxpack.assemble import assemble
+    from ctxpack.budget import BudgetError
+    svc = tray_service(app)
+    pack = svc.active_pack() if cp == "@active" else svc.get(cp)
+    if pack is None:
+        return "", "绑定的工作流上下文包不存在(可能已被删除)"
+    try:
+        a = assemble(pack, include_sensitive=True)
+    except BudgetError as e:
+        return "", "上下文包指令条目超出预算(%s);请调大预算或精简指令条目" % (
+            e.detail or "INSTRUCTIONS_OVER_BUDGET")
+    if not a.ok:
+        return "", "上下文包没有启用中的条目,无法拼装"
+    return a.text, ""
+
+
 class WorkflowRunner(QWidget):
     """工作流运行台:步骤经 workflow_steps 契约分发(ai/web/human/
     clipboard/transform/if,见 STEP_REGISTRY)。
@@ -989,12 +1049,17 @@ class WorkflowRunner(QWidget):
     """
 
     def __init__(self, app, wf, content):
+        # {context}:绑定包先拼装,失败即拒绝启动(不发无上下文的半截请求)
+        ctx_text, ctx_err = resolve_wf_context(app, wf)
+        if ctx_err:
+            raise RuntimeError(ctx_err)
         super().__init__(None)
         self.app = app
         self.wf = wf
         self.steps = wf.get("steps") or []
         self.step_idx = 0
         self._origin = content          # 工作流原始输入({origin})
+        self._context_text = ctx_text   # {context} 上下文包拼装文本(恒定)
         self.cur = content                 # 链上当前内容(可能是人工编辑后的)
         self.results = []                  # 每步产出的文本
         self._worker = None
@@ -1299,7 +1364,8 @@ class WorkflowRunner(QWidget):
             privacy_gate=self._privacy_gate,
             start_ai=self._start_ai,
             copy_text=self.app.core.copy_text,
-            open_url=self._open_url)
+            open_url=self._open_url,
+            context=self._context_text)
 
     def _open_url(self, url):
         try:

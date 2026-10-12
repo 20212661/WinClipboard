@@ -41,10 +41,11 @@ class WorkflowContext:
     """一次工作流运行的上下文:链上内容 + 宿主回调。"""
 
     def __init__(self, input_text="", find_service=None, privacy_gate=None,
-                 start_ai=None, copy_text=None, open_url=None):
+                 start_ai=None, copy_text=None, open_url=None, context=""):
         self.origin = str(input_text or "")    # 工作流原始输入(恒定)
         self.previous = str(input_text or "")  # 链上当前内容(每步由运行台同步)
         self.index = 0                          # 当前步骤序号(运行台同步)
+        self.context = str(context or "")       # {context}:工作流绑定的上下文包拼装
         self.find_service = find_service        # name -> service dict | None
         self.privacy_gate = privacy_gate        # (prompt, svc) -> prompt | None(取消)
         self.start_ai = start_ai                # (svc, prompt, done) -> 可取消句柄
@@ -54,6 +55,7 @@ class WorkflowContext:
     def render(self, template):
         s = _s(template)
         s = s.replace("{origin}", self.origin)
+        s = s.replace("{context}", self.context)
         s = s.replace("{previous}", self.previous)
         s = s.replace("{input}", self.previous)
         return s

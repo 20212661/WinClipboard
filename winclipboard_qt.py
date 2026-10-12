@@ -3513,7 +3513,12 @@ class WinClipboardApp(QObject):
         self.win.switchTo(self.win.services_page)
 
     def run_workflow(self, wf, rec):
-        runner = WorkflowRunner(self, wf, rec["content"])
+        try:
+            runner = WorkflowRunner(self, wf, rec["content"])
+        except Exception as exc:      # 上下文包无法拼装等:拒绝启动并如实说明
+            InfoBar.error("工作流无法启动", str(exc), parent=self.win,
+                          position=InfoBarPosition.TOP_RIGHT, duration=8000)
+            return
         _pop_to_front(runner)
         self._ai_runners.append(runner)
 
