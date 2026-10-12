@@ -88,6 +88,23 @@ CFG = {"ai_services": [
      "model": "glm-4-flash", "api_key": "sk-demo"},
     {"name": "DeepSeek", "base_url": "https://api.deepseek.com/v1",
      "model": "deepseek-chat", "api_key": ""},
+], "ai_workflows": [
+    {"name": "翻译 → 润色", "steps": [
+        {"kind": "ai", "service": "GLM", "prompt": "把下面的内容翻译成英文:\n{input}"},
+        {"kind": "ai", "service": "DeepSeek", "prompt": "润色以下英文,使其更自然:\n{previous}"},
+        {"kind": "human", "prompt": "确认译文后继续"},
+    ]},
+    {"name": "网页问答", "steps": [
+        {"kind": "web", "prompt": "{input}",
+         "url": "https://chat.openai.com/?q={prompt}"},
+        {"kind": "human", "prompt": "粘贴网页回答后继续"},
+        {"kind": "clipboard"},
+    ]},
+    {"name": "会议纪要整理", "steps": [
+        {"kind": "transform", "op": "trim"},
+        {"kind": "ai", "service": "GLM", "prompt": "把纪要整理成要点列表:\n{input}"},
+        {"kind": "if", "pattern": "^- "},
+    ]},
 ]}
 
 
@@ -152,6 +169,9 @@ class FakeApp(QObject):
     def show_shortcut_help(self):
         pass
 
+    def show_services(self):
+        pass
+
 
 fake = FakeApp()
 fake._viewers = []
@@ -182,6 +202,14 @@ if "settings" in PAGES:
     app.processEvents()
     p.grab().save(os.path.join(TMP, "settings_%s%s.png" % (MODE, SUFFIX)))
     print("saved settings_%s%s.png" % (MODE, SUFFIX))
+
+if "workflow" in PAGES:
+    p = wq.WorkflowPage(fake)
+    p.resize(*SIZE)
+    p.show()
+    app.processEvents()
+    p.grab().save(os.path.join(TMP, "workflow_%s%s.png" % (MODE, SUFFIX)))
+    print("saved workflow_%s%s.png" % (MODE, SUFFIX))
 
 if "private" in PAGES:
     p = wq.PrivatePage(fake)
