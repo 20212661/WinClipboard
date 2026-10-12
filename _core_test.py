@@ -22,6 +22,9 @@ cm.BLOB_DIR = os.path.join(TMP, "data", "blobs")   # 与 blob_full_path 布局�
 cm.HISTORY_FILE = os.path.join(TMP, "history.json")
 cm.PRIVATE_FILE = os.path.join(TMP, "private.json")
 cm.CONFIG_FILE = os.path.join(TMP, "config.json")
+cm.DB_FILE = os.path.join(TMP, "clipboard.db")
+cm.ICON_FILE = os.path.join(TMP, "icon.ico")
+cm.BOOT_STATE_FILE = os.path.join(TMP, "boot_state.json")
 cm.LOG_FILE = os.path.join(TMP, "app.log")
 os.makedirs(cm.IMAGE_DIR, exist_ok=True)
 os.makedirs(cm.BLOB_DIR, exist_ok=True)
@@ -45,7 +48,8 @@ def make_core(history=None, private=None, cfg=None, max_items=100):
     core.private = private if private is not None else []
     core.signal_q = queue.Queue()
     core.worker = SimpleNamespace(cmd_q=queue.Queue())   # 粘贴命令桩
-    core._set_clipboard = lambda rec: None               # 不碰系统剪贴板
+    core._set_clipboard = lambda rec: True        # 成功桩(不碰系统剪贴板);
+                                                   # 失败桩见 _clipboard_failure_test
     core.monitor_paused = False                          # 捕获门(暂停/排除)测试前置
     core._exclude_set = set()
     return core
@@ -81,9 +85,9 @@ core = make_core(max_items=3)
 for i in range(6):
     core.add_item(("text", "n%d" % i))
 check("超量淘汰", [h["content"] for h in core.history] == ["n5", "n4", "n3"])
-core.toggle_pin_at(2)                             # 置顶 n3(最旧)
-core.add_item(("text", "new"))                    # 超量时淘汰非置顶的 n4,n3 保留
-check("置顶豁免淘汰", [h["content"] for h in core.history] == ["new", "n5", "n3"]
+core.toggle_pin_at(2)                             # 置顶 n3(最旧)——置顶不占未置顶预算
+core.add_item(("text", "new"))                    # 未置顶 new,n5,n4 = 3 恰好,n4 不再被挤掉
+check("置顶豁免淘汰", [h["content"] for h in core.history] == ["new", "n5", "n4", "n3"]
       and core.history[-1]["pinned"] is True)
 
 # ---- paste_record:重排 / 文件丢失 / auto_paste 默认关 ----
@@ -354,6 +358,9 @@ check("version_tuple 排序语义", cm.version_tuple("1.0.10") > cm.version_tupl
       and cm.version_tuple("2.0") > cm.version_tuple("1.99.99")
       and cm.version_tuple("1.0.0") == cm.version_tuple("1.0"))
 check("APP_VERSION 可解析且非零", cm.version_tuple(cm.APP_VERSION) >= (1, 0, 0))
+check("发布元数据同源", cm.REPO_URL == "https://github.com/20212661/WinClipboard"
+      and cm.RELEASE_API ==
+      "https://api.github.com/repos/20212661/WinClipboard/releases/latest")
 
 # ---- 私密区持久化往返 + DPAPI 加密 ----
 cm.save_private(["甲", "b&c", "✓ 多行\n文本"])
@@ -366,9 +373,15 @@ check("private 已加密", stored.get("dpapi") is True and "甲" not in raw and 
 Path(cm.PRIVATE_FILE).write_text(_json.dumps(["旧明文1", "旧明文2"], ensure_ascii=False),
                                   encoding="utf-8")
 check("旧明文兼容", cm.load_private() == ["旧明文1", "旧明文2"])
-# 解密失败不覆盖原文件(伪造密文)
+# 解密失败:清掉备份链后为"不可读"(空列表 + 状态可查 + 原文件保留不覆写);
+# 有可用备份时按设计从备份恢复(详见 _privacy_regression_test)
+for _i in (1, 2, 3):
+    _bp = cm.PRIVATE_FILE + ".bak%d" % _i
+    if Path(_bp).exists():
+        Path(_bp).unlink()
 Path(cm.PRIVATE_FILE).write_text('{"dpapi": true, "data": "AAAAzw=="}', encoding="utf-8")
 check("坏密文返回空", cm.load_private() == [])
+check("坏密文状态不可读", cm.load_private_status().status == "unreadable")
 # 启动迁移:明文文件 → 立即升级加密
 Path(cm.PRIVATE_FILE).write_text(_json.dumps(["迁移项"], ensure_ascii=False),
                                   encoding="utf-8")

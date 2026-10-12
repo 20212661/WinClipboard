@@ -31,6 +31,8 @@ import subprocess
 import threading
 import traceback
 import pipeline                      # 捕获管线(纯阶段;cm → pipeline 单向)
+from app_meta import (APP_NAME, APP_VERSION, REPO_URL, RELEASE_API,
+                      RELEASE_API_HOST, RELEASE_API_PATH)
 from store import ClipboardStore, blob_full_path   # SQLite 历史存储 + blob 分片路径
 from concurrent.futures import ThreadPoolExecutor
 from collections import namedtuple
@@ -57,10 +59,6 @@ except ImportError:
 # ============================================================
 # 路径 / 常量
 # ============================================================
-APP_NAME = "WinClipboard"
-APP_VERSION = "1.0.0-rc1"  # 产品化首个发布候选(关于/导出载荷/更新检查共用)
-REPO_URL = "https://github.com/20212661/WinClipboard"
-RELEASE_API = "https://api.github.com/repos/haoshangyang/WinClipboard/releases/latest"
 _APPDATA = os.environ.get("APPDATA", os.path.expanduser("~"))
 APP_DIR = os.path.join(_APPDATA, APP_NAME)
 IMAGE_DIR = os.path.join(APP_DIR, "images")      # 旧布局(迁移期兼容)
@@ -73,45 +71,26 @@ PRIVATE_FILE = os.path.join(APP_DIR, "private.json")   # 敏感内容隔离区
 LOG_FILE = os.path.join(APP_DIR, "app.log")            # 崩溃/运行日志
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
-# 消息
-WM_TASKBAR = win32con.WM_USER + 20
-WM_HOTKEY = 0x0312
-WM_CLIPBOARDUPDATE = 0x031D
-WM_TIMER = 0x0113
-WM_COMMAND = 0x0111
+# ---- 阶段 8 拆分:Windows 适配层迁至 win32_host(以下名兼容重导出) ----
+from win32_host import (
+    WM_TASKBAR, WM_HOTKEY, WM_CLIPBOARDUPDATE, WM_TIMER, WM_COMMAND,
+    MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
+    M_SHOW, M_CLEAR, M_PRIVATE, M_AUTOSTART, M_ABOUT, M_QUIT,
+    M_CTT_OFF, M_PAUSE, ID_TIMER, ID_TIMER_CAPTURE,
+    ID_HOTKEY, ID_HOTKEY_PIN, ID_HOTKEY_CTT, ID_HOTKEY_QP,
+    _VK_OEM_NAMES, hotkey_label, single_instance, foreground_app_exe,
+    png_to_dib, DROPFILES, build_dropfiles,
+    MOUSEINPUT, HARDWAREINPUT, INPUT_UNION, INPUT, INPUT_KEYBOARD,
+    KEYEVENTF_KEYUP, VK_CONTROL, VK_V, KEYBDINPUT, send_ctrl_v,
+    _get_foreground, _get_clip_seq, TrayWorker)
 
-# 热键修饰键
-MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN = 0x0001, 0x0002, 0x0004, 0x0008
 
-# 托盘菜单项 ID
-M_SHOW, M_CLEAR, M_PRIVATE, M_AUTOSTART, M_ABOUT, M_QUIT = 1001, 1002, 1003, 1004, 1005, 1006
-M_CTT_OFF = 1007                # 退出图钉画布鼠标穿透(穿透中唯一可点入口之一)
-M_PAUSE = 1008                   # 暂停/恢复剪贴板监听(临时隐私模式,不落盘)
-ID_TIMER = 2001
-ID_TIMER_CAPTURE = 2002      # 启动剪贴板捕获(单次)
-ID_HOTKEY = 100              # 主热键(Ctrl+Shift+V)
-ID_HOTKEY_PIN = 102          # 图钉画布:直接钉剪贴板图片(Ctrl+Shift+P)
-ID_HOTKEY_CTT = 103          # 图钉画布:鼠标穿透切换(Ctrl+Alt+T)
-ID_HOTKEY_QP = 104           # 快捷粘贴浮层(默认 Alt+`)
 
-# 部分 win32con 构建缺失的托盘常量,这里显式定义(避免 AttributeError)
-NIM_ADD = 0x00000000
-NIM_MODIFY = 0x00000001
-NIM_DELETE = 0x00000002
-NIF_MESSAGE = 0x00000001
-NIF_ICON = 0x00000002
-NIF_TIP = 0x00000004
-
-# Win32
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 # OEM 键的 VK → 显示名(快捷粘贴默认 Alt+`,录制对话框也允许这些键)
-_VK_OEM_NAMES = {
-    0xC0: "`", 0xBD: "-", 0xBB: "=", 0xBC: ",", 0xBE: ".",
-    0xBF: "/", 0xBA: ";", 0xDE: "'", 0xDB: "[", 0xDD: "]",
-    0xDC: "\\",
-}
+
 
 DEFAULT_CFG = {
     "hotkey_mod": MOD_CONTROL | MOD_SHIFT,
@@ -135,58 +114,10 @@ DEFAULT_CFG = {
 }
 
 
-def hotkey_label(mod, key=None):
-    """热键位掩码+虚拟键码 → "Ctrl+Shift+V" 可读文本。
-    key=None 表示只按了修饰键(录制过程中的中间态),结尾显示 "…"。"""
-    parts = []
-    if int(mod) & MOD_ALT:
-        parts.append("Alt")
-    if int(mod) & MOD_CONTROL:
-        parts.append("Ctrl")
-    if int(mod) & MOD_SHIFT:
-        parts.append("Shift")
-    if int(mod) & MOD_WIN:
-        parts.append("Win")
-    if key is None:
-        parts.append("…")
-        return "+".join(parts)
-    k = int(key)
-    if 0x30 <= k <= 0x39 or 0x41 <= k <= 0x5A:
-        parts.append(chr(k))
-    elif 0x70 <= k <= 0x7B:                     # VK_F1..VK_F12
-        parts.append("F%d" % (k - 0x6F))
-    elif k == 0x20:
-        parts.append("空格")
-    elif k in _VK_OEM_NAMES:
-        parts.append(_VK_OEM_NAMES[k])
-    else:
-        parts.append("VK 0x%02X" % k)
-    return "+".join(parts)
-
-
-# ---- 面板外观(Apple 风格)----
-SHD = 26                # 窗口四周阴影边距
-PANEL_R = 20            # 面板圆角半径
-KEY_RGB = (254, 0, 254)         # 透明色键
-BG_RGB = (245, 245, 247)        # Apple 浅灰背景
-
 # 面板内图片缩略图尺寸 / 高质量缩放采样器
 THUMB_W, THUMB_H = 88, 44
 RESAMPLE = getattr(Image, "Resampling", Image).LANCZOS
 
-# ---- ctypes 原型 ----
-user32.AddClipboardFormatListener.argtypes = [wintypes.HWND]
-user32.AddClipboardFormatListener.restype = wintypes.BOOL
-user32.RemoveClipboardFormatListener.argtypes = [wintypes.HWND]
-user32.RemoveClipboardFormatListener.restype = wintypes.BOOL
-user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
-user32.RegisterHotKey.restype = wintypes.BOOL
-user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
-user32.UnregisterHotKey.restype = wintypes.BOOL
-user32.SetTimer.argtypes = [wintypes.HWND, ctypes.c_size_t, wintypes.UINT, ctypes.c_void_p]
-user32.SetTimer.restype = ctypes.c_size_t
-kernel32.CreateMutexW.argtypes = [wintypes.LPCVOID, wintypes.BOOL, wintypes.LPCWSTR]
-kernel32.CreateMutexW.restype = wintypes.HANDLE
 
 
 def apply_rounded_corners(hwnd):
@@ -275,34 +206,18 @@ def mark_clean_quit():
     _write_boot_state(0, False)
 
 
-def _dec_field(value):
-    """解密一个密文字段({"dpapi":bool,"data":<b64>});明文原样返回,解密失败返回 None。"""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict) and "data" in value:
-        try:
-            blob = base64.b64decode(value["data"])
-        except Exception:
-            return None
-        if value.get("dpapi"):
-            blob = _dpapi_unprotect(blob)
-            if blob is None:
-                return None
-        try:
-            return blob.decode("utf-8")
-        except Exception:
-            return None
-    return None
+# ---- 阶段 8 拆分:存储服务层迁至 privacy_store / history_store(兼容重导出) ----
+from privacy_store import (
+    _DPAPI_ENTROPY, _dpapi_protect, _dpapi_unprotect, dpapi_available,
+    _enc_field, _dec_field,
+    PrivateLoadResult, PrivateSaveResult, PRIVATE_BACKUPS,
+    _private_bak_paths, _private_parse_file, load_private_status,
+    _private_quarantine_corrupt, load_private, _private_rotate_backups,
+    _private_write_payload, _private_cleanup_tmp, save_private)
+from history_store import (
+    _history_from_container, load_history, save_history,
+    _encrypt_history_residuals, _remove_history_database)
 
-
-def _enc_field(text):
-    """把明文字段封装为密文 dict;DPAPI 不可用时退化为编码明文(并记日志)。"""
-    raw = str(text).encode("utf-8")
-    blob = _dpapi_protect(raw)
-    if blob is None:
-        log("win32crypt 不可用,AI 服务密钥退化为明文存储")
-    return {"dpapi": blob is not None,
-            "data": base64.b64encode(blob if blob is not None else raw).decode("ascii")}
 
 
 def _load_config_raw():
@@ -369,11 +284,12 @@ def load_config():
 
 
 def _migrate_config_file():
-    """就地把 config.json 里的明文密钥封装为密文(不轮转备份)。
+    """就地将 config.json 里的明文密钥封装为密文(不轮转备份)。
 
     启动迁移必须先跑这一步再 save_config:否则旧的明文文件会被轮转进
     config.json.bak1,密钥以明文形式残留在备份里,等于没加密。
-    """
+    任何密钥加密失败(DPAPI 不可用)→ 整体放弃迁移:明文原件保持原样
+    (可恢复来源),不产生半加密状态。"""
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             raw = f.read()
@@ -383,7 +299,11 @@ def _migrate_config_file():
         changed = False
         for s in data.get("ai_services") or []:
             if isinstance(s, dict) and isinstance(s.get("api_key"), str) and s["api_key"]:
-                s["api_key"] = _enc_field(s["api_key"])
+                enc = _enc_field(s["api_key"])
+                if enc is None:
+                    log("config.json 明文密钥迁移失败(DPAPI 不可用),明文原件保留待修复")
+                    return
+                s["api_key"] = enc
                 changed = True
         if not changed:
             return
@@ -414,7 +334,11 @@ def _rotate_config_backup():
 
 
 def save_config(cfg):
-    """原子写配置:滚动备份 + 临时文件替换;密钥字段落盘前一律 DPAPI 加密。"""
+    """原子写配置:滚动备份 + 临时文件替换;密钥字段落盘前一律 DPAPI 加密。
+
+    任何密钥加密失败(DPAPI 不可用)→ 整体放弃本次保存(在轮转备份与
+    临时文件写入之前):原文件与备份保持不变(已有有效配置仍可恢复),
+    返回 False 供调用方如实反馈"未保存"。"""
     out = dict(cfg)
     try:
         svcs = []
@@ -422,192 +346,34 @@ def save_config(cfg):
             s = dict(s) if isinstance(s, dict) else s
             if isinstance(s, dict) and s.get("api_key") and \
                     not (isinstance(s["api_key"], dict) and "data" in s["api_key"]):
-                s["api_key"] = _enc_field(s["api_key"])
+                enc = _enc_field(s["api_key"])
+                if enc is None:
+                    log("配置保存失败:AI 服务密钥加密不可用,原文件与备份保持不变")
+                    return False
+                s["api_key"] = enc
             svcs.append(s)
         out["ai_services"] = svcs
     except Exception:
         log("配置密钥加密失败:\n%s" % traceback.format_exc())
+        return False
     tmp = CONFIG_FILE + ".tmp"
     try:
         _rotate_config_backup()
         Path(tmp).write_text(json.dumps(out, ensure_ascii=False, indent=2),
                              encoding="utf-8")
         os.replace(tmp, CONFIG_FILE)
+        return True
     except Exception:
         log("配置写入失败:\n%s" % traceback.format_exc())
         try:
             os.remove(tmp)
         except Exception:
             pass
+        return False
 
 
-def _history_from_container(data):
-    """历史容器解包:旧版明文 list,或新版 {"dpapi":bool,"data":<b64>} 整体
-    DPAPI 加密(与私密区同一机制);解析/解密失败返回 None(交给上层试备份)。"""
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict) and "data" in data:
-        try:
-            blob = base64.b64decode(data["data"])
-            if data.get("dpapi"):
-                blob = _dpapi_unprotect(blob)
-                if blob is None:
-                    log("history.json 解密失败(DPAPI),尝试备份恢复")
-                    return None
-            out = json.loads(blob.decode("utf-8"))
-            return out if isinstance(out, list) else None
-        except Exception:
-            return None
-    return None
 
 
-def load_history():
-    # 主文件损坏时依次回退到最近备份(.bak1/.bak2/.bak3);明文/加密两种
-    # 格式都会被 _history_from_container 识别(备份里两种混存也各自可用)
-    for fp in (HISTORY_FILE, HISTORY_FILE + ".bak1",
-               HISTORY_FILE + ".bak2", HISTORY_FILE + ".bak3"):
-        try:
-            with open(fp, "r", encoding="utf-8") as f:
-                data = _history_from_container(json.load(f))
-        except Exception:
-            continue
-        if not isinstance(data, list):
-            continue
-        # 清理文件已丢失的图片/文件条目
-        cleaned = []
-        for h in data:
-            if not isinstance(h, dict):
-                continue
-            if h.get("type") == "image":
-                if not os.path.exists(h.get("content", "")):
-                    continue
-            elif h.get("type") == "files":
-                if not any(os.path.exists(p) for p in h.get("content", [])):
-                    continue
-            cleaned.append(h)
-        if fp != HISTORY_FILE:
-            log("history.json 不可用,已从备份恢复: %s" % os.path.basename(fp))
-        return cleaned
-    return []
-
-
-def _rotate_history_backup():
-    """滚动备份:旧 history.json -> .bak1 -> .bak2 -> .bak3(最多保留 3 份)。"""
-    try:
-        if not os.path.exists(HISTORY_FILE):
-            return
-        for i in (2, 1):
-            src = "%s.bak%d" % (HISTORY_FILE, i)
-            dst = "%s.bak%d" % (HISTORY_FILE, i + 1)
-            if os.path.exists(src):
-                os.replace(src, dst)
-        os.replace(HISTORY_FILE, HISTORY_FILE + ".bak1")
-    except Exception:
-        pass
-
-
-def save_history(hist, encrypt=False):
-    """原子写 + 滚动备份。encrypt=True 时整体 DPAPI 加密成
-    {"dpapi":true,"data":<b64>} 容器(与私密区同一机制,绑定当前用户);
-    读取两种格式自动识别(load_history)。DPAPI 不可用时本次退化为明文并记日志。"""
-    payload = hist
-    if encrypt:
-        blob = _dpapi_protect(json.dumps(hist, ensure_ascii=False).encode("utf-8"))
-        if blob is None:
-            log("win32crypt 不可用,history.json 本次以明文保存")
-        else:
-            payload = {"dpapi": True,
-                       "data": base64.b64encode(blob).decode("ascii")}
-    tmp = HISTORY_FILE + ".tmp"
-    try:
-        _rotate_history_backup()
-        Path(tmp).write_text(json.dumps(payload, ensure_ascii=False),
-                             encoding="utf-8")
-        os.replace(tmp, HISTORY_FILE)
-    except Exception:
-        try:
-            os.remove(tmp)
-        except Exception:
-            pass
-
-
-# ---- 私密区 DPAPI 加密(绑定当前 Windows 用户账号,同机其他用户/复制文件均不可读) ----
-_DPAPI_ENTROPY = b"WinClipboard.private"
-
-
-def _dpapi_protect(data):
-    """DPAPI(CurrentUser 作用域)加密;win32crypt 不可用或失败返回 None。"""
-    if win32crypt is None:
-        return None
-    try:
-        out = win32crypt.CryptProtectData(data, None, _DPAPI_ENTROPY, None, None, 0)
-        return out[-1] if isinstance(out, tuple) else out   # 兼容 (数据, 描述) 返回形式
-    except Exception:
-        return None
-
-
-def _dpapi_unprotect(blob):
-    if win32crypt is None:
-        return None
-    try:
-        # 注意:此版 pywin32 的 CryptUnprotectData 无 DataDescr 参数,只收 5 个
-        out = win32crypt.CryptUnprotectData(blob, _DPAPI_ENTROPY, None, None, 0)
-        return out[-1] if isinstance(out, tuple) else out
-    except Exception:
-        return None
-
-
-def dpapi_available():
-    """当前环境能否用 DPAPI 加密(win32crypt 可用即 True)。前端据此如实
-    标注私密区的存储强度,DPAPI 缺位时不得宣称“已加密”。"""
-    return win32crypt is not None
-
-
-def load_private():
-    """读私密区:新版 {"dpapi":true,"data":<b64>} 自动解密;旧版明文列表直接兼容
-    (下次保存时自动升级为加密);解密失败不覆盖原文件,数据不丢。"""
-    try:
-        with open(PRIVATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return []
-    if isinstance(data, list):
-        # 旧版明文格式
-        return [s for s in data if isinstance(s, str)]
-    if isinstance(data, dict) and "data" in data:
-        try:
-            blob = base64.b64decode(data["data"])
-            if data.get("dpapi"):
-                blob = _dpapi_unprotect(blob)
-                if blob is None:
-                    log("private.json 解密失败(DPAPI),内容暂不可用,原文件已保留")
-                    return []
-            return [s for s in json.loads(blob.decode("utf-8")) if isinstance(s, str)]
-        except Exception:
-            log("private.json 读取失败:\n%s" % traceback.format_exc())
-            return []
-    return []
-
-
-def save_private(priv):
-    """写私密区:整体 JSON 序列化后 DPAPI 加密落盘(原子替换);
-    win32crypt 不可用时退化为 base64 编码明文并记日志。"""
-    data = json.dumps([s for s in priv if isinstance(s, str)],
-                      ensure_ascii=False).encode("utf-8")
-    blob = _dpapi_protect(data)
-    if blob is None:
-        log("win32crypt 不可用,私密区退化为明文存储")
-    payload = {"dpapi": blob is not None,
-               "data": base64.b64encode(blob if blob is not None else data).decode("ascii")}
-    tmp = PRIVATE_FILE + ".tmp"
-    try:
-        Path(tmp).write_text(json.dumps(payload), encoding="utf-8")
-        os.replace(tmp, PRIVATE_FILE)
-    except Exception:
-        try:
-            os.remove(tmp)
-        except Exception:
-            pass
 
 
 def version_tuple(v):
@@ -636,8 +402,8 @@ def fetch_latest_release():
     只查不装:发现新版由前端打开发布页,下载安装交给用户。"""
     import http.client
     try:
-        conn = http.client.HTTPSConnection("api.github.com", timeout=8)
-        conn.request("GET", "/repos/haoshangyang/WinClipboard/releases/latest",
+        conn = http.client.HTTPSConnection(RELEASE_API_HOST, timeout=8)
+        conn.request("GET", RELEASE_API_PATH,
                      headers={"User-Agent": "WinClipboard-Updater",
                               "Accept": "application/vnd.github+json"})
         resp = conn.getresponse()
@@ -659,10 +425,6 @@ def fetch_latest_release():
         return ("error", "", repr(e)[:120])
 
 
-def single_instance():
-    mutex = kernel32.CreateMutexW(None, False, "Global\\WinClipboard_Mutex_7hasj2k")
-    already = ctypes.get_last_error() == 183  # ERROR_ALREADY_EXISTS
-    return (not already), mutex
 
 
 def is_remote_session():
@@ -677,36 +439,8 @@ def is_remote_session():
         return False
 
 
-def foreground_app_exe():
-    """前台窗口所属进程的 exe 文件名(小写,如 "chrome.exe";失败返回 "")。
-
-    剪贴板事件到达瞬间的前台窗口 ≈ 复制来源应用(用户刚在那儿按了 Ctrl+C),
-    必须在托盘线程立即取——延迟到捕获线程时前台多半已经换窗口。"""
-    try:
-        hwnd = user32.GetForegroundWindow()
-        if not hwnd:
-            return ""
-        pid = ctypes.c_ulong()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if not pid.value:
-            return ""
-        # PROCESS_QUERY_LIMITED_INFORMATION:最小权限,连 UWP/提权进程也能问
-        h = kernel32.OpenProcess(0x1000, False, pid.value)
-        if not h:
-            return ""
-        try:
-            buf = ctypes.create_unicode_buffer(1024)
-            n = ctypes.c_ulong(1024)
-            if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)):
-                return os.path.basename(buf.value).lower()
-            return ""
-        finally:
-            kernel32.CloseHandle(h)
-    except Exception:
-        return ""
 
 
-# ============================================================
 # 日志 / 异常兜底(提升稳定性)
 # ============================================================
 _log_lock = threading.Lock()
@@ -1022,12 +756,6 @@ def pixel_sha256(img):
     return h.hexdigest()
 
 
-def png_to_dib(path):
-    """把 PNG 文件转回 CF_DIB 原始字节(BITMAPINFOHEADER + 像素,24bit)。"""
-    img = Image.open(path).convert("RGB")
-    buf = io.BytesIO()
-    img.save(buf, "BMP")
-    return buf.getvalue()[14:]  # 去掉 14 字节 BITMAPFILEHEADER 即为 DIB
 
 
 def pil_to_dib(img):
@@ -1176,394 +904,10 @@ def set_dib_to_clipboard(hwnd, dib):
     return False
 
 
-class DROPFILES(ctypes.Structure):
-    _fields_ = [("pFiles", ctypes.c_uint32),
-                ("pt_x", ctypes.c_long),
-                ("pt_y", ctypes.c_long),
-                ("fNC", ctypes.c_int),
-                ("fWide", ctypes.c_int)]
 
 
-def build_dropfiles(paths):
-    """构造 CF_HDROP 的 DROPFILES 结构字节(宽字符路径列表,双 NUL 结尾)。"""
-    df = DROPFILES()
-    df.pFiles = ctypes.sizeof(DROPFILES)
-    df.fWide = 1
-    wide = b"".join(p.encode("utf-16-le") + b"\x00\x00" for p in paths) + b"\x00\x00"
-    return ctypes.string_at(ctypes.addressof(df), ctypes.sizeof(DROPFILES)) + wide
 
 
-# ============================================================
-# SendInput(模拟 Ctrl+V)
-# ============================================================
-class KEYBDINPUT(ctypes.Structure):
-    _fields_ = [
-        ("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
-        ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
-        ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
-    ]
-
-
-class MOUSEINPUT(ctypes.Structure):
-    _fields_ = [
-        ("dx", ctypes.c_long), ("dy", ctypes.c_long),
-        ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
-        ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
-    ]
-
-
-class HARDWAREINPUT(ctypes.Structure):
-    _fields_ = [
-        ("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD), ("wParamH", wintypes.WORD),
-    ]
-
-
-class INPUT_UNION(ctypes.Union):
-    _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT), ("hi", HARDWAREINPUT)]
-
-
-class INPUT(ctypes.Structure):
-    _anonymous_ = ("u",)
-    _fields_ = [("type", wintypes.DWORD), ("u", INPUT_UNION)]
-
-
-INPUT_KEYBOARD = 1
-KEYEVENTF_KEYUP = 0x0002
-VK_CONTROL = 0x11
-VK_V = 0x56
-
-user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
-user32.SendInput.restype = wintypes.UINT
-
-
-def send_ctrl_v():
-    arr = (INPUT * 4)()
-    arr[0] = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_CONTROL, 0, 0, 0, None))
-    arr[1] = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_V, 0, 0, 0, None))
-    arr[2] = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_V, 0, KEYEVENTF_KEYUP, 0, None))
-    arr[3] = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0, None))
-    user32.SendInput(4, ctypes.byref(arr), ctypes.sizeof(INPUT))
-
-
-# ---- 粘贴事务(Paste Transaction)----
-# 目标:防止「用户按 Enter 的瞬间窗口切换 → 密码/API Key 被贴到错误窗口」。
-# 前台窗口与剪贴板序列号在发送前轮询校验,任一不符立即取消。
-user32.GetClipboardSequenceNumber.argtypes = []
-user32.GetClipboardSequenceNumber.restype = wintypes.DWORD
-
-
-def _get_foreground():
-    """当前前台窗口句柄(int;失败 0)。测试可替换。"""
-    try:
-        return int(user32.GetForegroundWindow())
-    except Exception:
-        return 0
-
-
-def _get_clip_seq():
-    """系统剪贴板序列号(每次写板自增;0 表示不可用)。"""
-    try:
-        return int(user32.GetClipboardSequenceNumber())
-    except Exception:
-        return 0
-
-
-# ============================================================
-# 托盘 / 后台线程(独立 Win32 消息循环)
-# ============================================================
-class TrayWorker(threading.Thread):
-    def __init__(self, app):
-        super().__init__(daemon=True)
-        self.app = app
-        self.cmd_q = queue.Queue()
-        self.hwnd = None
-        self.hicon = None
-        self._nid = None
-        self._last_toggle = 0.0   # 托盘左键防抖
-
-    # ---- 线程入口 ----
-    def run(self):
-        ensure_dirs()
-        if not os.path.exists(ICON_FILE):
-            try:
-                make_icon(ICON_FILE)
-            except Exception:
-                pass
-        self.hinst = win32api.GetModuleHandle(None)
-
-        # 图标
-        try:
-            self.hicon = win32gui.LoadImage(
-                self.hinst, ICON_FILE, win32con.IMAGE_ICON, 0, 0,
-                win32con.LR_LOADFROMFILE | win32con.LR_DEFAULTSIZE)
-        except Exception:
-            self.hicon = win32gui.LoadIcon(0, win32con.IDI_APPLICATION)
-
-        message_map = {
-            win32con.WM_DESTROY: self.on_destroy,
-            WM_TASKBAR: self.on_taskbar,
-            WM_CLIPBOARDUPDATE: self.on_clip,
-            WM_HOTKEY: self.on_hotkey,
-            WM_TIMER: self.on_timer,
-            WM_COMMAND: self.on_command,
-        }
-        wc = win32gui.WNDCLASS()
-        wc.hInstance = self.hinst
-        wc.lpszClassName = "WinClipboardHostWnd"
-        wc.lpfnWndProc = message_map
-        wc.style = win32con.CS_HREDRAW | win32con.CS_VREDRAW
-        try:
-            class_atom = win32gui.RegisterClass(wc)
-        except win32gui.error:
-            class_atom = wc.lpszClassName
-
-        # 标题不能叫 WinClipboard:否则 FindWindow 会先命中这个隐藏宿主窗口,
-        # 盖过真正的主窗口(外部诊断/_gui_test 全被误导)
-        self.hwnd = win32gui.CreateWindowEx(
-            0, class_atom, "WinClipboardTrayHost", 0, 0, 0, 0, 0, 0, 0,
-            self.hinst, None)
-
-        # 托盘图标
-        # 托盘图标(提示文本跟随实际热键,可在设置页录制更改)
-        _cfg0 = self.app.cfg
-        _hk_tip = "WinClipboard  (%s)" % hotkey_label(
-            _cfg0.get("hotkey_mod", MOD_CONTROL | MOD_SHIFT),
-            _cfg0.get("hotkey_key", 0x56))
-        self._nid = (self.hwnd, 0,
-                     NIF_ICON | NIF_MESSAGE | NIF_TIP,
-                     WM_TASKBAR, self.hicon, _hk_tip)
-        win32gui.Shell_NotifyIcon(NIM_ADD, self._nid)
-
-        # 剪贴板监听 + 全局热键 + 命令定时器
-        user32.AddClipboardFormatListener(self.hwnd)
-        cfg = self.app.cfg
-        if not user32.RegisterHotKey(self.hwnd, ID_HOTKEY,
-                                     cfg["hotkey_mod"], cfg["hotkey_key"]):
-            # 热键注册失败:更新托盘提示并通知主线程弹一次警告
-            try:
-                nid = (self.hwnd, 0, NIF_ICON | NIF_MESSAGE | NIF_TIP, WM_TASKBAR,
-                       self.hicon, "WinClipboard (热键注册失败!)")
-                win32gui.Shell_NotifyIcon(NIM_MODIFY, nid)
-            except Exception:
-                pass
-            self.app._post(("tray", "hotkey_fail"))
-            log("全局热键注册失败(hotkey_mod=%d key=%d)" % (cfg["hotkey_mod"], cfg["hotkey_key"]))
-        # 图钉画布热键:注册失败仅记日志/禁用对应功能,不弹模态
-        pin_ok = user32.RegisterHotKey(self.hwnd, ID_HOTKEY_PIN,
-                                       MOD_CONTROL | MOD_SHIFT, 0x50)   # 'P'
-        ctt_ok = user32.RegisterHotKey(self.hwnd, ID_HOTKEY_CTT,
-                                       MOD_CONTROL | MOD_ALT, 0x54)     # 'T'
-        # 快捷粘贴浮层热键(默认 Alt+`):失败降级为仅设置页提示,不弹模态
-        qp_ok = user32.RegisterHotKey(
-            self.hwnd, ID_HOTKEY_QP,
-            int(cfg.get("quick_mod", MOD_ALT)), int(cfg.get("quick_key", 0xC0)))
-        if not pin_ok:
-            log("图钉热键(Ctrl+Shift+P)被占用,直钉剪贴板不可用")
-        if not ctt_ok:
-            log("穿透热键(Ctrl+Alt+T)被占用,鼠标穿透已禁用")
-        if not qp_ok:
-            log("快捷粘贴热键(%s)被占用,浮层入口不可用(可在设置页录制新组合)"
-                % hotkey_label(cfg.get("quick_mod", MOD_ALT),
-                               cfg.get("quick_key", 0xC0)))
-        self.app._post(("ctt_hotkey_state", bool(ctt_ok)))
-        self.app._post(("qp_hotkey_state", bool(qp_ok)))
-        user32.SetTimer(self.hwnd, ID_TIMER, 80, None)
-
-        # 启动捕获延后到消息循环内:剪贴板里若是大图,PNG 编码可耗时数秒,
-        # 同步做会卡住 PumpMessages 进入循环,热键/托盘在启动初期全部失联
-        user32.SetTimer(self.hwnd, ID_TIMER_CAPTURE, 1, None)
-
-        try:
-            win32gui.PumpMessages()
-        except Exception:
-            log("工作线程消息循环异常退出: %r" % sys.exc_info()[1])
-        finally:
-            # 收尾
-            self._cleanup()
-
-    def _cleanup(self):
-        for fn in (
-            lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY),
-            lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_PIN),
-            lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_CTT),
-            lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_QP),
-            lambda: user32.RemoveClipboardFormatListener(self.hwnd),
-        ):
-            try:
-                fn()
-            except Exception:
-                pass
-        if self._nid:
-            try:
-                win32gui.Shell_NotifyIcon(NIM_DELETE, self._nid)
-            except Exception:
-                pass
-
-    # ---- 消息处理 ----
-    def on_destroy(self, hwnd, msg, wp, lp):
-        win32gui.PostQuitMessage(0)
-        return 0
-
-    def on_taskbar(self, hwnd, msg, wp, lp):
-        if lp in (win32con.WM_LBUTTONUP, win32con.WM_LBUTTONDBLCLK):
-            # 一次双击会连续产生 UP+DBLCLK+UP,做防抖避免面板被切换两次
-            now = time.time()
-            if now - self._last_toggle < 0.45:
-                return 1
-            self._last_toggle = now
-            self.app._post(("tray", "show"))
-        elif lp == win32con.WM_RBUTTONUP:
-            self._popup_menu()
-        return 1
-
-    def on_clip(self, hwnd, msg, wp, lp):
-        # 我们自己写入剪贴板时跳过(时间窗比一次性标志更抗竞态)
-        if time.monotonic() < self.app._ignore_clip_until:
-            return 0
-        # 来源应用在事件到达瞬间取(前台窗口进程),延迟到捕获线程就换窗口了;
-        # 暂停监听/按应用排除在此门控,命中即不入史
-        src = foreground_app_exe()
-        if not self.app.should_capture(src):
-            return 0
-        self.app.submit_capture(src)
-        return 0
-
-    def on_hotkey(self, hwnd, msg, wp, lp):
-        if wp == ID_HOTKEY_PIN:
-            self.app._post(("pin_hotkey",))
-        elif wp == ID_HOTKEY_CTT:
-            self.app._post(("ctt_hotkey",))
-        elif wp == ID_HOTKEY_QP:
-            self.app._post(("qp_hotkey",))
-        else:
-            self.app._post(("hotkey",))
-        return 0
-
-    def on_timer(self, hwnd, msg, wp, lp):
-        if wp == ID_TIMER_CAPTURE:
-            # 单次:进入消息循环后立刻提交启动捕获(编码在捕获线程做)
-            user32.KillTimer(hwnd, ID_TIMER_CAPTURE)
-            self.app.submit_capture()
-            return 0
-        while True:
-            try:
-                cmd = self.cmd_q.get_nowait()
-            except queue.Empty:
-                break
-            self._do_cmd(cmd)
-        return 0
-
-    def on_command(self, hwnd, msg, wp, lp):
-        mid = wp & 0xFFFF
-        actions = {M_SHOW: "show", M_CLEAR: "clear", M_PRIVATE: "private",
-                   M_AUTOSTART: "autostart", M_ABOUT: "about", M_QUIT: "quit",
-                   M_CTT_OFF: "ctt_off", M_PAUSE: "pause"}
-        act = actions.get(mid)
-        if act:
-            self.app._post(("tray", act))
-        return 0
-
-    # ---- 命令处理 ----
-    def _do_cmd(self, cmd):
-        if cmd[0] == "paste":
-            # 粘贴事务:expected = 意图目标窗口(唤出我们窗口之前的那个),
-            # want_seq = 写板完成后的剪贴板序列号。二者在宽限期内校验,
-            # 不符立即取消(防止内容被贴进切换后的错误窗口)。
-            expected = int(cmd[1]) if len(cmd) > 1 and cmd[1] else 0
-            want_seq = int(cmd[2]) if len(cmd) > 2 and cmd[2] else 0
-            if not expected:
-                time.sleep(0.07)          # 旧调用/测试:无目标校验
-                try:
-                    send_ctrl_v()
-                except Exception:
-                    pass
-                return
-            deadline = time.monotonic() + 0.45
-            while time.monotonic() < deadline:
-                time.sleep(0.04)
-                if want_seq and _get_clip_seq() != want_seq:
-                    self.app._post(("paste_abort",
-                                    "剪贴板内容在粘贴前被其他程序修改"))
-                    return
-                if _get_foreground() == expected:
-                    try:
-                        send_ctrl_v()
-                    except Exception:
-                        pass
-                    return
-            self.app._post(("paste_abort", "目标窗口已切换,已取消粘贴"))
-        elif cmd[0] == "hotkey":
-            # 设置页热键录制:重注册即冲突检测,失败回滚旧组合并如实上报
-            mod, key = int(cmd[1]), int(cmd[2])
-            cfg = self.app.cfg
-            try:
-                user32.UnregisterHotKey(self.hwnd, ID_HOTKEY)
-            except Exception:
-                pass
-            ok = bool(user32.RegisterHotKey(self.hwnd, ID_HOTKEY, mod, key))
-            if ok:
-                try:
-                    nid = (self.hwnd, 0, NIF_ICON | NIF_MESSAGE | NIF_TIP,
-                           WM_TASKBAR, self.hicon,
-                           "WinClipboard  (%s)" % hotkey_label(mod, key))
-                    win32gui.Shell_NotifyIcon(NIM_MODIFY, nid)
-                    self._nid = nid
-                except Exception:
-                    pass
-            else:
-                # 被占用:把旧热键注册回去,保持可用
-                user32.RegisterHotKey(self.hwnd, ID_HOTKEY,
-                                      cfg.get("hotkey_mod", MOD_CONTROL | MOD_SHIFT),
-                                      cfg.get("hotkey_key", 0x56))
-            self.app._post(("hotkey_change", ok, mod, key))
-        elif cmd[0] == "hotkey_qp":
-            # 快捷粘贴热键录制:同主热键套路,重注册即冲突检测,失败回滚
-            mod, key = int(cmd[1]), int(cmd[2])
-            cfg = self.app.cfg
-            try:
-                user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_QP)
-            except Exception:
-                pass
-            ok = bool(user32.RegisterHotKey(self.hwnd, ID_HOTKEY_QP, mod, key))
-            if not ok:
-                user32.RegisterHotKey(
-                    self.hwnd, ID_HOTKEY_QP,
-                    int(cfg.get("quick_mod", MOD_ALT)),
-                    int(cfg.get("quick_key", 0xC0)))
-            self.app._post(("qp_hotkey_change", ok, mod, key))
-        elif cmd[0] == "quit":
-            self._cleanup()
-            win32gui.PostQuitMessage(0)
-
-    # ---- 托盘菜单 ----
-    def _popup_menu(self):
-        menu = win32gui.CreatePopupMenu()
-        win32gui.AppendMenu(menu, win32con.MF_STRING, M_SHOW,
-                            "显示剪贴板  (Ctrl+Shift+V)")
-        win32gui.AppendMenu(menu, win32con.MF_STRING, M_CLEAR, "清空历史")
-        pflag = win32con.MF_CHECKED if getattr(self.app, "monitor_paused", False) \
-            else win32con.MF_UNCHECKED
-        win32gui.AppendMenu(menu, win32con.MF_STRING | pflag, M_PAUSE,
-                            "暂停监听(临时隐私模式)")
-        win32gui.AppendMenu(menu, win32con.MF_STRING, M_PRIVATE,
-                            "私密内容 (%d)" % len(self.app.private))
-        flag = win32con.MF_CHECKED if self.app.is_autostart() else win32con.MF_UNCHECKED
-        win32gui.AppendMenu(menu, win32con.MF_STRING | flag, M_AUTOSTART, "开机自启动")
-        # 穿透中的画布自身不收鼠标,托盘菜单是保底关闭入口之一(非穿透时点击无效无害)
-        win32gui.AppendMenu(menu, win32con.MF_STRING, M_CTT_OFF,
-                            "退出画布鼠标穿透")
-        win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
-        win32gui.AppendMenu(menu, win32con.MF_STRING, M_ABOUT, "关于 WinClipboard")
-        win32gui.AppendMenu(menu, win32con.MF_STRING, M_QUIT, "退出")
-        pos = win32gui.GetCursorPos()
-        win32gui.SetForegroundWindow(self.hwnd)  # 必须,否则菜单不消失
-        win32gui.TrackPopupMenu(menu, win32con.TPM_LEFTALIGN | win32con.TPM_BOTTOMALIGN,
-                                pos[0], pos[1], 0, self.hwnd, None)
-        win32gui.PostMessage(self.hwnd, win32con.WM_NULL, 0, 0)
-        win32gui.DestroyMenu(menu)
-
-
-# ============================================================
 # 事务(可撤销操作的统一抽象;Command 模式)
 # 设计:删除类事务条目只进 deleted 态(库模式)或仅出列(JSON 模式),
 # 图片文件一律不动——真正的文件释放只发生在引用计数归零
@@ -1599,6 +943,7 @@ class DeleteTransaction(Transaction):
         gone = [r for r in self.recs if id(r) in live]
         self.core.history[:] = [h for h in self.core.history
                                 if id(h) not in {id(r) for r in gone}]
+        self.core._hist_removed(gone)
         if self.core.store is not None:
             self.core.store.mark_deleted(
                 [r.get("_db") for r in gone if r.get("_db") is not None])
@@ -1608,6 +953,8 @@ class DeleteTransaction(Transaction):
     def rollback(self):
         back = super().rollback()
         self.core.history[0:0] = back
+        for r in back:
+            self.core._hist_added(r)     # 指纹/映射/计数恢复(幂等)
         if self.core.store is not None:
             for r in back:
                 # 行仍存在(仅 deleted 态)→置回 active 并提升最前;
@@ -1642,39 +989,44 @@ class ClipboardCore:
         self.cfg, _cfg_stale = _load_config_raw()
         self._cfg_need_save = _cfg_stale
         self.max_items = int(self.cfg.get("max_items", 100))
-        # SQLite 事实存储(默认模式):启动加载 + 逐操作写透。
-        # encrypt_history 开启时库不做写透(库文件无法整体 DPAPI 加密,
-        # 不静默降级)——但若数据已在库里,仍从库只读加载并导出加密
-        # history.json,杜绝「开加密 → 重启 → 历史消失」的丢失路径。
+        # 加密模式以 JSON（含空历史）为唯一事实源。仅在没有任何 JSON
+        # 文件/备份时从旧库迁移；损坏/无法解密不能拿旧库覆盖当前数据。
         self.store = None
         _want_db = not self.cfg.get("encrypt_history")
         _preload = None
-        try:
-            _preload = ClipboardStore(DB_FILE)
-        except Exception:
-            _preload = None
-            log("SQLite 存储打开失败,本次会话走 JSON 持久化:\n%s"
-                % traceback.format_exc())
-        if _preload is not None and _preload.count() > 0:
+        if not _want_db:
+            has_json = any(os.path.exists(HISTORY_FILE + suffix)
+                           for suffix in ("", ".bak1", ".bak2", ".bak3"))
+            if has_json:
+                self.history = load_history(strict=True)
+            elif os.path.exists(DB_FILE):
+                _preload = ClipboardStore(DB_FILE)
+                try:
+                    self.history = _preload.load_all()
+                finally:
+                    _preload.close()
+            else:
+                self.history = []
+            json_world = True
+        else:
+            try:
+                _preload = ClipboardStore(DB_FILE)
+            except Exception:
+                log("SQLite 存储打开失败,本次会话走 JSON 持久化:\n%s"
+                    % traceback.format_exc())
+        if _want_db and _preload is not None and _preload.count() > 0:
             self.history = _preload.load_all()
             json_world = False
-            if _want_db:
-                self.store = _preload
-            else:
-                _preload.close()
-                save_history(self.history, encrypt=True)
-                log("加密模式开启而数据在 clipboard.db(%d 条):"
-                    "已导出为加密 history.json;关闭加密即回到库模式"
-                    % len(self.history))
-        else:
+            self.store = _preload
+        elif _want_db:
             if _preload is not None:
-                if _want_db:
-                    self.store = _preload
-                else:
-                    _preload.close()
+                self.store = _preload
             self.history = load_history()
             json_world = True
-        self.private = load_private()   # 敏感内容隔离区(不进普通面板)
+        self._private_load = load_private_status()   # 状态感知(不可空/非空判断)
+        self.private = self._private_load.entries   # 敏感内容隔离区(不进普通面板)
+        self._private_dirty = False                 # 有未成功落盘的私密区变更
+        self.private_save_error = ""
         self.signal_q = queue.Queue()
         # 事件唤醒回调(前端注入):queue 只管数据,回调负责把"该排空了"
         # 通知到 UI 线程(如 Qt Signal 的 emit);无 UI / 测试环境保持 None
@@ -1696,6 +1048,11 @@ class ClipboardCore:
         self._ignore_clip_until = 0.0   # 抑制自写入剪贴板事件的截止时间(单调钟)
         # 可撤销操作栈(Transaction;上限批数见 _TXN_MAX)
         self._txn_stack = []
+        # 任何模式转换保存配置前先迁移明文密钥，防止被轮转进备份。
+        self._migrate_config_secrets()
+        if not _want_db:
+            # 同时修复旧版本留下的明文副本；迁移失败停止启动，保留数据。
+            self.set_history_encryption(True)
         if json_world:
             # 历史迁移:补齐哈希、合并重复图片条目(孤儿文件清理延迟到启动后,
             # 见 cleanup_orphan_images;条目迁移仍须在后台线程启动前完成)
@@ -1724,7 +1081,6 @@ class ClipboardCore:
         self._collect_garbage()
         # 旧版明文私密区/密钥自动升级为 DPAPI 加密
         self._migrate_private()
-        self._migrate_config_secrets()
         # 后台线程(托盘 / 全局热键 / 剪贴板监听)。
         # 安全模式只建对象不启线程:cmd_q 等字段仍可用(粘贴命令静默排队,
         # 无消费者),窗口句柄为 None 的剪贴板写入是合法的(OpenClipboard(NULL))。
@@ -1984,6 +1340,7 @@ class ClipboardCore:
             if len(keep) != len(self.history):
                 changed = True
             self.history[:] = keep      # 原地替换,保持前端别名有效
+            self._reset_hist_caches()   # 哈希补齐+成员变化:全部缓存重建
             if changed:
                 save_history(self.history,
                              encrypt=bool(self.cfg.get("encrypt_history")))
@@ -2015,6 +1372,7 @@ class ClipboardCore:
                     keep.append(h)
             if gone:
                 self.history[:] = keep            # 先出列,引用计数才不含自身
+                self._hist_removed(gone)
                 self._store_del(gone)
                 for h in gone:
                     freed += self._free_record_file(h)
@@ -2038,6 +1396,7 @@ class ClipboardCore:
                     self.history.remove(h)      # 先出列(引用计数不含自身)
                 except ValueError:
                     continue
+                self._hist_removed([h])
                 self._store_del([h])
                 sz = self._free_record_file(h)
                 total -= sz
@@ -2141,17 +1500,88 @@ class ClipboardCore:
             return 0
 
     def _migrate_private(self):
-        """旧版明文私密区在启动时立即升级为 DPAPI 加密(不等待下次写入)。"""
-        try:
-            if not self.private:
-                return
-            with open(PRIVATE_FILE, "r", encoding="utf-8") as f:
-                if f.read(1) != "[":    # 已是新版加密格式({"dpapi":...})
-                    return
-            save_private(self.private)
-            log("私密区已自动升级为 DPAPI 加密")
-        except Exception:
-            pass
+        """旧明文私密区在启动时立即升级为 DPAPI 加密。
+
+        主文件与备份链都不得留明文(明文不进备份链,成功后明文原件被
+        加密副本替换);迁移失败保留明文原件(可恢复来源)并如实记录。
+        __new__ 直造的核心(测试)缺加载状态时现查一次。"""
+        st = getattr(self, "_private_load", None)
+        if st is None:
+            st = self._private_load = load_private_status()
+            self.private = st.entries
+        if st.status != "ok" or st.mode != "plaintext":
+            return
+        res = self._private_save()
+        if res.ok:
+            log("私密区已自动升级为 DPAPI 加密(明文不再保留)")
+        else:
+            log("私密区加密迁移失败,明文原件保留:%s" % res.error)
+
+    # ---- 私密区状态与安全写 ----
+    def private_state(self):
+        """当前加载状态(阶段 4 的界面据此展示实际加密情况)。"""
+        return getattr(self, "_private_load", None)
+
+    def _private_can_save(self):
+        """不可读状态下禁止自动覆写原文件(破坏性清空走 clear_private)。"""
+        st = getattr(self, "_private_load", None)
+        if st is not None and st.status == "unreadable":
+            return False, ("原私密区数据无法读取,已禁止自动覆写;"
+                           "如需放弃原数据,请在设置页执行「清空全部数据」"
+                           "或私密区「清空」的破坏性流程")
+        return True, ""
+
+    def _private_save(self):
+        """统一保存出口:成功才清 dirty;失败保持待重试并返回结果。
+        读取失败(unreadable)时不会写文件,原密文/原件保持原样。"""
+        ok, why = self._private_can_save()
+        if not ok:
+            self._private_dirty = True
+            self.private_save_error = why
+            return PrivateSaveResult(False, False, why)
+        res = save_private(self.private)
+        if res.ok:
+            self._private_load = PrivateLoadResult(
+                list(self.private), "ok", "dpapi", "", "")
+            self._private_dirty = False
+            self.private_save_error = ""
+        else:
+            self._private_dirty = True
+            self.private_save_error = res.error
+        return res
+
+    def delete_private(self, i):
+        """删除一条私密条目;失败恢复原列表(与磁盘一致)并返回错误。"""
+        if not 0 <= i < len(self.private):
+            return False, "索引无效"
+        removed = self.private.pop(i)
+        res = self._private_save()
+        if not res.ok:
+            self.private.insert(i, removed)
+            return False, res.error
+        return True, ""
+
+    def clear_private(self):
+        """清空私密区(用户显式确认后的破坏性流程)。
+
+        允许覆写不可读原文件(这是唯一获准的路径);成功后连同备份链与
+        损坏留档一并清除,否则"清空"会把秘密留在备份里。失败恢复原列表。"""
+        backup = list(self.private)
+        st = getattr(self, "_private_load", None)
+        if st is not None and st.status == "unreadable":
+            self._private_load = PrivateLoadResult([], "missing", "none", "", "")
+        self.private.clear()
+        res = self._private_save()
+        if not res.ok:
+            self.private[:] = backup
+            return False, res.error
+        for p in _private_bak_paths() + (PRIVATE_FILE + ".corrupt",):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        return True, ""
 
     def _migrate_config_secrets(self):
         """config.json 需要落盘时写一次:无配置文件(补齐默认值)或存在明文密钥
@@ -2165,11 +1595,12 @@ class ClipboardCore:
             # 先把明文文件就地加密,再轮转/落盘,避免明文残留进 .bak1
             if had_key:
                 _migrate_config_file()
-            save_config(self.cfg)
-            if had_key and win32crypt is None:
-                log("config.json 已写入(AI 服务密钥仍为明文:DPAPI 不可用)")
-            elif had_key:
-                log("config.json 已写入,AI 服务密钥已升级为 DPAPI 密文")
+            if not save_config(self.cfg):
+                log("config.json 写入失败(密钥加密或磁盘问题),原文件保持不变;"
+                    "配置变更保留在内存,下次保存重试")
+                return
+            if had_key:
+                log("config.json 已写入,AI 服务密钥已封装为 DPAPI 密文")
             else:
                 log("config.json 已写入")
         except Exception:
@@ -2201,40 +1632,143 @@ class ClipboardCore:
             return
         gen = getattr(self, "_gen", 0)
         with PerfSpan("history_save"):
-            save_history(self.history,
-                         encrypt=bool(self.cfg.get("encrypt_history")))
+            saved = save_history(self.history,
+                                 encrypt=bool(self.cfg.get("encrypt_history")))
+        if not saved:
+            return  # 失败仍保持脏状态，后续刷新/退出可重试。
         if gen == getattr(self, "_gen", 0):
             self._dirty = False
 
     def add_item(self, item):
         """捕获入口 = 管线编排器:纯决策都在 pipeline.run_capture,
         本方法只执行副作用(写私密区 / 提升置顶 / 入库 + 落盘 + 通知)。
-        每次捕获的阶段轨迹挂 self.last_capture_trace(排障用,见 pipeline.py)。"""
+        每次捕获的阶段轨迹挂 self.last_capture_trace(排障用,见 pipeline.py)。
+        去重走指纹索引(O(1) 查键,不再逐条扫全历史;缺 hash 的旧图片
+        条目自动回退线性扫描,语义与旧实现一致)。"""
         snap = pipeline.Snapshot.from_item(item)
+        # 惰性建索引(首捕一次 O(N);此后增量维护,见 _hist_added/_hist_removed)
+        if getattr(self, "_fp_index", None) is None:
+            self._fp_lookup(None)
         outcome, record, trace = pipeline.run_capture(
             snap, self.cfg, self.history,
             sensitive_probe=_sensitive_reason,
             badge_probe=content_badge,
-            sha1_fallback=file_sha1)
+            sha1_fallback=file_sha1,
+            dedup_lookup=self._fp_lookup,
+            dedup_kinds=self._dedup_kinds())
         self.last_capture_trace = trace
         if outcome.kind == pipeline.SENSITIVE:
             self._add_private(snap.content)
             return
         if outcome.kind == pipeline.PINNED_SKIP:
             return
-        if outcome.kind == pipeline.DUPLICATE and outcome.index is not None:
-            old = self.history.pop(outcome.index)
+        if outcome.kind == pipeline.DUPLICATE and outcome.rec is not None:
+            old = outcome.rec
+            for i, h in enumerate(self.history):   # 按身份出列(勿用值相等 remove)
+                if h is old:
+                    self.history.pop(i)
+                    break
+            self._hist_removed([old])
             self._store_del([old])
         if self.store is not None:
             if record["type"] == "text":
-                badge = content_badge(record["content"])
+                badge = outcome.badge
                 if badge:
-                    record["_subtype"] = badge      # 子类型缓存(仅库模式写入)
+                    record["_subtype"] = badge      # 子类型缓存(仅库模式写入;
+                    # 复用管线结果,不再二次分类)
             self.store.insert(record)
         self.history.insert(0, record)
+        self._hist_added(record)
         self._evict()
         self._mark_dirty()
         self._notify_change()
+
+    # ---- 历史缓存集中维护(指纹索引 / dbid 映射 / 来源集 / 未置顶计数) ----
+    def _fp_lookup(self, key):
+        """指纹键 → 最近一条同指纹活跃记录(无则 None)。首次调用惰性建索引:
+        文本按内容、文件按路径元组、图片按像素 hash;缺 hash 的旧图片条目
+        不进索引(这类捕获自动回退线性扫描,见 _dedup_kinds)。"""
+        idx = getattr(self, "_fp_index", None)
+        if idx is None:
+            idx = self._fp_index = {}
+            nohash = False
+            for h in self.history:
+                k = pipeline.fingerprint_of_rec(h)
+                if k == ("img", ""):
+                    nohash = True
+                    continue
+                idx.setdefault(k, h)      # 历史序=最近在前,首见即最近
+            self._fp_has_nohash_img = nohash
+        return idx.get(key)
+
+    def _dedup_kinds(self):
+        """索引完备的内容类型:图片存在缺 hash 旧条目时不含 image。"""
+        if getattr(self, "_fp_index", None) is None:
+            self._fp_lookup(None)
+        return (("text", "files", "image")
+                if not self._fp_has_nohash_img else ("text", "files"))
+
+    def _hist_added(self, rec):
+        """新条目入史后的增量维护(热路径:捕获)。"""
+        idx = getattr(self, "_fp_index", None)
+        if idx is not None:
+            k = pipeline.fingerprint_of_rec(rec)
+            if k != ("img", ""):
+                idx[k] = rec
+        if getattr(self, "_unpinned_count", None) is not None \
+                and not rec.get("pinned"):
+            self._unpinned_count += 1
+        self._dbid_pos_cache = None
+        self._src_apps_cache = None
+
+    def _hist_removed(self, recs):
+        """条目离开历史后的集中维护(删除/淘汰/清理/撤销入栈等冷路径)。"""
+        if not recs:
+            return
+        idx = getattr(self, "_fp_index", None)
+        sc = getattr(self, "_search_cache", None)
+        for r in recs:
+            if idx is not None:
+                k = pipeline.fingerprint_of_rec(r)
+                if idx.get(k) is r:
+                    del idx[k]
+            if sc:
+                sc.pop(id(r), None)
+        self._dbid_pos_cache = None
+        self._src_apps_cache = None
+        self._unpinned_count = None
+
+    def _hist_reordered(self):
+        """成员不变仅顺序变化(粘贴提升):只需失效位置映射。"""
+        self._dbid_pos_cache = None
+
+    def _reset_hist_caches(self):
+        """整表级变化(清空/模式切换/迁移合并):全部缓存作废重建。"""
+        self._fp_index = None
+        self._fp_has_nohash_img = False
+        self._dbid_pos_cache = None
+        self._src_apps_cache = None
+        self._unpinned_count = None
+        if getattr(self, "_search_cache", None):
+            self._search_cache.clear()
+
+    def _dbid_pos(self):
+        """库行 id → history 下标 映射(query_view 用;集中失效,变更后重建)。
+        2 万条约 3ms,避免每次查询全量重建。"""
+        m = getattr(self, "_dbid_pos_cache", None)
+        if m is None:
+            m = self._dbid_pos_cache = {
+                h["_db"]: i for i, h in enumerate(self.history)
+                if h.get("_db") is not None}
+        return m
+
+    def _unpinned_total(self):
+        """未置顶条数(_evict 容量判定用;缓存 + 变更失效,免每次全量计数)。"""
+        c = getattr(self, "_unpinned_count", None)
+        if c is None:
+            c = self._unpinned_count = \
+                sum(1 for h in self.history if not h.get("pinned"))
+        return c
 
     def _notify_change(self):
         """通知前端历史已变。
@@ -2246,7 +1780,9 @@ class ClipboardCore:
         self._post(("change",))
 
     def _evict(self):
-        excess = len(self.history) - self.max_items
+        """容量淘汰(README 语义):max_items 限制**未置顶**条数,置顶不占预算;
+        从最旧的普通记录淘汰(置顶永不淘汰),库删除与 blob 引用保护照走。"""
+        excess = self._unpinned_total() - self.max_items
         if excess <= 0:
             return
         removed = 0
@@ -2256,21 +1792,20 @@ class ClipboardCore:
             if removed >= excess:
                 break
             if not self.history[i].get("pinned"):
-                if self.history[i]["type"] == "image":
-                    try:
-                        os.remove(self.history[i]["content"])
-                    except Exception:
-                        pass
                 to_del.append(i)
                 evicted.append(self.history[i])
                 removed += 1
         for i in sorted(to_del, reverse=True):
             self.history.pop(i)
+        self._hist_removed(evicted)       # 索引/映射/计数集中维护
         self._store_del(evicted)
+        for rec in evicted:
+            self._blob_unref(rec)
 
     def _add_private(self, content):
         """敏感内容写入私密区(去重、上限 100 条);投递 private 信号供前端
-        提示(只带 is_jwt 布尔,不把原文再送一遍队列)。"""
+        提示(只带 is_jwt 布尔,不把原文再送一遍队列)。保存失败时条目保留
+        在内存并标记待重试,不覆盖原文件。"""
         try:
             for i, s in enumerate(self.private):
                 if s == content:
@@ -2278,8 +1813,11 @@ class ClipboardCore:
                     break
             self.private.insert(0, content)
             del self.private[100:]
-            save_private(self.private)
-            log("敏感内容已隔离(仅入私密区,不写入普通历史)")
+            res = self._private_save()
+            if res.ok:
+                log("敏感内容已隔离(仅入私密区,不写入普通历史)")
+            else:
+                log("敏感内容已隔离在内存,但尚未保存(%s)" % res.error)
             self._post(("private", _sniff_jwt(content) is not None))
         except Exception:
             log("私密区写入失败:\n%s" % traceback.format_exc())
@@ -2287,7 +1825,9 @@ class ClipboardCore:
     # ---- 列表过滤 ----
     def _search_text(self, h):
         """条目的检索串:casefold 一次后缓存,搜索每敲一个字符不再对全部
-        条目重复 str.lower/join(大文本条目尤甚;条目内容入史后不可变)。"""
+        条目重复 str.lower/join(大文本条目尤甚;条目内容入史后不可变)。
+        缓存有界:超 512 项时淘汰最旧的一半(插入序 FIFO),不再整表清空
+        引发批量重算;条目离开历史时按身份定点清除(见 _hist_removed)。"""
         cache = getattr(self, "_search_cache", None)
         if cache is None:
             cache = self._search_cache = {}
@@ -2303,8 +1843,9 @@ class ClipboardCore:
             else:
                 blob = h["content"]
             blob = blob.casefold()
-            if len(cache) > 512:      # 条目淘汰后 id 不至于这么快复用,先整清
-                cache.clear()
+            if len(cache) >= 512:
+                for stale in list(cache)[:256]:
+                    del cache[stale]
             cache[key] = blob
         return blob
 
@@ -2320,25 +1861,34 @@ class ClipboardCore:
         return (time.time() - secs) if secs else 0.0
 
     def source_apps(self):
-        """历史中出现过的来源应用 exe 名(最近在前,去重);供筛选下拉。"""
-        seen, out = set(), []
-        for h in self.history:
-            s = h.get("src")
-            if s and s not in seen:
-                seen.add(s)
-                out.append(s)
+        """历史中出现过的来源应用 exe 名(最近在前,去重);供筛选下拉。
+        结果缓存(成员变更时失效,见 _hist_added/_hist_removed),免得每次
+        刷新都全量扫描大历史。"""
+        out = getattr(self, "_src_apps_cache", None)
+        if out is None:
+            seen = set()
+            out = []
+            for h in self.history:
+                s = h.get("src")
+                if s and s not in seen:
+                    seen.add(s)
+                    out.append(s)
+            self._src_apps_cache = out
         return out
 
-    def filter_view(self, category, query="", src="", since=0.0):
+    def filter_view(self, category, query="", src="", since=0.0, limit=None):
         """按分类 + 关键词 + 来源应用 + 时间范围过滤,返回命中条目在
         history 中的索引列表(内存路径;SQL 路径见 query_view)。
         查询串支持 Search DSL(source:/type:/after:/before:/is:pinned),
-        与 query_view 语义逐条一致(parse_search_query 共用)。"""
+        与 query_view 语义逐条一致(parse_search_query 共用)。
+        limit:凑够即停(限量调用方如快捷浮层不再承担全量扫描成本;
+        返回值与旧实现 out[:limit] 逐项一致——迭代序即历史序)。"""
         dsl = parse_search_query(query)
         q = dsl["text"].strip().casefold()
         src_q = (src or "").strip().lower() or dsl["src"] or ""
         since_eff = max(float(since or 0.0), dsl["after"] or 0.0)
         before_eff = dsl["before"]
+        want = None if limit is None else max(int(limit), 1)
         view = []
         for i, h in enumerate(self.history):
             t = h["type"]
@@ -2365,6 +1915,8 @@ class ClipboardCore:
                 if q not in self._search_text(h):
                     continue
             view.append(i)
+            if want is not None and len(view) >= want:
+                break
         return view
 
     _DSL_CATS = {"text", "link", "image", "files"}
@@ -2381,42 +1933,96 @@ class ClipboardCore:
                         return False
                 elif rec.get("type") != t:
                     return False
-            elif effective_subtype(rec) != t:
-                return False
+            else:
+                subtype = effective_subtype(rec)
+                if subtype is None and rec.get("type") == "text":
+                    # 卡片徽章只识别 JWT/Base64，完整 DSL 子类型还需要
+                    # JSON/URL/CSV 等内容分类；仅子类型过滤时执行。
+                    info = detect_content(rec.get("content") or "")
+                    subtype = "code" if info.category == "code" else info.subtype
+                subtype = str(subtype or "").lower()
+                if subtype == "web_url":
+                    subtype = "url"
+                if subtype != t:
+                    return False
         return True
 
-    def query_view(self, category, query="", src="", since=0.0, limit=400):
+    def query_view(self, category, query="", src="", since=0.0, limit=None):
         """视图过滤(SQL 优先):组合过滤在库上执行,返回命中条目在
         self.history 中的下标列表——与 filter_view 同序同义(UI 索引语义
         不变)。查询串支持 Search DSL(source:/type:/after:/before:
         /is:pinned,见 parse_search_query);无库或存在未入库条目时整体
-        回退内存路径。"""
+        回退内存路径。
+
+        limit 语义与旧实现一致(返回前 limit 条):
+        - 纯 SQL 可表达的过滤:limit 直接下推到查询(LIMIT 提前截断,
+          不再读取全部匹配 ID);
+        - 需要内存补充判断的分类/子类型(链接、type: 子类型):分批读取
+          候选持续过滤,凑够 limit 或遍历结束才停——不会先 LIMIT 后过滤
+          而漏掉后面的正确结果;
+        - dbid→下标 映射集中缓存(变更失效),不再每次查询全量重建。"""
+        lim = None if limit is None else max(int(limit), 1)
         if getattr(self, "store", None) is None:
-            return self.filter_view(category, query, src=src, since=since)
+            return self.filter_view(category, query, src=src, since=since,
+                                    limit=lim)
         if any(h.get("_db") is None for h in self.history):
-            return self.filter_view(category, query, src=src, since=since)
+            return self.filter_view(category, query, src=src, since=since,
+                                    limit=lim)
         dsl = parse_search_query(query)
         src_q = (src or "").strip().lower() or dsl["src"] or ""
         since_eff = max(float(since or 0.0), dsl["after"] or 0.0)
         ctype = {"text": "text", "image": "image",
                  "files": "files"}.get(category)
-        recs, _total = self.store.query_page(
-            content_type=ctype, source_app=src_q or None,
-            since=since_eff, until=dsl["before"] or None,
-            q=dsl["text"] or None,
-            pinned=dsl["pinned"], limit=max(int(limit), 1))
-        if category == "link":
-            recs = [r for r in recs
-                    if r.get("type") == "text" and url_info(r["content"])]
-        if dsl["types"]:
-            recs = [r for r in recs if self._match_dsl_types(r, dsl["types"])]
-        pos = {h["_db"]: i for i, h in enumerate(self.history)}
-        out, seen = [], set()
-        for r in recs:
-            i = pos.get(r.get("_db"))
-            if i is not None and i not in seen:
-                seen.add(i)
-                out.append(i)
+        needs_mem = category == "link" or bool(dsl["types"])
+        pos = self._dbid_pos()
+
+        def _sql_ids(sql_limit, offset):
+            return self.store.query(
+                content_type=ctype, source_app=src_q or None,
+                since=since_eff, until=dsl["before"] or None,
+                q=dsl["text"] or None,
+                pinned=dsl["pinned"],
+                limit=sql_limit, offset=offset)
+
+        def _keep(r):
+            if category == "link" and not (r.get("type") == "text"
+                                           and url_info(r["content"])):
+                return False
+            if dsl["types"] and not self._match_dsl_types(r, dsl["types"]):
+                return False
+            return True
+
+        if not needs_mem:
+            # 完整过滤交给 SQL:limit 下推(无缝隙,直接截断)
+            dbids = _sql_ids(lim, 0)
+            out, seen = [], set()
+            for dbid in dbids:
+                i = pos.get(dbid)
+                if i is not None and i not in seen:
+                    seen.add(i)
+                    out.append(i)
+            return out
+
+        # 需要内存补充判断:分批读取候选,持续过滤直到凑够 limit 或读完
+        batch = 400 if lim is not None else 10 ** 9
+        out, seen, offset = [], set(), 0
+        while True:
+            dbids = _sql_ids(batch, offset)
+            if not dbids:
+                break
+            for dbid in dbids:
+                i = pos.get(dbid)
+                if i is None or i in seen:
+                    continue
+                r = self.history[i]
+                if _keep(r):
+                    seen.add(i)
+                    out.append(i)
+                    if lim is not None and len(out) >= lim:
+                        return out
+            if len(dbids) < batch:
+                break               # 库已读完
+            offset += len(dbids)
         return out
 
     def set_type_override(self, rec, value):
@@ -2433,34 +2039,58 @@ class ClipboardCore:
         self._mark_dirty()
 
     # ---- 回写 / 粘贴 ----
+    def _write_clip_guarded(self, rec):
+        """写剪贴板;成功才设自捕获抑制窗,失败还原(不留多余抑制窗)。
+        _set_clipboard 自身抛异常也按写入失败处理(不向上扩散)。"""
+        prev = getattr(self, "_ignore_clip_until", 0.0)
+        try:
+            ok = self._set_clipboard(rec)
+        except Exception:
+            ok = False
+        if ok:
+            self._ignore_clip_until = time.monotonic() + 0.5
+        else:
+            self._ignore_clip_until = prev
+        return ok
+
     def copy_record(self, rec):
-        """仅复制原始内容,不模拟粘贴、不移动历史条目。"""
+        """仅复制原始内容,不模拟粘贴、不移动历史条目;写失败返回 False。"""
         if rec["type"] == "files":
             existing = [p for p in rec["content"] if os.path.exists(p)]
             if not existing:
                 return False
             rec = dict(rec, content=existing)
-        self._ignore_clip_until = time.monotonic() + 0.5
-        return self._set_clipboard(rec)
+        return self._write_clip_guarded(rec)
 
     def paste_record(self, rec, force=False, target_hwnd=None):
-        """写回剪贴板 + 自动粘贴排队 + 置顶到最近。文件全部丢失时返回 False。
-        force=True 无条件派发回贴(快捷粘贴浮层:用户按 Enter 的意图就是粘贴)。
-        target_hwnd = 意图目标窗口(粘贴事务校验用,None = 旧语义不校验)。"""
+        """写回剪贴板 + 自动粘贴排队 + 置顶到最近。
+
+        写入失败即返回 False:不派发 Ctrl+V、不提升历史、不更新库 seq,
+        也不把操作报告为成功。文件过滤用临时副本(失败不修改原记录)。
+        force=True 仅在写入成功后越过 auto_paste 开关(用户按 Enter 的
+        意图就是粘贴)。target_hwnd = 意图目标窗口(粘贴事务校验用)。"""
         if rec["type"] == "files":
             existing = [p for p in rec["content"] if os.path.exists(p)]
             if not existing:
                 return False
-            rec["content"] = existing
-        # 时间窗抑制本次自写入触发的剪贴板回调
-        self._ignore_clip_until = time.monotonic() + 0.5
-        self._set_clipboard(rec)
+            write_rec = dict(rec, content=existing)
+        else:
+            existing = None
+            write_rec = rec
+        if not self._write_clip_guarded(write_rec):
+            return False
+        if existing is not None:
+            rec["content"] = existing        # 成功后才把过滤结果落到原记录
+            sc = getattr(self, "_search_cache", None)   # 文件列表变了,检索串失效
+            if sc:
+                sc.pop(id(rec), None)
         if force or self.cfg.get("auto_paste", False):
             self.worker.cmd_q.put(
                 ("paste", int(target_hwnd or 0), _get_clip_seq()))
         try:
             self.history.remove(rec)
             self.history.insert(0, rec)
+            self._hist_reordered()           # 成员未变,仅顺序:失效位置映射
             if self.store is not None:
                 self.store.upsert_promote(rec)    # 最近使用 → seq 提升到最前
             self._mark_dirty()
@@ -2469,20 +2099,22 @@ class ClipboardCore:
         return True
 
     def paste_text(self, content, force=False, target_hwnd=None):
-        """文本写回剪贴板;force=True 无条件派发回贴(用户点了明确的
-        「复制并粘贴」类按钮),否则跟随 auto_paste 开关(默认关:模拟
-        Ctrl+V 会把内容打进当前聚焦窗口,不应是复制动作的默认副作用)。"""
-        self._ignore_clip_until = time.monotonic() + 0.5
-        self._set_clipboard({"type": "text", "content": content})
+        """文本写回剪贴板;写入失败返回 False 且不派发回贴。
+
+        force=True 无条件派发回贴(用户点了明确的「复制并粘贴」类按钮),
+        否则跟随 auto_paste 开关(默认关:模拟 Ctrl+V 会把内容打进当前
+        聚焦窗口,不应是复制动作的默认副作用)。"""
+        if not self._write_clip_guarded({"type": "text", "content": content}):
+            return False
         if force or self.cfg.get("auto_paste", False):
             self.worker.cmd_q.put(
                 ("paste", int(target_hwnd or 0), _get_clip_seq()))
+        return True
 
     def copy_text(self, content):
         """仅写剪贴板(不排回贴队列):查看器分段复制等小动作用,
-        不往用户此刻聚焦的窗口里塞 Ctrl+V。"""
-        self._ignore_clip_until = time.monotonic() + 0.5
-        self._set_clipboard({"type": "text", "content": content})
+        不往用户此刻聚焦的窗口里塞 Ctrl+V。返回是否写入成功。"""
+        return self._write_clip_guarded({"type": "text", "content": content})
 
     def _set_clipboard(self, rec):
         for _ in range(12):
@@ -2526,10 +2158,16 @@ class ClipboardCore:
         if self.store is not None and rec.get("_db") is not None:
             self.store.update_pinned(rec["_db"], rec["pinned"])
         self._mark_dirty()
+        if getattr(self, "_unpinned_count", None) is not None:
+            self._unpinned_count += -1 if rec["pinned"] else 1
+        if not rec["pinned"]:
+            # 取消置顶即回到容量预算:超限立即淘汰最旧普通记录
+            self._evict()
 
     def delete_at(self, hi):
         """硬删除单条:行立即物理删;图片文件经引用计数复检(refcount==0 才删)。"""
         rec = self.history.pop(hi)
+        self._hist_removed([rec])
         self._store_del([rec])
         self._blob_unref(rec)
         self._mark_dirty()
@@ -2539,6 +2177,7 @@ class ClipboardCore:
         """清空未置顶条目(置顶保留);文件删除走引用计数。"""
         removed = [h for h in self.history if not h.get("pinned")]
         self.history[:] = [h for h in self.history if h.get("pinned")]
+        self._hist_removed(removed)
         self._store_del(removed)
         for h in removed:
             self._blob_unref(h)
@@ -2574,9 +2213,7 @@ class ClipboardCore:
                 fp = "%s.bak%d" % (HISTORY_FILE, i)
                 if os.path.exists(fp):
                     os.remove(fp)
-            cache = getattr(self, "_search_cache", None)
-            if cache is not None:
-                cache.clear()
+            self._reset_hist_caches()       # 指纹/映射/来源/计数/检索串全部重建
             self._dirty = False
             done.append("历史全清(含置顶)")
 
@@ -2594,9 +2231,25 @@ class ClipboardCore:
             done.append("图片文件全清(%d 个)" % removed_files)
 
             if wipe_private:
+                # 用户显式的破坏性清空:唯一允许覆写不可读原文件的路径;
+                # 备份链与损坏留档一并清除(否则清空会把秘密留在备份里)
+                st = getattr(self, "_private_load", None)
+                if st is not None and st.status == "unreadable":
+                    self._private_load = PrivateLoadResult(
+                        [], "missing", "none", "", "")
                 self.private.clear()
-                save_private(self.private)
-                done.append("私密区清空")
+                res = self._private_save()
+                if not res.ok:
+                    raise RuntimeError("私密区清空失败:%s" % res.error)
+                for p in _private_bak_paths() + (PRIVATE_FILE + ".corrupt",
+                                                 PRIVATE_FILE + ".tmp"):
+                    try:
+                        if os.path.exists(p):
+                            os.remove(p)
+                    except Exception:
+                        pass
+                self._private_dirty = False
+                done.append("私密区清空(含备份)")
             if reset_config:
                 for suffix in ("", ".bak1", ".bak2", ".bak3"):
                     fp = CONFIG_FILE + suffix
@@ -2652,6 +2305,8 @@ class ClipboardCore:
             return 0
         path = rec.get("content") or ""
         blob = rec.get("hash") or ""
+        if self._txn_stack_refs(path, blob):
+            return 0
         if self.store is not None:
             if blob and self.store.blob_refcount(blob) > 0:
                 return 0
@@ -2833,7 +2488,9 @@ class ClipboardCore:
                     self.private.append(s)
                     n_priv += 1
             if n_priv:
-                save_private(self.private)
+                res = self._private_save()
+                if not res.ok:
+                    log("导入的私密条目已并入内存,但尚未保存(%s)" % res.error)
         return added, skipped, n_priv
 
     # ---- 可迁移加密备份(AES-256-GCM + PBKDF2,与 DPAPI 无关)----
@@ -2854,30 +2511,49 @@ class ClipboardCore:
         return stack.pop().rollback()
 
     def save_all(self):
+        """退出/手动全量保存。
+
+        私密区只在「成功加载过 且 发生过变更」时才写:读取失败(unreadable)
+        绝不覆写原文件;保存失败保持脏标记并把错误留在
+        private_save_error 供退出反馈(调用方不能当作已成功保存)。"""
         self.flush_history()
-        save_private(self.private)
+        st = getattr(self, "_private_load", None)
+        if st is not None and st.status == "unreadable":
+            log("私密区原文件不可读,退出时不覆写(数据仍留在原文件中)")
+            return
+        if getattr(self, "_private_dirty", False):
+            self._private_save()
 
     def set_history_encryption(self, on):
-        """设置页「历史加密」开关的即时双向切换。
+        """先持久化新事实源与模式配置，再清理旧存储；失败抛错供 UI 呈现。
 
-        开启:当前历史立即写为加密 history.json,停用库写透(库文件保留,
-              关闭加密时无损切回);
-        关闭:启用库;库为空则把当前历史单事务迁入,并把逐条 _db 回填到
-              现有记录对象(UI 引用的记录身份不变),随后删除明文 JSON
-              快照避免双源。"""
+        开启时仅加密历史正文/元数据；独立图片资产不在此开关的保护范围。
+        关闭时用当前历史重建库，保留加密备份供恢复。
+        """
         on = bool(on)
-        self.cfg["encrypt_history"] = on
         if on:
-            save_history(self.history, encrypt=True)
-            self._txn_stack = []      # 库已停用,旧事务按 JSON 语义无意义
+            if not save_history(self.history, encrypt=True):
+                raise OSError("无法保存加密历史，原存储模式保持不变")
+            _encrypt_history_residuals()
+            old_mode = self.cfg.get("encrypt_history", False)
+            self.cfg["encrypt_history"] = True
+            if not old_mode and not save_config(self.cfg):
+                self.cfg["encrypt_history"] = old_mode
+                raise OSError("无法保存加密模式配置，原数据库保留")
             if self.store is not None:
-                try:
-                    self.store.close()
-                except Exception:
-                    pass
+                self.store.close()
                 self.store = None
+            self._txn_stack = []
+            self._dirty = False
+            # 配置已指向 JSON：即使清理被文件占用打断，重启也不会加载旧库。
+            try:
+                _remove_history_database()
+            except OSError as exc:
+                raise OSError("历史已加密，但旧明文数据库清理失败，请关闭占用程序后重试") from exc
             return
         if self.store is None:
+            st = None
+            old_mode = self.cfg.get("encrypt_history", False)
             try:
                 st = ClipboardStore(DB_FILE)
                 # 加密期间历史可能已变化:整库重建,以当前内存历史为准
@@ -2889,7 +2565,13 @@ class ClipboardCore:
                         "WHERE state='active' ORDER BY seq DESC").fetchall()]
                 for rec, dbid in zip(self.history, ids):
                     rec["_db"] = dbid
+                self._hist_reordered()      # 行 id 全变:位置映射重建
+                self.cfg["encrypt_history"] = False
+                if not save_config(self.cfg):
+                    self.cfg["encrypt_history"] = old_mode
+                    raise OSError("无法保存 SQLite 模式配置，加密历史仍保留")
                 self.store = st
+                self._dirty = False
                 # 重建后行 id 全变,指向旧行的撤销事务一并作废
                 self._txn_stack = []
                 try:
@@ -2897,9 +2579,16 @@ class ClipboardCore:
                 except Exception:
                     pass
             except Exception:
-                self.store = None
-                log("切回库模式失败,继续 JSON 持久化:\n%s"
-                    % traceback.format_exc())
+                if st is not None and self.store is not st:
+                    st.close()
+                    if old_mode:
+                        # 转换未完成时仍处于加密模式，不能遗留新建的明文库。
+                        try:
+                            _remove_history_database()
+                        except OSError:
+                            log("转换失败后的明文数据库清理失败:\n%s"
+                                % traceback.format_exc())
+                raise
 
     # ---- 开机自启 ----
     def is_autostart(self):
