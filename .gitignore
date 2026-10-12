@@ -13,3 +13,4 @@ dist/
 soak_check.py
 soak_report.md
 soak_state.json
+.runtime_appdata/
