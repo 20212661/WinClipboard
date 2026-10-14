@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout,
                                QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem,
                                QGraphicsEllipseItem, QGraphicsPathItem,
                                QGraphicsLineItem, QGraphicsTextItem, QStyle,
-                               QFileDialog, QSizePolicy, QListWidget, QLineEdit,
+                               QFileDialog, QSizePolicy, QListWidget, QListWidgetItem, QLineEdit,
                                QPlainTextEdit, QPushButton, QSizeGrip,
                                QSpacerItem, QStackedWidget, QTreeWidgetItem,
                                QTableWidgetItem, QHeaderView, QComboBox)
@@ -88,18 +88,19 @@ ui_base.register(sys.modules[__name__])   # 调色板随主题刷新本模块全
 
 
 class Card(QFrame):
-    """剪贴板条目卡片 —— Atelier Zero 编辑风格。
+    """剪贴板条目卡片。
 
     继承自原生 QFrame，完全由 QSS + 代码控制绘制：
-    - 1px 底线
-    - hover 左侧 4px Études 蓝竖条
-    - 选中反相为黑底纸字
-    - 置顶项用 Études 蓝标记
-    - 无圆角
-    业务绑定逻辑(差量复用、悬停按钮、事件分发)保持不变。
+    - 1px 底线；悬停 / 选中左侧 3px 主题色指示条
+    - 选中 = 柔和主题色底色(约 10% 透明度)，文字保持深色——
+      深色截图缩略图在选中行上依然清晰可见(不再整行反相死黑)
+    - 置顶项用主题色标记点
+    - 右侧操作按钮为浮层(不占文本宽度)：悬停或选中时常驻显示
+    业务绑定逻辑(差量复用、事件分发)保持不变。
     """
 
     THUMB = (92, 68)
+    ELIDE_W = 400          # 标题/副文的省略宽度(双栏后左栏可用宽度收窄)
 
     def __init__(self, app):
         super().__init__()
@@ -114,37 +115,44 @@ class Card(QFrame):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setFixedHeight(72)
-        self._base_style()
-        self._build()
-
-    def _base_style(self):
-        self.setStyleSheet(
-            "QFrame#cardFrame { background: %s; color: %s; "
-            "border: none; border-bottom: 1px solid rgba(17,17,17,0.12); }" % (PAPER, INK))
         self.setObjectName("cardFrame")
+        self._build()
+        self._update_style()
 
     def set_selected(self, on):
         if self.property("selected") != on:
             self.setProperty("selected", on)
+            if on:
+                self._ensure_btns()     # 选中态常驻操作钮(懒建,池内只建一次)
             self._update_style()
+            self._apply_btns()
 
     def _update_style(self):
+        """选中/悬停样式:柔和主题色底 + 左侧指示条。
+
+        文字色恒为深色系(在 _build 一次性设定,选中不再反相),此处
+        只改框架一张样式表——大列表批量建卡/重绑的渲染预算敏感。"""
         sel = bool(self.property("selected"))
         hover = bool(self.property("hovered"))
-        base = "QFrame#cardFrame { background: %s; color: %s; border: none; "
-        bottom = "border-bottom: 1px solid rgba(17,17,17,0.12); }"
-        if sel:
-            self.setStyleSheet(base % (INK, PAPER) + bottom)
-            self.title_lbl.setStyleSheet("color: %s; background: transparent;" % PAPER)
-            self.sub_lbl.setStyleSheet("color: %s; background: transparent;" % INK_LIGHT)
-            self.meta_lbl.setStyleSheet("color: %s; background: transparent;" % PAPER)
+        accent = QColor(ACCENT)
+        if sel or hover:
+            bg = "rgba(%d,%d,%d,%s)" % (accent.red(), accent.green(),
+                                        accent.blue(), "0.10" if sel else "0.03")
+            bar = ACCENT
         else:
-            self.setStyleSheet(base % (PAPER, INK) + bottom)
-            self.title_lbl.setStyleSheet("color: %s; background: transparent;" % INK)
-            self.sub_lbl.setStyleSheet("color: %s; background: transparent;" % INK_LIGHT)
-            self.meta_lbl.setStyleSheet("color: %s; background: transparent;" % INK_LIGHT)
-        # 更新左侧 hover 蓝色竖条(子控件 QLabel 用于简单定位)
-        self._bar.setVisible(hover and not sel)
+            bg, bar = PAPER, "transparent"
+        self.setStyleSheet(
+            "QFrame#cardFrame { background: %s; color: %s; border: none; "
+            "border-left: 3px solid %s; "
+            "border-bottom: 1px solid rgba(17,17,17,0.12); }" % (bg, INK, bar))
+
+    def _apply_btns(self):
+        """操作按钮浮层可见性:悬停或选中时常驻,其余时候隐藏。"""
+        if self.act_btns is None:
+            return
+        show = bool(self.property("hovered")) or bool(self.property("selected"))
+        for b in self.act_btns:
+            b.setVisible(show)
 
     def update_pin(self):
         """复用卡片时刷新置顶指示点。"""
@@ -166,12 +174,6 @@ class Card(QFrame):
         root.setContentsMargins(20, 0, 16, 0)
         root.setSpacing(12)
 
-        # 左侧 hover Études 蓝竖条
-        self._bar = QLabel(self)
-        self._bar.setFixedWidth(4)
-        self._bar.setStyleSheet("background: %s;" % ACCENT)
-        self._bar.setVisible(False)
-
         self.dot = QLabel()
         self.dot.setFixedSize(6, 6)
         self.dot.setStyleSheet("background: transparent;")
@@ -181,11 +183,11 @@ class Card(QFrame):
 
         self.title_lbl = QLabel()
         self.title_lbl.setFont(body_font(13, QFont.Weight.DemiBold))
-        self.title_lbl.setMaximumWidth(640)
-        self.title_lbl.setStyleSheet("background: transparent;")
+        self.title_lbl.setMaximumWidth(420)
+        self.title_lbl.setStyleSheet("color: %s; background: transparent;" % INK)
         self.sub_lbl = QLabel()
         self.sub_lbl.setFont(body_font(11))
-        self.sub_lbl.setMaximumWidth(640)
+        self.sub_lbl.setMaximumWidth(420)
         self.sub_lbl.setStyleSheet("color: %s; background: transparent;" % INK_LIGHT)
         self.sub_lbl.hide()
         self.meta_lbl = QLabel()
@@ -203,21 +205,22 @@ class Card(QFrame):
         mid.addWidget(self.sub_lbl)
         mid.addWidget(self.meta_lbl)
 
-        # 左侧占位(给蓝色竖条留空间)
-        left_container = QWidget()
-        left_container.setFixedWidth(4)
-        left_container.setStyleSheet("background: transparent;")
-        root.addWidget(left_container)
         root.addLayout(self._left)
         root.addLayout(mid, 1)
 
-        # 悬停操作按钮
+        # 操作按钮浮层:不进布局(不占文本宽度),resizeEvent 定位到右侧;
+        # 悬停或选中时常驻显示(见 _apply_btns)
         self.act_btns = None
-        actw = QWidget()
-        actw.setFixedSize(5 * 30 + 4 * 6, 30)
+        actw = QWidget(self)
+        actw.setFixedSize(162, 30)
         actw.setStyleSheet("background: transparent;")
         self.actw = actw
-        root.addWidget(actw, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self.actw is not None:
+            self.actw.move(self.width() - self.actw.width() - 14,
+                           (self.height() - self.actw.height()) // 2)
 
     # ---- 差量绑定(固定复用池的核心) ----
     def bind(self, rec):
@@ -245,7 +248,8 @@ class Card(QFrame):
         if kind == "image":
             thumb = QLabel()
             thumb.setFixedSize(*self.THUMB)
-            thumb.setStyleSheet("border: 1px solid %s; border-radius: 10px;" % THUMB_BORDER)
+            thumb.setStyleSheet(
+                "border: 1px solid rgba(17,17,17,0.22); border-radius: 10px;")
             self._thumb_lbl = thumb
             self._left.addWidget(thumb)
         elif kind == "files":
@@ -293,8 +297,10 @@ class Card(QFrame):
             badge = self._badge_of(rec)
             meta = " · ".join(x for x in (badge or "文本", rec.get("src", ""),
                                           cm._rel_time(rec.get("ts", 0))) if x)
-        self._set_text(self.title_lbl, elided(title, self.title_lbl.font(), 640))
-        self._set_text(self.sub_lbl, elided(sub, self.sub_lbl.font(), 640) if sub else "")
+        self._set_text(self.title_lbl,
+                       elided(title, self.title_lbl.font(), self.ELIDE_W))
+        self._set_text(self.sub_lbl,
+                       elided(sub, self.sub_lbl.font(), self.ELIDE_W) if sub else "")
         self.sub_lbl.setVisible(bool(sub))
         self._set_text(self.meta_lbl, meta)
         # 屏幕阅读器:卡片读出条目标题而非整段内容(私密凭据永不进卡片)
@@ -354,18 +360,14 @@ class Card(QFrame):
 
     def enterEvent(self, e):
         self.setProperty("hovered", True)
-        self._update_style()
         self._ensure_btns()
-        if self.act_btns:
-            for b in self.act_btns:
-                b.setVisible(True)
+        self._update_style()
+        self._apply_btns()
 
     def leaveEvent(self, e):
         self.setProperty("hovered", False)
         self._update_style()
-        if self.act_btns is not None:
-            for b in self.act_btns:
-                b.setVisible(False)
+        self._apply_btns()
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and (e.modifiers() & Qt.ControlModifier):
@@ -411,84 +413,36 @@ class HistoryPage(QWidget):
         self.app = app
         self.setObjectName("historyPage")
         v = QVBoxLayout(self)
-        v.setContentsMargins(36, 24, 36, 16)
-        v.setSpacing(12)
+        v.setContentsMargins(36, 20, 36, 12)
+        v.setSpacing(10)
 
-        # ---- Atelier Zero 粘性刊头 ----
-        mast = QHBoxLayout()
-        mast.setSpacing(24)
-        # 左侧：期号与档案名
-        left = QVBoxLayout()
-        left.setSpacing(0)
-        issue_lbl = QLabel("ISSUE 001 · 2026")
-        issue_lbl.setObjectName("mastIssue")
-        issue_lbl.setFont(label_font(9))
-        issue_lbl.setStyleSheet("color: %s; background: transparent;" % INK_LIGHT)
-        title_lbl = QLabel("CLIPBOARD ARCHIVE")
-        title_lbl.setObjectName("mastTitle")
-        title_lbl.setFont(head_font(16, QFont.Weight.Bold))
-        title_lbl.setStyleSheet("color: %s; background: transparent;" % INK)
-        left.addWidget(issue_lbl)
-        left.addWidget(title_lbl)
-        # 中央：搜索框
-        search_box = QVBoxLayout()
-        search_box.setSpacing(2)
-        self.search = QLineEdit(self)
-        self.search.setObjectName("historySearch")
-        self.search.setPlaceholderText("SEARCH ARCHIVE")
-        self.search.setClearButtonEnabled(True)
-        self.search.setAccessibleName("搜索剪贴历史")
-        self.search.textChanged.connect(self.app.on_search)
-        self.search.returnPressed.connect(self.app.paste_selected)
-        self.search.installEventFilter(self)
-        self.search.setFont(body_font(13))
-        self.search.setStyleSheet(
-            "QLineEdit#historySearch { background: transparent; color: %s; "
-            "border: none; border-bottom: 1px solid %s; padding: 6px 0px; }"
-            "QLineEdit#historySearch:focus { border-bottom: 2px solid %s; }" %
-            (INK, INK, ACCENT))
-        search_box.addWidget(self.search)
-        search_box.setAlignment(Qt.AlignmentFlag.AlignBottom)
-        # 右侧：状态徽章 + 杂志名
-        right = QHBoxLayout()
-        right.setSpacing(12)
-        safe_mode = bool(getattr(self.app, "safe_mode", False))
-        self._badge = MastheadBadge("SAFE MODE" if safe_mode else "LIVE",
-                                    danger=safe_mode)
-        az_lbl = QLabel("ATELIER ZERO")
-        az_lbl.setFont(label_font(10))
-        az_lbl.setStyleSheet("color: %s; background: transparent;" % INK_LIGHT)
-        right.addWidget(self._badge)
-        right.addWidget(az_lbl)
-        mast.addLayout(left, 0)
-        mast.addStretch(1)
-        mast.addLayout(search_box, 2)
-        mast.addStretch(1)
-        mast.addLayout(right, 0)
-        v.addLayout(mast)
-
-        # ---- 分类与筛选工具栏 ----
-        tools = QHBoxLayout()
-        tools.setSpacing(12)
-        # 分类：原生按钮组替代 SegmentedWidget
+        # ---- 顶部工具行:分类导航 + 筛选 + 搜索(空间让给内容列表) ----
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        # 分类导航容器(nav 为既有属性名,集成测试/预览脚本引用)
+        self.nav = QWidget(self)
+        nav_lay = QHBoxLayout(self.nav)
+        nav_lay.setContentsMargins(0, 0, 0, 0)
+        nav_lay.setSpacing(0)
         self._cat_btns = {}
-        cat_box = QHBoxLayout()
-        cat_box.setSpacing(0)
-        for label, cat in (("ALL", "all"), ("TEXT", "text"), ("IMAGE", "image"),
-                           ("LINK", "link"), ("FILES", "files")):
+        for label, cat in (("全部", "all"), ("文本", "text"), ("图片", "image"),
+                           ("链接", "link"), ("文件", "files")):
             b = QPushButton(label)
             b.setCheckable(True)
-            b.setFont(label_font(9))
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFont(body_font(10, QFont.Weight.DemiBold))
             b.setStyleSheet(
                 "QPushButton { background: transparent; color: %s; border: none; "
-                "border-bottom: 2px solid transparent; border-radius: 0px; padding: 4px 10px; }"
+                "border-bottom: 2px solid transparent; border-radius: 0px; padding: 5px 12px; }"
                 "QPushButton:checked { color: %s; border-bottom: 2px solid %s; }"
                 "QPushButton:hover:!checked { color: %s; }" %
                 (INK_LIGHT, INK, ACCENT, INK))
             b.clicked.connect(lambda _=False, c=cat: self.app.set_category(c))
             self._cat_btns[cat] = b
-            cat_box.addWidget(b)
+            nav_lay.addWidget(b)
         self._cat_btns["all"].setChecked(True)
+        top.addWidget(self.nav, 0)
+        top.addStretch(1)
         # 来源 / 时间筛选
         self.cmb_src = QComboBox(self)
         self.cmb_src.setToolTip("按来源应用筛选")
@@ -507,11 +461,39 @@ class HistoryPage(QWidget):
         self.cmb_time.setAccessibleName("按时间范围筛选")
         self.cmb_time.currentIndexChanged.connect(
             lambda i: self.app.set_time_filter(self.cmb_time.itemData(i) or "all"))
-        tools.addLayout(cat_box, 0)
-        tools.addStretch(1)
-        tools.addWidget(self.cmb_src)
-        tools.addWidget(self.cmb_time)
-        v.addLayout(tools)
+        top.addWidget(self.cmb_src)
+        top.addWidget(self.cmb_time)
+        # 搜索(中文占位符提示搜索语法;无障碍名是既有契约)
+        self.search = QLineEdit(self)
+        self.search.setObjectName("historySearch")
+        self.search.setPlaceholderText("搜索剪贴历史（支持 source: / type: / after:）")
+        self.search.setClearButtonEnabled(True)
+        self.search.setAccessibleName("搜索剪贴历史")
+        self.search.textChanged.connect(self.app.on_search)
+        self.search.returnPressed.connect(self.app.paste_selected)
+        self.search.installEventFilter(self)
+        self.search.setFont(body_font(11))
+        self.search.setMinimumWidth(230)
+        self.search.setMaximumWidth(430)
+        self.search.setStyleSheet(
+            "QLineEdit#historySearch { background: transparent; color: %s; "
+            "border: none; border-bottom: 1px solid %s; padding: 6px 0px; }"
+            "QLineEdit#historySearch:focus { border-bottom: 2px solid %s; }" %
+            (INK, INK, ACCENT))
+        top.addWidget(self.search, 1)
+        # 安全模式徽章仅在安全模式出现(正常启动不再放装饰性 LIVE 徽标)
+        if bool(getattr(self.app, "safe_mode", False)):
+            self._badge = MastheadBadge("SAFE MODE", danger=True)
+            top.addWidget(self._badge)
+        v.addLayout(top)
+
+        # ---- 左右双栏:左 = 剪贴板流(卡片 + 预览 + 底栏),右 = AI 工作台 ----
+        cols = QHBoxLayout()
+        cols.setSpacing(14)
+        left = QVBoxLayout()
+        left.setSpacing(8)
+        right = QVBoxLayout()
+        right.setSpacing(8)
 
         # ---- 卡片流 ----
         self.scroll = ScrollArea(self)
@@ -556,10 +538,10 @@ class HistoryPage(QWidget):
         self._btn_more.clicked.connect(self._extend_window)
         self.scroll.verticalScrollBar().valueChanged.connect(
             self._on_scroll_maybe_extend)
-        self._lab_pinned = QLabel("PINNED")
-        self._lab_recent = QLabel("RECENT")
+        self._lab_pinned = QLabel("置顶")
+        self._lab_recent = QLabel("最近")
         for _lab in (self._lab_pinned, self._lab_recent):
-            _lab.setFont(label_font(10))
+            _lab.setFont(body_font(10, QFont.Weight.DemiBold))
             _lab.setStyleSheet("color: %s; background: transparent;" % INK_LIGHT)
             _lab.setContentsMargins(6, 10, 0, 4)
             _lab.hide()
@@ -569,14 +551,14 @@ class HistoryPage(QWidget):
         self._tail_owned = False
         self._row_h_est = 84
         self.scroll.setWidget(self.content)
-        v.addWidget(self.scroll, 1)
+        left.addWidget(self.scroll, 1)
 
         # 空状态提示
         self._empty_box = QWidget()
         eb = QVBoxLayout(self._empty_box)
         eb.setContentsMargins(0, 48, 0, 48)
         eb.setSpacing(12)
-        t1 = QLabel("ARCHIVE EMPTY")
+        t1 = QLabel("暂无剪贴内容")
         t1.setAlignment(Qt.AlignmentFlag.AlignCenter)
         t1.setFont(head_font(18, QFont.Weight.Bold))
         t1.setStyleSheet("color: %s; background: transparent;" % INK)
@@ -672,12 +654,29 @@ class HistoryPage(QWidget):
         self.pv_img.setStyleSheet("background: transparent;")
         self.pv_img.setVisible(False)
         pv.addWidget(self.pv_img)
-        v.addWidget(self.preview)
+        left.addWidget(self.preview)
 
-        # 上下文篮托盘(默认折叠;服务延迟构造,首帧零成本)
+        # ---- 右栏:常驻 AI 工作台(上=上下文篮,下=内嵌快速 AI 面板) ----
         from ctxpack.ui_tray import ContextTray
         self.ctx_tray = ContextTray(app, self)
-        v.addWidget(self.ctx_tray)
+        right.addWidget(self.ctx_tray)
+        try:
+            from ai_quick import EmbeddedAIPanel
+            self.ai_panel = EmbeddedAIPanel(app, self)
+        except Exception:
+            cm.log("AI 工作台面板构建失败(主界面其余部分不受影响):\n%s"
+                   % traceback.format_exc())
+            self.ai_panel = None
+        if self.ai_panel is not None:
+            right.addWidget(self.ai_panel, 1)
+        else:
+            right.addStretch(1)
+        right_host = QWidget()
+        right_host.setLayout(right)
+        right_host.setMinimumWidth(340)
+        cols.addLayout(left, 3)
+        cols.addWidget(right_host, 2)
+        v.addLayout(cols, 1)
 
         # ---- 底栏 ----
         foot = QHBoxLayout()
@@ -710,7 +709,7 @@ class HistoryPage(QWidget):
                 "color: %s; background: transparent; border: 1px solid %s; "
                 "padding: 2px 6px;" % (INK_LIGHT, INK_LIGHT))
             foot.addWidget(b)
-        v.addLayout(foot)
+        left.addLayout(foot)
 
         self._cards = []
 
@@ -1241,16 +1240,51 @@ class HistoryPage(QWidget):
         self.update_preview(None)
 
     # ---- 预览面板(Ditto 式:随选中联动显示完整内容) ----
+    def _sync_ai_material(self, vi=None):
+        """选中变化 → 右栏 AI 工作台的材料源跟随(生成中不抢占)。"""
+        panel = getattr(self, "ai_panel", None)
+        if panel is None:
+            return
+        app = self.app
+        if vi is None:
+            vi = getattr(app, "selected", None)
+        rec = None
+        hist = getattr(app, "history", None)
+        if vi is not None and hist:
+            view = getattr(app, "_view", None)
+            if view is None:
+                # 测试/预览替身无 _view:按卡片下标直取(与 card_at 同一回退)
+                if 0 <= vi < len(hist):
+                    rec = hist[vi]
+            elif 0 <= vi < len(view) and view[vi] < len(hist):
+                rec = hist[view[vi]]
+        try:
+            panel.set_material(rec)
+        except Exception:
+            pass
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        panel = getattr(self, "ai_panel", None)
+        if panel is not None:
+            panel.refresh_services()      # 服务配置可能在别的页改过
+
     def update_preview(self, vi=None):
+        self._sync_ai_material(vi)
         if not self.preview.isVisible():
             return
         app = self.app
         if vi is None:
-            vi = app.selected
+            vi = getattr(app, "selected", None)
         rec = None
-        if vi is not None and app._view and 0 <= vi < len(app._view) \
-                and app._view[vi] < len(app.history):
-            rec = app.history[app._view[vi]]
+        _view = getattr(app, "_view", None)
+        if vi is not None:
+            if _view is None:
+                # 测试/预览替身无 _view:按卡片下标直取(与 card_at 同一回退)
+                if 0 <= vi < len(app.history):
+                    rec = app.history[vi]
+            elif 0 <= vi < len(_view) and _view[vi] < len(app.history):
+                rec = app.history[_view[vi]]
         if rec is None:
             self.pv_btn_copy.setEnabled(False)
             self.pv_badge.setText("预览")
@@ -1422,7 +1456,7 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.private_page, FIF.IOT, "私密区")
         self.addSubInterface(self.settings_page, FIF.SETTING, "设置",
                              NavigationItemPosition.BOTTOM)
-        self.resize(980, 660)
+        self.resize(1040, 680)
 
     def toggle(self):
         """热键/托盘:显示并激活,或隐藏(最小化过则还原)。"""
@@ -1579,6 +1613,10 @@ class PrivatePage(QWidget):
                 "pinned": False,
             }
             item.setData(Qt.ItemDataRole.UserRole, rec)
+            # 同步写一份 item 文本:委托绘制用 UserRole,这里保住可访问性
+            # 与既有断言(item(0).text() 读遮罩/明文)——纯 Atelier 委托化
+            # 遗漏,导致集成测试三连挂
+            item.setText(rec["content"])
             item.setSizeHint(QSize(self.lst.viewport().width(), 72))
             self.lst.addItem(item)
         self._sync_state()
@@ -3756,10 +3794,13 @@ class WinClipboardApp(QObject):
                 "\n快捷粘贴浮层(%s)\n"
                 "  ↑ / ↓   选择      回车   粘贴      Shift + 回车   纯文本粘贴\n"
                 "  Ctrl + 回车   打开查看器      Ctrl + 1~9   直选粘贴\n"
+                "  Alt + 回车   将上下文包拼装结果粘贴回原窗口\n"
+                "  Ctrl + Q   快速 AI（以选中条目为材料，原窗口为回贴目标）\n"
                 "  Tab   切换类型(全部/文本/链接/图片/文件)\n"
                 "  Del   删除条目(可撤销)      Esc   关闭并回到原窗口\n"
                 "\n历史列表\n"
                 "  ↑ / ↓   移动选择      回车   粘贴选中条目\n"
+                "  右栏 AI 工作台   选中卡片即材料，Ctrl + 回车 在提问框发送\n"
                 "  Shift + 回车   纯文本粘贴(不带富文本格式)\n"
                 "  Ctrl + Shift + 回车   转换粘贴(JSON 格式化/压缩、URL 编解码、\n"
                 "                        转义、大小写等,实时预览)\n"
@@ -3852,6 +3893,9 @@ class WinClipboardApp(QObject):
     def quit_app(self):
         if self._quick_ai is not None:
             self._quick_ai.shutdown()
+        _ai_panel = getattr(getattr(self, "panel", None), "ai_panel", None)
+        if _ai_panel is not None:
+            _ai_panel.shutdown()
         for r in self._ai_runners:          # 等 AI 线程收尾,避免 QThread 运行中析构
             try:
                 r._dead = True

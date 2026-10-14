@@ -369,3 +369,38 @@ $env:QT_QPA_PLATFORM = 'offscreen'
 ```
 
 报告中的已确认问题尚未修复。修复后应以相同触发条件重新验收，而不是仅把本报告标题或版本号更新。
+
+## 附录:2026-10-15 主界面去杂志风 + 左右双栏 AI 工作台(main)
+
+在 main 分支完成四项 UI 改造,提交前实测:
+
+1. **去杂志风**:`HistoryPage` 移除 ISSUE/ARCHIVE/ATELIER ZERO 抬头与 LIVE 徽章
+   (安全模式徽章保留),分类改中文(全部/文本/图片/链接/文件),搜索占位符改
+   「搜索剪贴历史(支持 source: / type: / after:)」,分组标签 PINNED/RECENT →
+   置顶/最近,`self.nav` 属性恢复(Atelier 提交误删,集成测试依赖)。
+2. **Card 选中态**:去掉 #111 反相死黑,改为主题色 10% 柔和底 + 左 3px 指示条,
+   文字恒深色(label 样式改为构造期一次性设定,批量建卡成本不升反降);
+   操作按钮(贴/包/钉/删/⋯)改浮层定位(resizeEvent),悬停或选中常驻,
+   不再永久占位 174px;缩略图边框加深至 rgba(17,17,17,0.22)。
+3. **双栏布局**:筛选栏下方 3:2 分栏,左=卡片流+预览+底栏,右(最小 340px)=
+   上下文篮(移入右栏,空包时隐藏标题消除「上下文篮 上下文篮(空)」重复,徽标
+   契约不变;展开头部拆两行适配窄栏) + 内嵌 `EmbeddedAIPanel`(ai_quick.py):
+   快捷动作 解释/翻译/总结/润色/复制Prompt(免 Key:privacy_scan 自动脱敏后复制)、
+   服务下拉+附加上下文包+提问框(Ctrl+Enter)、材料随选中卡片联动、结果四钮
+   (复制/贴回原窗/存历史/入上下文包);与 QuickAIWindow 共用 build_prompt/
+   隐私闸/spawn_chat 纪律。
+4. **快捷入口**:QuickAIWindow 增「复制 Prompt」(Ctrl+Shift+C,无需服务)与
+   open_with_context 的 _target 继承;快捷粘贴浮层增 Alt+Enter(贴上下文包回
+   原窗口)与 Ctrl+Q(选中条目调快速 AI,原窗口记回贴目标)。
+
+**顺带修复的 Atelier 提交(e018ad3)存量缺陷**:
+- `QListWidgetItem` 未导入 → PrivatePage.refresh 必 NameError,主程序根本无法
+  启动(集成测试私密区三连挂+崩溃的根因);
+- 私密列表 item 委托化后丢 item.text() → 集成测试遮罩三断言挂,refresh 补
+  setText 恢复契约;
+- 两项修复后 `_integration_test.py` 全绿(基线为 FAIL+崩溃)。
+
+**验收**:run_checks 16/17;唯一失败 perf-semantics 已用 git stash A/B 证明
+在未改动的 main 上同签名失败(本机负载下 E/F2 计时断言抖动,非本次引入,直跑
+通过)。_integration_test.py PASS。截图:%TEMP%\wclb_ui_preview\panel_light.png
+(_ui_preview.py 已适配 1000px 双栏宽度,show 后再选中以渲染预览/材料行)。

@@ -301,7 +301,7 @@ class ContextTray(SimpleCardWidget):
         root.setContentsMargins(10, 6, 10, 6)
         root.setSpacing(4)
 
-        # ---- 头部(折叠态也可见) ----
+        # ---- 头部(折叠态也可见):一行紧凑 ----
         h = QHBoxLayout()
         h.setSpacing(6)
         self.btn_expand = TransparentToolButton(FIF.DOWN, self)
@@ -318,33 +318,40 @@ class ContextTray(SimpleCardWidget):
         self.lbl_badge.setStyleSheet("color: %s;" % SEC)
         h.addWidget(self.lbl_badge)
         h.addStretch(1)
-        self.cmb_pack = ComboBox()
-        self.cmb_pack.setFixedWidth(150)
-        self.cmb_pack.currentIndexChanged.connect(self._switch_pack)
-        h.addWidget(self.cmb_pack)
         self.btn_new = TransparentToolButton(FIF.ADD, self)
         self.btn_new.setFixedSize(22, 22)
         self.btn_new.setToolTip("新建上下文包")
         self.btn_new.clicked.connect(self._create_pack)
         h.addWidget(self.btn_new)
-        self.btn_preview = PushButton("预览拼装")
+        root.addLayout(h)
+
+        # ---- 包切换与动作行(展开态;右栏宽度有限,按钮文案精简,含义在悬浮提示) ----
+        h2 = QHBoxLayout()
+        h2.setSpacing(6)
+        self.cmb_pack = ComboBox()
+        self.cmb_pack.setMinimumWidth(120)
+        self.cmb_pack.currentIndexChanged.connect(self._switch_pack)
+        h2.addWidget(self.cmb_pack, 1)
+        self.btn_preview = PushButton("预览")
         self.btn_preview.setFont(font(10))
         self.btn_preview.setFixedHeight(24)
+        self.btn_preview.setToolTip("预览拼装结果(本地只读,不外发)")
         self.btn_preview.clicked.connect(self.preview)
-        h.addWidget(self.btn_preview)
-        self.btn_ask = PushButton("带上下文提问")
+        h2.addWidget(self.btn_preview)
+        self.btn_ask = PushButton("提问")
         self.btn_ask.setFont(font(10))
         self.btn_ask.setFixedHeight(24)
-        self.btn_ask.setToolTip("把拼装结果 + 你的问题发给已配置的 AI 服务"
-                                "(发送前经隐私确认)")
+        self.btn_ask.setToolTip("带上下文提问:把拼装结果 + 你的问题发给已配置的"
+                                " AI 服务(发送前经隐私确认)")
         self.btn_ask.clicked.connect(self.ask)
-        h.addWidget(self.btn_ask)
-        self.btn_copy = PushButton("复制拼装")
+        h2.addWidget(self.btn_ask)
+        self.btn_copy = PushButton("复制")
         self.btn_copy.setFont(font(10))
         self.btn_copy.setFixedHeight(24)
+        self.btn_copy.setToolTip("复制拼装结果(≈上下文包全文,可粘贴给任意 AI)")
         self.btn_copy.clicked.connect(self.copy_assembled)
-        h.addWidget(self.btn_copy)
-        root.addLayout(h)
+        h2.addWidget(self.btn_copy)
+        root.addLayout(h2)
         self._header_extras = (self.cmb_pack, self.btn_new,
                                self.btn_preview, self.btn_ask,
                                self.btn_copy)
@@ -438,11 +445,13 @@ class ContextTray(SimpleCardWidget):
         self._empty.setText(
             "空——右键卡片「加入上下文包」收集素材;图片只存引用,不会发送给 AI"
             if svc.packs else "尚无上下文包——右键卡片「加入上下文包」新建")
-        # 徽标与预算
+        # 徽标与预算(徽标文案是既有契约,单测断言"篮 N"/"上下文篮(空)";
+        # 空包时标题隐藏,避免头部拼出「上下文篮 上下文篮(空)」重复)
         n = len(pack.items) if pack else 0
         est = sum(x.est_tokens for x in pack.items if x.enabled) if pack else 0
         self.lbl_badge.setText("篮 %d · ≈%s" % (n, _fmt_tokens(est)) if n
                                else "上下文篮(空)")
+        self.lbl_title.setVisible(n > 0)
         self._set_usage(est, pack.budget_tokens if pack else 4000)
         # 存储状态行
         self.lbl_status.setText(self._status_text(svc))

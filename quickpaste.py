@@ -328,8 +328,8 @@ class QuickPasteWindow(QWidget):
             self.footer.setText("无匹配条目 · Tab 切类型,Esc 关闭")
         else:
             self.footer.setText(
-                "↑↓ 选择 · Enter 粘贴 · Ctrl+B 入包 · Ctrl+Enter 查看"
-                " · Tab 类型:%s · Esc 关闭%s"
+                "↑↓ 选择 · Enter 粘贴 · Alt+Enter 贴上下文包 · Ctrl+Q 调 AI"
+                " · Ctrl+B 入包 · Tab 类型:%s · Esc 关闭%s"
                 % (CAT_LABEL.get(self._cat, self._cat), more))
 
     def on_thumb(self, path, pm):
@@ -348,7 +348,9 @@ class QuickPasteWindow(QWidget):
             k = e.key()
             m = e.modifiers()
             if k in (Qt.Key_Return, Qt.Key_Enter):
-                if m & Qt.ControlModifier:
+                if m & Qt.AltModifier:
+                    self.act_paste_pack()
+                elif m & Qt.ControlModifier:
                     self.act_view()
                 elif m & Qt.ShiftModifier:
                     self.act_paste(plain=True)
@@ -366,6 +368,9 @@ class QuickPasteWindow(QWidget):
                 return True
             if k == Qt.Key_Delete and not self.search.text():
                 self.act_del()
+                return True
+            if (m & Qt.ControlModifier) and k == Qt.Key_Q:
+                self.act_ask_ai()
                 return True
             if (m & Qt.ControlModifier) and k == Qt.Key_B:
                 _, rec = self._rec_at(self._sel)
@@ -442,6 +447,50 @@ class QuickPasteWindow(QWidget):
             self.app.open_viewer(rec)
         except Exception:
             pass
+
+    def act_paste_pack(self):
+        """Alt+Enter:当前上下文包拼装结果直接贴回原窗口。
+
+        拼装含已放行的敏感条目(与「复制拼装」一致的本地语义);
+        空篮/写失败留在浮层原地,footer 给出下一步提示。"""
+        try:
+            from ctxpack.ui_tray import tray_service
+            a = tray_service(self.app).assemble_active(include_sensitive=True)
+        except Exception:
+            a = None
+        if a is None or not getattr(a, "ok", False) or not (a.text or "").strip():
+            self.footer.setText("上下文篮为空 · 右键卡片「加入上下文包」后再按 Alt+Enter")
+            return
+        target = self._prev_hwnd or getattr(self.app, "_paste_target", None)
+        try:
+            ok = self.app.core.paste_text(a.text, force=True, target_hwnd=target)
+        except Exception:
+            cm.log("贴包失败:\n%s" % __import__("traceback").format_exc())
+            ok = False
+        if not ok:
+            self.footer.setText("剪贴板写入失败,请重试(Alt+Enter 再试 / Esc 返回)")
+            return
+        self.close_restore()
+
+    def act_ask_ai(self):
+        """Ctrl+Q:把选中条目(或上下文包)交给快速 AI;原窗口记为回贴目标。"""
+        if self._prev_hwnd:
+            self.app._paste_target = self._prev_hwnd
+        hi, rec = self._rec_at(self._sel)
+        self._silent_hide()
+        try:
+            if rec is not None and rec.get("type") == "text":
+                self.app.open_quick_ai(rec)
+                return
+            qa = getattr(self.app, "_quick_ai", None)
+            if qa is not None:
+                qa.open_with_context()
+            elif hasattr(self.app, "open_quick_ai"):
+                self.app.open_quick_ai()
+        except Exception:
+            cm.log("快速 AI 拉起失败:\n%s" % __import__("traceback").format_exc())
+            self.footer.setText("快速 AI 拉起失败,详情见 app.log")
+            self.show()
 
     def act_del(self):
         hi, rec = self._rec_at(self._sel)

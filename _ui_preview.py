@@ -146,11 +146,11 @@ def composite(pm, out):
 fake = FakeApp()
 
 panel = wq.HistoryPage(fake)
-panel.resize(560, 720)
+panel.resize(1000, 720)
 panel.set_view(list(range(len(HISTORY))), HISTORY)
-panel.select_index(0)
 panel.show()
 app.processEvents()
+panel.select_index(0)      # show 之后再选中,预览面板/AI 材料行才会渲染内容
 if os.environ.get("WCLB_DEBUG_GEOM"):
     def _g(w, name):
         gg = w.geometry()
