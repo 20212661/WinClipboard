@@ -5,10 +5,10 @@
     python _ui_doc_shots.py light
     python _ui_doc_shots.py dark
 
-输出 docs/ui/2026-10-12/<名称>_<主题>.png:
+输出 docs/ui/2026-10-15/<名称>_<主题>.png:
     main_history / main_workflow / main_services / main_private / main_settings
     quickpaste / viewer_code / viewer_json / viewer_md / viewer_csv
-    viewer_files / viewer_image / viewer_diff
+    viewer_files / viewer_image / viewer_diff / quick_ai / wheel
 
 面板/编辑器/图钉画布截图由 _ui_preview.py 生成(它自带 17 项断言)。
 """
@@ -25,7 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 MODE = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] in ("light", "dark") else "light"
-OUT = os.path.join(HERE, "docs", "ui", "2026-10-12")
+OUT = os.path.join(HERE, "docs", "ui", "2026-10-15")
 os.makedirs(OUT, exist_ok=True)
 
 TMP = os.path.join(tempfile.gettempdir(), "wclb_ui_doc")
@@ -41,6 +41,9 @@ cm.PRIVATE_FILE = os.path.join(TMP, "private.json")
 cm.CONFIG_FILE = os.path.join(TMP, "config.json")
 cm.LOG_FILE = os.path.join(TMP, "app.log")
 cm.ICON_FILE = os.path.join(TMP, "icon.ico")
+# 上下文包路径在 cm 导入时已按原 APP_DIR 固化:显式重定向到隔离目录,
+# 避免托盘 1200ms 定时刷新把真实用户的上下文包装进文档截图
+cm.CTXPACK_FILE = os.path.join(TMP, "context_packs.json")
 os.makedirs(cm.IMAGE_DIR, exist_ok=True)
 
 from PySide6.QtWidgets import QApplication   # noqa: E402
@@ -203,6 +206,18 @@ class FakeApp(QObject):
 
 fake = FakeApp()
 
+# 种子演示上下文包(隔离目录):让右栏上下文篮在主界面截图里呈现真实状态
+from ctxpack.service import ContextPackService   # noqa: E402
+
+_ctx_svc = ContextPackService(cm.CTXPACK_FILE).load()
+if not _ctx_svc.packs:
+    _ctx_svc.create("示例包 · 项目资料")
+    _ctx_svc.add_snapshot("text", "def add(a, b):\n    return a + b\n",
+                          title="add 函数", captured_at=TS)
+    _ctx_svc.add_snapshot(
+        "text", "上下文包:把零散资料按需勾选、拼装成一段可直接发给 AI 的上下文。",
+        title="上下文包说明", captured_at=TS - 60)
+
 
 def pump(seconds=1.0):
     end = time.time() + seconds
@@ -308,5 +323,23 @@ dw = wq.DiffWindow(fake,
 dw.resize(*VS)
 dw.show()
 shot(dw, "viewer_diff")
+
+# ---- 4) 快速 AI:结果浮窗与动作轮盘 ----
+import ai_quick as qa                              # noqa: E402
+
+qaw = qa.QuickAIWindow(fake)
+qaw._snapshot = "2026 年第三季度 OKR 进展:华东区增长 23%,超额完成目标;华南区持平。"
+qaw.select_action("explain")
+qaw._shutdown = True        # 只为截图:拦掉 select_action 排的 0ms 自动发送
+qaw._answer = ("华东区已完成季度增长目标(23%),渠道合作是当前重点;"
+               "华南区持平,建议下周跟进。")
+qaw.output.setPlainText(qaw._answer)
+qaw._sync_buttons()
+shot(qaw, "quick_ai")
+qaw.wheel._hover = 0
+pump(0.3)
+qaw.wheel.grab().save(os.path.join(OUT, "wheel_%s.png" % MODE))
+print("saved wheel_%s.png" % MODE)
+qaw.shutdown()
 
 print("OUTDIR", os.path.realpath(OUT))
