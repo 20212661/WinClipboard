@@ -544,7 +544,17 @@ class ContextTray(SimpleCardWidget):
         v.show()
 
     def ask(self):
-        """带上下文提问(小对话框;延迟 import,不影响托盘导入)。"""
+        """带上下文提问:真实运行复用 QuickAIWindow(统一单步 AI 入口);
+        测试 FakeApp 无 open_quick_ai 时回退 AskContextDialog 保持单测兼容。"""
+        if hasattr(self.app, "open_quick_ai"):
+            a = self._assemble_or_warn()
+            if a is None:
+                return
+            if getattr(self.app, "_quick_ai", None) is None:
+                from ai_quick import QuickAIWindow
+                self.app._quick_ai = QuickAIWindow(self.app)
+            self.app._quick_ai.open_with_context()
+            return
         from .ui_ask import AskContextDialog
         dlg = AskContextDialog(self.app)
         dlg.setAttribute(Qt.WA_DeleteOnClose)

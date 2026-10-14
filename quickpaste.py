@@ -328,7 +328,7 @@ class QuickPasteWindow(QWidget):
             self.footer.setText("无匹配条目 · Tab 切类型,Esc 关闭")
         else:
             self.footer.setText(
-                "↑↓ 选择 · Enter 粘贴 · Shift+Enter 纯文本 · Ctrl+Enter 查看"
+                "↑↓ 选择 · Enter 粘贴 · Ctrl+B 入包 · Ctrl+Enter 查看"
                 " · Tab 类型:%s · Esc 关闭%s"
                 % (CAT_LABEL.get(self._cat, self._cat), more))
 
@@ -366,6 +366,17 @@ class QuickPasteWindow(QWidget):
                 return True
             if k == Qt.Key_Delete and not self.search.text():
                 self.act_del()
+                return True
+            if (m & Qt.ControlModifier) and k == Qt.Key_B:
+                _, rec = self._rec_at(self._sel)
+                if rec is not None:
+                    try:
+                        from ctxpack.ui_tray import add_records_to_pack
+                        added, _ = add_records_to_pack(self.app, [rec])
+                        if added:
+                            self.footer.setText("✓ 已加入上下文包 · 可继续选择,Esc 关闭")
+                    except Exception:
+                        self.footer.setText("✗ 入包失败,详情见 app.log")
                 return True
             if m & Qt.ControlModifier and Qt.Key_1 <= k <= Qt.Key_9:
                 self._sel = k - Qt.Key_1

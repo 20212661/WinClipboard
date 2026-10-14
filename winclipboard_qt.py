@@ -214,7 +214,7 @@ class Card(QFrame):
         # 悬停操作按钮
         self.act_btns = None
         actw = QWidget()
-        actw.setFixedSize(4 * 30 + 3 * 6, 30)
+        actw.setFixedSize(5 * 30 + 4 * 6, 30)
         actw.setStyleSheet("background: transparent;")
         self.actw = actw
         root.addWidget(actw, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -329,8 +329,9 @@ class Card(QFrame):
         actbox = QHBoxLayout(self.actw)
         actbox.setContentsMargins(0, 0, 0, 0)
         actbox.setSpacing(4)
-        tips = {"paste": "粘贴", "pin": "固定", "del": "删除", "more": "更多"}
-        for act, label in (("paste", "贴"), ("pin", "钉"),
+        tips = {"paste": "粘贴", "pack": "加入上下文包",
+                "pin": "固定", "del": "删除", "more": "更多"}
+        for act, label in (("paste", "贴"), ("pack", "包"), ("pin", "钉"),
                            ("del", "删"), ("more", "⋯")):
             b = QPushButton(label, self.actw)
             b.setFixedSize(28, 28)
@@ -3338,6 +3339,9 @@ class WinClipboardApp(QObject):
         self.select_card(card)
         if act == "paste":
             self.paste_selected()
+        elif act == "pack":
+            from ctxpack.ui_tray import add_records_to_pack
+            add_records_to_pack(self, [card.rec])
         elif act == "pin":
             self.toggle_pin()
         elif act == "del":
