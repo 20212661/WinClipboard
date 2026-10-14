@@ -15,12 +15,17 @@ from qfluentwidgets import setTheme, setThemeColor, Theme
 # ============================================================
 # 设计 Token
 # ============================================================
-PAPER = "#F3EFE6"          # 纸色
-INK = "#111111"            # 墨色
-INK_LIGHT = "#77736B"      # 灰
+# 2026-10-15 起从 Atelier 纸感(米黄/墨色直角)收敛为中性浅灰白 +
+# 圆角软边框:消除直角黑框与白色输入框的脏色差,中文按钮文案不再
+# 被 mono/uppercase 杂志样式挤压(卡片 28px 小按钮曾被 padding 挤空)。
+PAPER = "#f5f6f8"          # 页面底色(中性浅灰白)
+INK = "#111111"            # 主文字
+INK_LIGHT = "#6B7280"      # 次文字(中性灰)
 ACCENT = "#1F3AFF"         # Études 蓝
 DANGER = "#E63B2E"         # 警示红
 SELECTION = INK            # 反相选中背景
+
+BORDER_SOFT = "rgba(0,0,0,0.14)"   # 全局柔和边框
 
 # 行高 / 间距 (1px 网格)
 MASTHEAD_H = 56
@@ -101,23 +106,23 @@ QFrame {{
 }}
 
 QFrame#divider {{
-    background: {INK};
+    background: {BORDER_SOFT};
     max-height: 1px;
     min-height: 1px;
 }}
 
 QLineEdit {{
-    background: transparent;
-    border: none;
-    border-bottom: 1px solid {INK};
+    background: #ffffff;
+    border: 1px solid {BORDER_SOFT};
+    border-radius: 6px;
     color: {INK};
-    padding: 4px 0px;
+    padding: 5px 10px;
     font-family: "{FONT_SANS}", "Inter", "Segoe UI";
-    font-size: 13px;
+    font-size: 12px;
 }}
 
 QLineEdit:focus {{
-    border-bottom: 2px solid {ACCENT};
+    border: 1px solid {ACCENT};
 }}
 
 QLineEdit::placeholder {{
@@ -125,62 +130,62 @@ QLineEdit::placeholder {{
 }}
 
 QListWidget {{
-    background: {PAPER};
-    border: none;
+    background: #ffffff;
+    border: 1px solid {BORDER_SOFT};
+    border-radius: 6px;
     outline: none;
-    padding: 0px;
+    padding: 2px;
 }}
 
 QListWidget::item {{
-    background: {PAPER};
+    background: transparent;
     color: {INK};
-    border-bottom: 1px solid rgba(17,17,17,0.08);
+    border-bottom: 1px solid rgba(0,0,0,0.06);
     padding: 0px;
 }}
 
 QListWidget::item:selected {{
-    background: {INK};
-    color: {PAPER};
+    background: {ACCENT};
+    color: #ffffff;
 }}
 
 QListWidget::item:hover:!selected {{
-    background: rgba(31,58,255,0.04);
+    background: rgba(0,0,0,0.04);
 }}
 
 QPlainTextEdit {{
-    background: {PAPER};
+    background: #ffffff;
     color: {INK};
-    border: 1px solid {INK};
+    border: 1px solid {BORDER_SOFT};
+    border-radius: 6px;
     padding: 8px;
     font-family: "{FONT_MONO}", "Consolas", monospace;
     font-size: 11px;
 }}
 
 QPushButton {{
-    background: {PAPER};
+    background: #ffffff;
     color: {INK};
-    border: 1px solid {INK};
-    border-radius: 0px;
-    padding: 6px 14px;
-    font-family: "{FONT_MONO}", "Consolas", monospace;
-    font-size: 10px;
-    text-transform: uppercase;
+    border: 1px solid {BORDER_SOFT};
+    border-radius: 6px;
+    padding: 5px 12px;
+    font-family: "{FONT_SANS}", "Inter", "Segoe UI", "Microsoft YaHei UI";
+    font-size: 12px;
 }}
 
 QPushButton:hover {{
-    background: {INK};
-    color: {PAPER};
+    background: rgba(0,0,0,0.05);
 }}
 
 QPushButton:pressed {{
     background: {ACCENT};
-    color: {PAPER};
+    color: #ffffff;
     border-color: {ACCENT};
 }}
 
 QPushButton#Primary {{
     background: {ACCENT};
-    color: {PAPER};
+    color: #ffffff;
     border: 1px solid {ACCENT};
 }}
 
@@ -190,11 +195,11 @@ QPushButton#Primary:hover {{
 }}
 
 QComboBox {{
-    background: {PAPER};
+    background: #ffffff;
     color: {INK};
-    border: 1px solid {INK};
-    border-radius: 0px;
-    padding: 4px 8px;
+    border: 1px solid {BORDER_SOFT};
+    border-radius: 6px;
+    padding: 4px 10px;
     min-width: 80px;
 }}
 
@@ -204,18 +209,19 @@ QComboBox::drop-down {{
 }}
 
 QComboBox QAbstractItemView {{
-    background: {PAPER};
+    background: #ffffff;
     color: {INK};
-    border: 1px solid {INK};
-    selection-background-color: {INK};
-    selection-color: {PAPER};
+    border: 1px solid {BORDER_SOFT};
+    border-radius: 6px;
+    selection-background-color: {ACCENT};
+    selection-color: #ffffff;
 }}
 
 QSpinBox {{
-    background: {PAPER};
+    background: #ffffff;
     color: {INK};
-    border: 1px solid {INK};
-    border-radius: 0px;
+    border: 1px solid {BORDER_SOFT};
+    border-radius: 6px;
     padding: 4px;
 }}
 
@@ -226,8 +232,9 @@ QScrollBar:vertical {{
 }}
 
 QScrollBar::handle:vertical {{
-    background: {INK_LIGHT};
+    background: rgba(0,0,0,0.22);
     min-height: 24px;
+    border-radius: 3px;
 }}
 
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
@@ -241,8 +248,9 @@ QScrollBar:horizontal {{
 }}
 
 QScrollBar::handle:horizontal {{
-    background: {INK_LIGHT};
+    background: rgba(0,0,0,0.22);
     min-width: 24px;
+    border-radius: 3px;
 }}
 """
 

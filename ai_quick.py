@@ -351,7 +351,10 @@ class QuickAIWindow(QWidget):
         self.output.clear()
         self.service.clear()
         self._services = [dict(x) for x in self.app.cfg.get("ai_services", [])]
-        self.service.addItems([x.get("name") or x.get("model") or "AI 服务" for x in self._services])
+        self.service.addItems([x.get("name") or x.get("model") or "AI 服务"
+                               for x in self._services])
+        if not self._services:      # 空下拉易被当成坏控件:给一条占位说明
+            self.service.addItem("未配置云端模型（可用「复制 Prompt」）")
         self._notice("使用 AI 服务页配置的模型" if self._services else "请先在主窗口「AI 服务」页配置服务")
         self._sync_buttons()
         self.setStyleSheet("QuickAIWindow { background: %s; }" % ui_base.BG)
@@ -640,7 +643,10 @@ class EmbeddedAIPanel(QWidget):
                     "ask")
 
     def refresh_services(self):
-        """服务下拉与 app.cfg 同步(名称集合未变时零成本)。"""
+        """服务下拉与 app.cfg 同步(名称集合未变时零成本)。
+
+        未配置任何服务时放一条占位项,避免下拉框空白看不出是什么控件
+        (占位项不进 _services,发送仍会走「请先配置」提示)。"""
         cfg = getattr(self.app, "cfg", None) or {}
         services = [dict(x) for x in (cfg.get("ai_services") or [])]
         names = [x.get("name") or x.get("model") or "AI 服务" for x in services]
@@ -651,9 +657,12 @@ class EmbeddedAIPanel(QWidget):
         current = self.service.currentText()
         self.service.clear()
         self.service.addItems(names)
-        index = self.service.findText(current)
-        if index >= 0:
-            self.service.setCurrentIndex(index)
+        if not names:
+            self.service.addItem("未配置云端模型（可用「复制 Prompt」）")
+        else:
+            index = self.service.findText(current)
+            if index >= 0:
+                self.service.setCurrentIndex(index)
 
     def eventFilter(self, obj, event):
         if obj is self.question and event.type() == QEvent.KeyPress \

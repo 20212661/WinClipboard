@@ -233,6 +233,7 @@ class _TrayRow(QWidget):
         fm = QFontMetrics(self.lbl_title.font())
         self.lbl_title.setText(fm.elidedText(item.title, Qt.ElideRight, 210))
         self.lbl_title.setToolTip(item.title)
+        self.lbl_title.setStyleSheet("background: transparent;")
         h.addWidget(self.lbl_title)
         h.addWidget(Badge(item.kind))
         if item.sensitive:
@@ -243,7 +244,7 @@ class _TrayRow(QWidget):
             h.addWidget(b)
         self.lbl_tok = QLabel("≈%d" % item.est_tokens)
         self.lbl_tok.setFont(font(10))
-        self.lbl_tok.setStyleSheet("color: %s;" % TER)
+        self.lbl_tok.setStyleSheet("color: %s; background: transparent;" % TER)
         h.addWidget(self.lbl_tok)
         h.addStretch(1)
         for icon, tip, fn in ((FIF.UP, "上移", self._up),
@@ -315,9 +316,15 @@ class ContextTray(SimpleCardWidget):
         h.addWidget(self.lbl_title)
         self.lbl_badge = QLabel("")
         self.lbl_badge.setFont(font(10))
-        self.lbl_badge.setStyleSheet("color: %s;" % SEC)
+        self.lbl_badge.setStyleSheet("color: %s; background: transparent;" % SEC)
         h.addWidget(self.lbl_badge)
         h.addStretch(1)
+        # 空篮引导(浅灰;有条目或展开时隐藏,展开态的空态行自会说明)
+        self.lbl_hint = QLabel("点左侧卡片「+入包」或按 Ctrl+B 收集素材")
+        self.lbl_hint.setFont(font(9))
+        self.lbl_hint.setStyleSheet(
+            "color: %s; background: transparent;" % TER)
+        h.addWidget(self.lbl_hint)
         self.btn_new = TransparentToolButton(FIF.ADD, self)
         self.btn_new.setFixedSize(22, 22)
         self.btn_new.setToolTip("新建上下文包")
@@ -370,7 +377,7 @@ class ContextTray(SimpleCardWidget):
         pu.addWidget(self._bar_bg, 1)
         self.lbl_usage = QLabel("")
         self.lbl_usage.setFont(font(10))
-        self.lbl_usage.setStyleSheet("color: %s;" % SEC)
+        self.lbl_usage.setStyleSheet("color: %s; background: transparent;" % SEC)
         pu.addWidget(self.lbl_usage)
         self._progress_row = QWidget()
         QVBoxLayout(self._progress_row).addLayout(pu)
@@ -380,6 +387,7 @@ class ContextTray(SimpleCardWidget):
         self.lbl_status = QLabel("")
         self.lbl_status.setFont(font(10))
         self.lbl_status.setWordWrap(True)
+        self.lbl_status.setStyleSheet("background: transparent;")
         root.addWidget(self.lbl_status)
 
         # ---- 条目区(展开态) ----
@@ -390,7 +398,7 @@ class ContextTray(SimpleCardWidget):
         self._empty = QLabel(
             "空——右键卡片「加入上下文包」收集素材;图片只存引用,不会发送给 AI")
         self._empty.setFont(font(10))
-        self._empty.setStyleSheet("color: %s;" % TER)
+        self._empty.setStyleSheet("color: %s; background: transparent;" % TER)
         self._empty.setWordWrap(True)
         self._body_lay.addWidget(self._empty)
         root.addWidget(self._body)
@@ -411,6 +419,8 @@ class ContextTray(SimpleCardWidget):
         self._body.setVisible(on)
         if on:
             self.refresh()
+        else:
+            self._update_hint()
 
     # ---- 数据刷新 ----
 
@@ -452,13 +462,20 @@ class ContextTray(SimpleCardWidget):
         self.lbl_badge.setText("篮 %d · ≈%s" % (n, _fmt_tokens(est)) if n
                                else "上下文篮(空)")
         self.lbl_title.setVisible(n > 0)
+        self._n = n
+        self._update_hint()
         self._set_usage(est, pack.budget_tokens if pack else 4000)
         # 存储状态行
         self.lbl_status.setText(self._status_text(svc))
         self.lbl_status.setStyleSheet(
-            "color: %s;" % (_err_color()
+            "color: %s; background: transparent;" % (_err_color()
                             if svc.status == "unreadable" or svc.last_save_error
                             else TER))
+
+    def _update_hint(self):
+        """空篮且折叠时显示收集引导;有条目或已展开时隐藏。"""
+        self.lbl_hint.setVisible(getattr(self, "_n", 0) == 0
+                                 and not self._expanded)
 
     @staticmethod
     def _status_text(svc):

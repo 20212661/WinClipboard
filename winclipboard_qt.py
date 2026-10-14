@@ -86,6 +86,17 @@ from image_editor import (ImageEditor, CompressDialog,  # noqa: F401
                           AnnoMosaic, AnnoText)
 ui_base.register(sys.modules[__name__])   # 调色板随主题刷新本模块全局
 
+# 局部原生按钮/徽章的统一柔和样式(圆角软边,与 ui/theme.py 全局表同语言;
+# 杂志期直角黑框遗留样式已全部收敛到这里)
+_SOFT_BTN = (
+    "QPushButton { background: #ffffff; color: %s;"
+    " border: 1px solid rgba(0,0,0,0.14); border-radius: 6px;"
+    " padding: 4px 12px; }"
+    "QPushButton:hover { background: rgba(0,0,0,0.05); }" % INK)
+_KEY_BADGE = (
+    "color: %s; background: transparent; border: 1px solid rgba(0,0,0,0.14);"
+    " border-radius: 6px; padding: 2px 8px;" % INK_LIGHT)
+
 
 class Card(QFrame):
     """剪贴板条目卡片。
@@ -209,10 +220,10 @@ class Card(QFrame):
         root.addLayout(mid, 1)
 
         # 操作按钮浮层:不进布局(不占文本宽度),resizeEvent 定位到右侧;
-        # 悬停或选中时常驻显示(见 _apply_btns)
+        # 悬停或选中时常驻显示(见 _apply_btns)。宽度 = 4×28 + 入包 50 + 间距
         self.act_btns = None
         actw = QWidget(self)
-        actw.setFixedSize(162, 30)
+        actw.setFixedSize(184, 30)
         actw.setStyleSheet("background: transparent;")
         self.actw = actw
 
@@ -337,18 +348,38 @@ class Card(QFrame):
         actbox.setSpacing(4)
         tips = {"paste": "粘贴", "pack": "加入上下文包",
                 "pin": "固定", "del": "删除", "more": "更多"}
-        for act, label in (("paste", "贴"), ("pack", "包"), ("pin", "钉"),
+        # 强调色胶囊的底/边从主题色派生(真实运行=Études 蓝,预览/测试
+        # 走 init_palette 时=库默认蓝,与选中态指示条始终同源)
+        acc = QColor(ACCENT)
+        acc_tint = "rgba(%d,%d,%d,0.10)" % (acc.red(), acc.green(), acc.blue())
+        acc_edge = "rgba(%d,%d,%d,0.35)" % (acc.red(), acc.green(), acc.blue())
+        acc_hov = "rgba(%d,%d,%d,0.18)" % (acc.red(), acc.green(), acc.blue())
+        # 显式 padding:0 + 圆角 + 自带字号:覆盖全局 QPushButton 的
+        # padding/mono/uppercase 杂志样式(曾把 28px 小按钮挤成空黑框)
+        neutral_qss = (
+            "QPushButton { padding: 0px; border-radius: 6px;"
+            " font-family: 'Segoe UI','Microsoft YaHei UI'; font-size: 12px;"
+            " background: rgba(255,255,255,0.92); color: #222222;"
+            " border: 1px solid rgba(0,0,0,0.14); }"
+            "QPushButton:hover { background: rgba(0,0,0,0.06); }")
+        pack_qss = (
+            "QPushButton { padding: 0px; border-radius: 6px;"
+            " font-family: 'Segoe UI','Microsoft YaHei UI'; font-size: 12px;"
+            " background: %s; color: %s; font-weight: 600;"
+            " border: 1px solid %s; }"
+            "QPushButton:hover { background: %s; }"
+            % (acc_tint, ACCENT, acc_edge, acc_hov))
+        for act, label in (("paste", "贴"), ("pack", "+入包"), ("pin", "钉"),
                            ("del", "删"), ("more", "⋯")):
             b = QPushButton(label, self.actw)
-            b.setFixedSize(28, 28)
-            b.setFont(label_font(8))
+            if act == "pack":
+                b.setFixedSize(50, 26)
+                b.setStyleSheet(pack_qss)
+            else:
+                b.setFixedSize(28, 26)
+                b.setStyleSheet(neutral_qss)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setToolTip(tips[act])
-            b.setStyleSheet(
-                "QPushButton { background: %s; color: %s; border: 1px solid %s; "
-                "border-radius: 0px; }"
-                "QPushButton:hover { background: %s; color: %s; }" %
-                (PAPER, INK, INK, INK, PAPER))
             b.clicked.connect(lambda _=False, a=act: self.app.card_action(a, self))
             b.setVisible(False)
             actbox.addWidget(b)
@@ -476,10 +507,11 @@ class HistoryPage(QWidget):
         self.search.setMinimumWidth(230)
         self.search.setMaximumWidth(430)
         self.search.setStyleSheet(
-            "QLineEdit#historySearch { background: transparent; color: %s; "
-            "border: none; border-bottom: 1px solid %s; padding: 6px 0px; }"
-            "QLineEdit#historySearch:focus { border-bottom: 2px solid %s; }" %
-            (INK, INK, ACCENT))
+            "QLineEdit#historySearch { background: #ffffff; color: %s; "
+            "border: 1px solid rgba(0,0,0,0.14); border-radius: 6px; "
+            "padding: 5px 10px; }"
+            "QLineEdit#historySearch:focus { border: 1px solid %s; }" %
+            (INK, ACCENT))
         top.addWidget(self.search, 1)
         # 安全模式徽章仅在安全模式出现(正常启动不再放装饰性 LIVE 徽标)
         if bool(getattr(self.app, "safe_mode", False)):
@@ -570,11 +602,7 @@ class HistoryPage(QWidget):
         self.empty_hint = t2
         self.btn_reset_filter = QPushButton("显示全部内容", self._empty_box)
         self.btn_reset_filter.setFont(label_font(9))
-        self.btn_reset_filter.setStyleSheet(
-            "QPushButton { background: %s; color: %s; border: 1px solid %s; "
-            "border-radius: 0px; padding: 8px 18px; }"
-            "QPushButton:hover { background: %s; color: %s; }" %
-            (PAPER, INK, INK, INK, PAPER))
+        self.btn_reset_filter.setStyleSheet(_SOFT_BTN)
         self.btn_reset_filter.clicked.connect(self.reset_filters)
         eb.addWidget(t1)
         eb.addWidget(t2)
@@ -590,8 +618,9 @@ class HistoryPage(QWidget):
         self.preview = QFrame()
         self.preview.setFrameShape(QFrame.Shape.NoFrame)
         self.preview.setStyleSheet(
-            "QFrame { background: %s; color: %s; border-top: 1px solid %s; }" %
-            (PAPER, INK, INK))
+            "QFrame { background: #ffffff; color: %s; border: none;"
+            " border-top: 1px solid rgba(0,0,0,0.12);"
+            " border-radius: 6px; }" % INK)
         pv = QVBoxLayout(self.preview)
         pv.setContentsMargins(0, 10, 0, 10)
         pv.setSpacing(8)
@@ -607,11 +636,7 @@ class HistoryPage(QWidget):
         self.pv_btn_json.setFixedHeight(26)
         self.pv_btn_json.setFont(label_font(9))
         self.pv_btn_json.setToolTip("JSON 美化 / 紧凑切换")
-        self.pv_btn_json.setStyleSheet(
-            "QPushButton { background: %s; color: %s; border: 1px solid %s; "
-            "border-radius: 0px; padding: 4px 10px; }"
-            "QPushButton:hover { background: %s; color: %s; }" %
-            (PAPER, INK, INK, INK, PAPER))
+        self.pv_btn_json.setStyleSheet(_SOFT_BTN)
         self.pv_btn_json.clicked.connect(self._toggle_pv_json)
         self.pv_btn_json.setVisible(False)
         self.pv_btn_copy = QPushButton("复制")
@@ -619,11 +644,7 @@ class HistoryPage(QWidget):
         self.pv_btn_copy.setFont(label_font(9))
         self.pv_btn_copy.setToolTip("复制完整内容")
         self.pv_btn_copy.setAccessibleName("复制完整内容到剪贴板")
-        self.pv_btn_copy.setStyleSheet(
-            "QPushButton { background: %s; color: %s; border: 1px solid %s; "
-            "border-radius: 0px; padding: 4px 10px; }"
-            "QPushButton:hover { background: %s; color: %s; }" %
-            (PAPER, INK, INK, INK, PAPER))
+        self.pv_btn_copy.setStyleSheet(_SOFT_BTN)
         self.pv_btn_copy.clicked.connect(self._copy_pv)
         ph.addWidget(self.pv_badge)
         ph.addSpacing(4)
@@ -694,20 +715,14 @@ class HistoryPage(QWidget):
         self.btn_preview.setFixedHeight(26)
         self.btn_preview.setFont(label_font(9))
         self.btn_preview.setToolTip("显示 / 隐藏底部预览面板")
-        self.btn_preview.setStyleSheet(
-            "QPushButton { background: %s; color: %s; border: 1px solid %s; "
-            "border-radius: 0px; padding: 4px 12px; }"
-            "QPushButton:hover { background: %s; color: %s; }" %
-            (PAPER, INK, INK, INK, PAPER))
+        self.btn_preview.setStyleSheet(_SOFT_BTN)
         self.btn_preview.clicked.connect(lambda checked: self.toggle_preview(checked))
         foot.addWidget(self.btn_preview)
         foot.addSpacing(6)
         for btxt in ("↑ ↓", "Enter", "Esc"):
             b = QLabel(btxt)
             b.setFont(label_font(8))
-            b.setStyleSheet(
-                "color: %s; background: transparent; border: 1px solid %s; "
-                "padding: 2px 6px;" % (INK_LIGHT, INK_LIGHT))
+            b.setStyleSheet(_KEY_BADGE)
             foot.addWidget(b)
         left.addLayout(foot)
 
