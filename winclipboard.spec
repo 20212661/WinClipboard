@@ -24,6 +24,7 @@ a = Analysis(
         "win32event",
         # 本项目模块(被字符串/延迟路径引用时兜底)
         "perf_probe",
+        "ai_quick",
         "pinboard",
         # 阶段 8 拆分出的模块(静态导入为主,此处兜底)
         "ui_base",

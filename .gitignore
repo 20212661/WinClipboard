@@ -14,3 +14,7 @@ soak_check.py
 soak_report.md
 soak_state.json
 .runtime_appdata/
+.runtime_quick_ai_preview/
+.runtime_quick_ai_integration/
+# 测试沙箱(随机后缀,不入库;已入库的 wclb_ui_doc 不受影响)
+wclb_*/

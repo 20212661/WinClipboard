@@ -78,7 +78,7 @@ from win32_host import (
     MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
     M_SHOW, M_CLEAR, M_PRIVATE, M_AUTOSTART, M_ABOUT, M_QUIT,
     M_CTT_OFF, M_PAUSE, ID_TIMER, ID_TIMER_CAPTURE,
-    ID_HOTKEY, ID_HOTKEY_PIN, ID_HOTKEY_CTT, ID_HOTKEY_QP,
+    ID_HOTKEY, ID_HOTKEY_PIN, ID_HOTKEY_CTT, ID_HOTKEY_QP, ID_HOTKEY_AI,
     _VK_OEM_NAMES, hotkey_label, single_instance, foreground_app_exe,
     png_to_dib, DROPFILES, build_dropfiles,
     MOUSEINPUT, HARDWAREINPUT, INPUT_UNION, INPUT, INPUT_KEYBOARD,
@@ -98,6 +98,8 @@ DEFAULT_CFG = {
     "hotkey_key": 0x56,          # 'V'
     "quick_mod": MOD_ALT,
     "quick_key": 0xC0,           # '`'(VK_OEM_3):快捷粘贴浮层,Win+V 式轻入口
+    "ai_hotkey_mod": MOD_CONTROL | MOD_ALT,
+    "ai_hotkey_key": 0x20,      # Space: quick AI action wheel
     "auto_paste": False,
     "sensitive_guard": True,
     "exclude_apps": [],         # 按应用排除:名单内程序的复制不入史(exe 名小写)

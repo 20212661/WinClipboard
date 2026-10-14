@@ -59,6 +59,7 @@ ID_HOTKEY = 100              # 主热键(Ctrl+Shift+V)
 ID_HOTKEY_PIN = 102          # 图钉画布:直接钉剪贴板图片(Ctrl+Shift+P)
 ID_HOTKEY_CTT = 103          # 图钉画布:鼠标穿透切换(Ctrl+Alt+T)
 ID_HOTKEY_QP = 104           # 快捷粘贴浮层(默认 Alt+`)
+ID_HOTKEY_AI = 105           # 快速 AI(默认 Ctrl+Alt+Space)
 
 # 部分 win32con 构建缺失的托盘常量,这里显式定义(避免 AttributeError)
 NIM_ADD = 0x00000000
@@ -366,6 +367,11 @@ class TrayWorker(threading.Thread):
             log("快捷粘贴热键(%s)被占用,浮层入口不可用(可在设置页录制新组合)"
                 % hotkey_label(cfg.get("quick_mod", MOD_ALT),
                                cfg.get("quick_key", 0xC0)))
+        ai_ok = user32.RegisterHotKey(
+            self.hwnd, ID_HOTKEY_AI,
+            int(cfg.get("ai_hotkey_mod", MOD_CONTROL | MOD_ALT)) | 0x4000,  # MOD_NOREPEAT
+            int(cfg.get("ai_hotkey_key", 0x20)))
+        self.app._post(("ai_hotkey_state", bool(ai_ok)))
         self.app._post(("ctt_hotkey_state", bool(ctt_ok)))
         self.app._post(("qp_hotkey_state", bool(qp_ok)))
         user32.SetTimer(self.hwnd, ID_TIMER, 80, None)
@@ -388,6 +394,7 @@ class TrayWorker(threading.Thread):
             lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_PIN),
             lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_CTT),
             lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_QP),
+            lambda: user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_AI),
             lambda: user32.RemoveClipboardFormatListener(self.hwnd),
         ):
             try:
@@ -436,6 +443,8 @@ class TrayWorker(threading.Thread):
             self.app._post(("ctt_hotkey",))
         elif wp == ID_HOTKEY_QP:
             self.app._post(("qp_hotkey",))
+        elif wp == ID_HOTKEY_AI:
+            self.app._post(("ai_hotkey",))
         else:
             self.app._post(("hotkey",))
         return 0
@@ -535,6 +544,16 @@ class TrayWorker(threading.Thread):
                     int(cfg.get("quick_mod", MOD_ALT)),
                     int(cfg.get("quick_key", 0xC0)))
             self.app._post(("qp_hotkey_change", ok, mod, key))
+        elif cmd[0] == "hotkey_ai":
+            mod, key = int(cmd[1]), int(cmd[2])
+            cfg = self.app.cfg
+            user32.UnregisterHotKey(self.hwnd, ID_HOTKEY_AI)
+            ok = bool(user32.RegisterHotKey(self.hwnd, ID_HOTKEY_AI, mod | 0x4000, key))
+            if not ok:
+                user32.RegisterHotKey(self.hwnd, ID_HOTKEY_AI,
+                                      int(cfg.get("ai_hotkey_mod", MOD_CONTROL | MOD_ALT)) | 0x4000,
+                                      int(cfg.get("ai_hotkey_key", 0x20)))
+            self.app._post(("ai_hotkey_change", ok, mod, key))
         elif cmd[0] == "quit":
             self._cleanup()
             win32gui.PostQuitMessage(0)

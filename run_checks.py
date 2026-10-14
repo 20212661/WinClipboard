@@ -8,11 +8,12 @@
     --benchmark   追加性能基准(耗时长,单独运行更稳;同条件至少 3 轮取中位)
     --integration 追加 _integration_test.py(会接触真实系统剪贴板;需要
                   无其他实例占用时人工确认后运行)
+    --integration-sandbox 追加界面/核心集成(系统剪贴板与工作线程使用替身)
     --only 名1,名2  只运行指定套件(按文件名子串匹配,如 --only core,ai)
 
 纪律:
     - 全部子进程用 sys.executable 继承 UTF-8,模块全局状态互不污染;
-    - 每套件独立超时,超时终止整个测试进程树,不留遗留实例;
+    - 每套件独立超时;subprocess.run 终止测试主进程，派生进程需套件自行收尾;
     - 默认不安装依赖、不重建 EXE、不运行安装器、不注入桌面行为
       (真实热键/剪贴板/安装验收属独立的手工验收项,见 GLM_CHANGELOG);
     - 任一必需检查失败 → 总退出码非零。
@@ -21,6 +22,7 @@ import os
 import subprocess
 import sys
 import time
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -39,10 +41,15 @@ SUITES = [
     ("module-split", "_module_split_test.py", 600, True),
     ("perf-semantics", "_perf_regression_test.py", 600, True),
     ("ctxpack", "_ctxpack_test.py", 300, True),
+    ("ctxpack-store", "_ctxpack_store_test.py", 300, True),
+    ("ctxpack-ui", "_ctxpack_ui_test.py", 300, True),
+    ("ctxpack-workflow", "_ctxpack_workflow_test.py", 300, True),
+    ("quick-ai", "_quick_ai_test.py", 300, True),
 ]
 OPTIONAL = {
     "benchmark": ("benchmark", "_benchmark_test.py", 1800),
     "integration": ("integration", "_integration_test.py", 1800),
+    "integration-sandbox": ("integration-sandbox", "_integration_sandbox_test.py", 600),
 }
 
 
@@ -52,12 +59,17 @@ def run_one(name, script, timeout):
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
     t0 = time.perf_counter()
     try:
-        # CREATE_NEW_PROCESS_GROUP + taskkill /T:超时把测试子进程整树终止
-        p = subprocess.run(
-            [sys.executable, "-X", "utf8", os.path.join(HERE, script)],
-            cwd=HERE, env=env, timeout=timeout, capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        # Isolate before product imports: legacy fixtures may omit new paths.
+        with tempfile.TemporaryDirectory(prefix="wclb_checks_") as sandbox:
+            env["APPDATA"] = sandbox
+            env["TEMP"] = sandbox
+            env["TMP"] = sandbox
+            env["SQLITE_TMPDIR"] = sandbox
+            p = subprocess.run(
+                [sys.executable, "-X", "utf8", os.path.join(HERE, script)],
+                cwd=HERE, env=env, timeout=timeout, capture_output=True,
+                text=True, encoding="utf-8", errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
         dt = time.perf_counter() - t0
         ok = p.returncode == 0
         tail = (p.stdout or "").strip().splitlines()[-3:]

@@ -38,7 +38,7 @@ def verify_archive(exe):
     root = Path(__file__).resolve().parent
     for name in ("clipboard_manager", "app_meta", "store", "pipeline",
                  "workflow_steps", "workflow_runlog", "quickpaste",
-                 "diagnostics", "perf_probe",
+                 "diagnostics", "perf_probe", "ai_quick",
                  "ui_base", "viewer", "image_editor", "workflow_ui",
                  "win32_host", "privacy_store", "history_store",
                  "ctxpack.model", "ctxpack.budget", "ctxpack.assemble",
