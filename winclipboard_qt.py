@@ -3754,7 +3754,7 @@ class WinClipboardApp(QObject):
         self.win.services_page.refresh()   # 配置可能在别处变动(如工作流页填入示例)
         self.win.switchTo(self.win.services_page)
 
-    def run_workflow(self, wf, rec):
+    def run_workflow(self, wf, rec, auto=False):
         try:
             runner = WorkflowRunner(self, wf, rec["content"])
         except Exception as exc:      # 上下文包无法拼装等:拒绝启动并如实说明
@@ -3763,6 +3763,10 @@ class WinClipboardApp(QObject):
             return
         _pop_to_front(runner)
         self._ai_runners.append(runner)
+        if auto:
+            # 右栏 AI 工作台一键入口:窗口先显示,下一拍自动开跑
+            # (等价手动点「自动跑完」;遇到人工步骤/隐私门仍会停下等人)
+            QTimer.singleShot(0, runner.btn_auto.click)
 
     # ---- 托盘动作 ----
     def clear_all(self):

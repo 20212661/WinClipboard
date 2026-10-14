@@ -3347,6 +3347,11 @@ def xml_pretty(text):
 # 工作流:{"name","steps":[{"service","prompt"}]}  prompt 中 {input} 为上一步输出
 # ============================================================
 def ai_service_by_name(cfg, name):
+    # 空名 = 默认服务(第一个已配置):与 AI 动作栏「空服务名」约定一致,
+    # 工作流步骤/模板不写死服务名即可用(显式名称仍按精确匹配)
+    if not name:
+        services = cfg.get("ai_services") or []
+        return services[0] if services else None
     for s in cfg.get("ai_services") or []:
         if s.get("name") == name:
             return s
@@ -3578,6 +3583,16 @@ AI_SEED_WORKFLOWS = [
     {"name": "翻译(G)→润色(D)[本地 API]", "steps": [
         {"kind": "ai", "service": "GLM", "prompt": "把下面的文本翻译成英文,只输出译文:\n{input}"},
         {"kind": "ai", "service": "DeepSeek", "prompt": "润色以下英文,使其更自然地道、符合书面表达,只输出结果:\n{input}"},
+    ]},
+    # {context} 联动示例:绑定当前活动上下文包(收进「上下文篮」的代码/资料
+    # 自动注入);service 留空 = 第一个已配置的服务,无需写死名称
+    {"name": "结合上下文包:审阅代码 → 生成单元测试", "context_pack": "@active",
+     "steps": [
+        {"kind": "ai", "service": "",
+         "prompt": "你是一名严格的代码审阅者。请结合下面的相关代码上下文:\n{context}\n\n审阅这段代码,指出正确性、边界条件与可读性问题,逐条给出具体修改建议:\n{input}"},
+        {"kind": "human", "prompt": "可先修改审阅意见(或原样确认),继续生成单元测试"},
+        {"kind": "ai", "service": "",
+         "prompt": "你是测试工程师。请结合下面的相关代码上下文:\n{context}\n\n依据上面的审阅意见,为这段代码编写可直接运行的单元测试(覆盖正常路径与边界用例),只输出测试代码:\n{input}"},
     ]},
 ]
 

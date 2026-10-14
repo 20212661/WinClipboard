@@ -7,7 +7,7 @@ from PySide6.QtGui import QColor, QCursor, QPainter, QPainterPath, QPen, QShortc
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout
 from qfluentwidgets import (BodyLabel, CaptionLabel, StrongBodyLabel, PlainTextEdit,
                             PushButton, PrimaryPushButton, ComboBox, CheckBox,
-                            InfoBar, InfoBarPosition, themeColor)
+                            InfoBar, InfoBarPosition, themeColor, FluentIcon as FIF)
 import clipboard_manager as cm
 import ui_base
 
@@ -527,13 +527,15 @@ class EmbeddedAIPanel(QWidget):
         self._shutdown = False
         self._answer = ""
         self._material = ""
+        self._rec = None                 # 选中卡片记录(工作流一键入口用)
         self._svc_names = None
         self._services = []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         layout.addWidget(StrongBodyLabel("AI 工作台"))
-        # 快捷动作行(免找入口:一键设动作并发送)
+        # 快捷动作行(免找入口:一键设动作并发送);右栏仅 ~340px,
+        # 6 个按钮分两行排,避免挤压截断
         quick = QHBoxLayout()
         quick.setSpacing(6)
         self._quick_btns = {}
@@ -545,15 +547,27 @@ class EmbeddedAIPanel(QWidget):
             b.clicked.connect(lambda _=False, k=key: self._pick_action(k))
             self._quick_btns[key] = b
             quick.addWidget(b)
+        quick.addStretch(1)
+        layout.addLayout(quick)
+        tools_row = QHBoxLayout()
+        tools_row.setSpacing(6)
         self.btn_copy_prompt = PushButton("复制 Prompt")
         self.btn_copy_prompt.setFixedHeight(28)
         self.btn_copy_prompt.setToolTip(
             "不调用 AI 服务:当前材料 + 上下文包 + 问题组装为完整 Prompt,"
             "经隐私扫描自动脱敏后复制(无需配置 API Key)")
         self.btn_copy_prompt.clicked.connect(self.copy_prompt)
-        quick.addWidget(self.btn_copy_prompt)
-        quick.addStretch(1)
-        layout.addLayout(quick)
+        tools_row.addWidget(self.btn_copy_prompt)
+        self.btn_workflow = PushButton("工作流")
+        self.btn_workflow.setIcon(FIF.DOWN.icon())   # 图标箭头:不依赖字体字形
+        self.btn_workflow.setFixedHeight(28)
+        self.btn_workflow.setToolTip(
+            "以当前选中卡片为输入,一键运行已配置的工作流;"
+            "绑定「当前活动包」的工作流会自动带上上下文篮内容")
+        self.btn_workflow.clicked.connect(self._workflow_menu)
+        tools_row.addWidget(self.btn_workflow)
+        tools_row.addStretch(1)
+        layout.addLayout(tools_row)
         # 服务 + 上下文包
         row = QHBoxLayout()
         self.service = ComboBox()
@@ -622,6 +636,8 @@ class EmbeddedAIPanel(QWidget):
                 lines = [l for l in text.strip().splitlines() if l.strip()]
                 title = lines[0] if lines else ""
         self._material = text[:MAX_INPUT_CHARS]
+        self._rec = rec if kind == "text" else None   # 工作流入口复用记录身份
+        self._material = text[:MAX_INPUT_CHARS]
         if title:
             self.lbl_material.setText(
                 "材料（随选中卡片）：" + title[:60] + ("…" if len(title) > 60 else ""))
@@ -671,6 +687,53 @@ class EmbeddedAIPanel(QWidget):
             self.send()
             return True
         return super().eventFilter(obj, event)
+
+    # ---- 工作流一键入口(免右键找菜单) ----
+
+    def _workflow_menu(self):
+        from PySide6.QtGui import QAction
+        from qfluentwidgets import RoundMenu
+        cfg = getattr(self.app, "cfg", None) or {}
+        flows = cfg.get("ai_workflows") or []
+        menu = RoundMenu("工作流", self)
+        if not flows:
+            a = QAction("暂无工作流(去「工作流」页新建)", menu)
+            a.setEnabled(False)
+            menu.addAction(a)
+        else:
+            for wf in flows:
+                a = QAction(wf.get("name", "未命名"), menu)
+                a.triggered.connect(
+                    lambda _=False, w=wf: self._launch_workflow(w))
+                menu.addAction(a)
+        menu.addSeparator()
+        am = QAction("管理工作流…", menu)
+        am.triggered.connect(self._manage_workflows)
+        menu.addAction(am)
+        menu.exec(self.btn_workflow.mapToGlobal(
+            self.btn_workflow.rect().bottomLeft()))
+
+    def _manage_workflows(self):
+        hub = getattr(self.app, "show_ai_hub", None)
+        if hub is None:
+            self._notice("当前环境没有工作流管理页")
+            return
+        hub()
+
+    def _launch_workflow(self, wf):
+        """以当前材料为输入弹出运行台并自动开跑(等价卡片右键「工作流」
+        + 点「自动跑完」;绑定 @active 的工作流自动携带当前上下文包)。"""
+        rec = self._rec
+        if rec is None:
+            if not self._material.strip():
+                self._notice("先在左侧选中一条文本卡片作为工作流输入")
+                return
+            rec = {"type": "text", "content": self._material}
+        runner = getattr(self.app, "run_workflow", None)
+        if runner is None:
+            self._notice("当前环境不支持运行工作流")
+            return
+        runner(wf, rec, auto=True)
 
     # ---- 请求纪律(与 QuickAIWindow 一致) ----
 
