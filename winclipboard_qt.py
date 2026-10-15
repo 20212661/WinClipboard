@@ -89,12 +89,12 @@ ui_base.register(sys.modules[__name__])   # 调色板随主题刷新本模块全
 # 局部原生按钮/徽章的统一柔和样式(圆角软边,与 ui/theme.py 全局表同语言;
 # 杂志期直角黑框遗留样式已全部收敛到这里)
 _SOFT_BTN = (
-    "QPushButton { background: #ffffff; color: %s;"
-    " border: 1px solid rgba(0,0,0,0.14); border-radius: 6px;"
+    "QPushButton { background: #FFFFFF; color: %s;"
+    " border: 1px solid #E5E3DC; border-radius: 6px;"
     " padding: 4px 12px; }"
-    "QPushButton:hover { background: rgba(0,0,0,0.05); }" % INK)
+    "QPushButton:hover { background: #EFECE6; }" % INK)
 _KEY_BADGE = (
-    "color: %s; background: transparent; border: 1px solid rgba(0,0,0,0.14);"
+    "color: %s; background: transparent; border: 1px solid #E5E3DC;"
     " border-radius: 6px; padding: 2px 8px;" % INK_LIGHT)
 
 
@@ -139,23 +139,29 @@ class Card(QFrame):
             self._apply_btns()
 
     def _update_style(self):
-        """选中/悬停样式:柔和主题色底 + 左侧指示条。
+        """Claude 圆角卡片三态:普通白卡 / 悬停近白(无橙条) / 选中暖珀高亮。
 
-        文字色恒为深色系(在 _build 一次性设定,选中不再反相),此处
-        只改框架一张样式表——大列表批量建卡/重绑的渲染预算敏感。"""
+        三态统一 3px 左边框(只变色不变宽,选中切换零位移);文字恒深色
+        (在 _build 一次性设定),此处只改框架一张样式表——批量建卡/重绑的
+        渲染预算敏感。"""
         sel = bool(self.property("selected"))
         hover = bool(self.property("hovered"))
-        accent = QColor(ACCENT)
-        if sel or hover:
-            bg = "rgba(%d,%d,%d,%s)" % (accent.red(), accent.green(),
-                                        accent.blue(), "0.10" if sel else "0.03")
-            bar = ACCENT
+        if sel:      # 选中:淡陶土底 + 陶土橙指示条(与悬停明确区分)
+            self.setStyleSheet(
+                "QFrame#cardFrame { background: rgba(217,119,87,0.09);"
+                " color: %s; border: 1px solid rgba(217,119,87,0.45);"
+                " border-left: 3px solid %s; border-radius: 10px; }"
+                % (INK, ACCENT))
+        elif hover:  # 悬停:近白底 + 边框加深,无指示条
+            self.setStyleSheet(
+                "QFrame#cardFrame { background: #FCFBF9; color: %s;"
+                " border: 1px solid #D5D2C8; border-left: 3px solid #D5D2C8;"
+                " border-radius: 10px; }" % INK)
         else:
-            bg, bar = PAPER, "transparent"
-        self.setStyleSheet(
-            "QFrame#cardFrame { background: %s; color: %s; border: none; "
-            "border-left: 3px solid %s; "
-            "border-bottom: 1px solid rgba(17,17,17,0.12); }" % (bg, INK, bar))
+            self.setStyleSheet(
+                "QFrame#cardFrame { background: #FFFFFF; color: %s;"
+                " border: 1px solid #E5E3DC; border-left: 3px solid #E5E3DC;"
+                " border-radius: 10px; }" % INK)
 
     def _apply_btns(self):
         """操作按钮浮层可见性:悬停或选中时常驻,其余时候隐藏。"""
@@ -260,7 +266,7 @@ class Card(QFrame):
             thumb = QLabel()
             thumb.setFixedSize(*self.THUMB)
             thumb.setStyleSheet(
-                "border: 1px solid rgba(17,17,17,0.22); border-radius: 10px;")
+                "border: 1px solid #D5D2C8; border-radius: 10px;")
             self._thumb_lbl = thumb
             self._left.addWidget(thumb)
         elif kind == "files":
@@ -348,27 +354,20 @@ class Card(QFrame):
         actbox.setSpacing(4)
         tips = {"paste": "粘贴", "pack": "加入上下文包",
                 "pin": "固定", "del": "删除", "more": "更多"}
-        # 强调色胶囊的底/边从主题色派生(真实运行=Études 蓝,预览/测试
-        # 走 init_palette 时=库默认蓝,与选中态指示条始终同源)
-        acc = QColor(ACCENT)
-        acc_tint = "rgba(%d,%d,%d,0.10)" % (acc.red(), acc.green(), acc.blue())
-        acc_edge = "rgba(%d,%d,%d,0.35)" % (acc.red(), acc.green(), acc.blue())
-        acc_hov = "rgba(%d,%d,%d,0.18)" % (acc.red(), acc.green(), acc.blue())
-        # 显式 padding:0 + 圆角 + 自带字号:覆盖全局 QPushButton 的
-        # padding/mono/uppercase 杂志样式(曾把 28px 小按钮挤成空黑框)
+        # 按钮暖调(Claude):「+入包」陶土橙胶囊,其余暖灰白圆角;
+        # 显式 padding:0 + 圆角 + 自带字号覆盖全局 QPushButton 样式
         neutral_qss = (
             "QPushButton { padding: 0px; border-radius: 6px;"
             " font-family: 'Segoe UI','Microsoft YaHei UI'; font-size: 12px;"
-            " background: rgba(255,255,255,0.92); color: #222222;"
-            " border: 1px solid rgba(0,0,0,0.14); }"
-            "QPushButton:hover { background: rgba(0,0,0,0.06); }")
+            " background: #F4F3EE; color: #3D3C38;"
+            " border: 1px solid #DEDCD3; }"
+            "QPushButton:hover { background: #EFECE6; }")
         pack_qss = (
             "QPushButton { padding: 0px; border-radius: 6px;"
             " font-family: 'Segoe UI','Microsoft YaHei UI'; font-size: 12px;"
-            " background: %s; color: %s; font-weight: 600;"
-            " border: 1px solid %s; }"
-            "QPushButton:hover { background: %s; }"
-            % (acc_tint, ACCENT, acc_edge, acc_hov))
+            " background: rgba(217,119,87,0.14); color: #C6613F;"
+            " font-weight: 600; border: 1px solid rgba(217,119,87,0.35); }"
+            "QPushButton:hover { background: rgba(217,119,87,0.22); }")
         for act, label in (("paste", "贴"), ("pack", "+入包"), ("pin", "钉"),
                            ("del", "删"), ("more", "⋯")):
             b = QPushButton(label, self.actw)
@@ -507,8 +506,8 @@ class HistoryPage(QWidget):
         self.search.setMinimumWidth(230)
         self.search.setMaximumWidth(430)
         self.search.setStyleSheet(
-            "QLineEdit#historySearch { background: #ffffff; color: %s; "
-            "border: 1px solid rgba(0,0,0,0.14); border-radius: 6px; "
+            "QLineEdit#historySearch { background: #FFFFFF; color: %s; "
+            "border: 1px solid #E5E3DC; border-radius: 8px; "
             "padding: 5px 10px; }"
             "QLineEdit#historySearch:focus { border: 1px solid %s; }" %
             (INK, ACCENT))
@@ -542,7 +541,7 @@ class HistoryPage(QWidget):
         self.content.setStyleSheet("background: transparent;")
         self.cards_layout = QVBoxLayout(self.content)
         self.cards_layout.setContentsMargins(2, 4, 2, 4)
-        self.cards_layout.setSpacing(10)
+        self.cards_layout.setSpacing(6)
         self.cards_layout.setAlignment(Qt.AlignTop)
         # 固定复用卡片池:卡片只建不毁,闲置进 _idle 池 hide;两个分组
         # 标签与尾部弹簧常驻,刷新零创建零销毁(见 set_view)
@@ -618,8 +617,8 @@ class HistoryPage(QWidget):
         self.preview = QFrame()
         self.preview.setFrameShape(QFrame.Shape.NoFrame)
         self.preview.setStyleSheet(
-            "QFrame { background: #ffffff; color: %s; border: none;"
-            " border-top: 1px solid rgba(0,0,0,0.12);"
+            "QFrame { background: #FFFFFF; color: %s; border: none;"
+            " border-top: 1px solid #E5E3DC;"
             " border-radius: 6px; }" % INK)
         pv = QVBoxLayout(self.preview)
         pv.setContentsMargins(0, 10, 0, 10)
@@ -664,9 +663,8 @@ class HistoryPage(QWidget):
         self.pv_edit.setFont(pf)
         self.pv_edit.setFixedHeight(128)
         self.pv_edit.setStyleSheet(
-            "QPlainTextEdit { background: %s; border: 1px solid %s;"
-            " border-radius: 0px; padding: 6px; color: %s; }"
-            % (PAPER, INK, INK))
+            "QPlainTextEdit { background: #FFFFFF; border: 1px solid #E5E3DC;"
+            " border-radius: 6px; padding: 6px; color: %s; }" % INK)
         pv.addWidget(self.pv_edit)
 
         self.pv_img = QLabel()

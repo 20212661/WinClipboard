@@ -47,16 +47,17 @@ cm.CTXPACK_FILE = os.path.join(TMP, "context_packs.json")
 os.makedirs(cm.IMAGE_DIR, exist_ok=True)
 
 from PySide6.QtWidgets import QApplication   # noqa: E402
-from PySide6.QtGui import QPixmap, QIcon     # noqa: E402
+from PySide6.QtGui import QPixmap, QIcon, QColor  # noqa: E402
 from PySide6.QtCore import Qt, QObject       # noqa: E402
 
 app = QApplication([])
 app.setQuitOnLastWindowClosed(False)
 
 import winclipboard_qt as wq                 # noqa: E402
-from qfluentwidgets import setTheme, Theme   # noqa: E402
+from qfluentwidgets import setTheme, setThemeColor, Theme   # noqa: E402
 
 setTheme(Theme.DARK if MODE == "dark" else Theme.LIGHT)
+setThemeColor(QColor("#D97757"))   # Claude 陶土橙(qfw 默认是青色,必须显式覆盖)
 wq.init_palette(MODE == "dark")
 wq.apply_fonts(app)
 

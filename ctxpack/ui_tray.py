@@ -294,10 +294,9 @@ class ContextTray(SimpleCardWidget):
         self.app = app
         self._expanded = False
         self._pack_pids = []
-        self.setBorderRadius(8)
+        self.setBorderRadius(10)
         self.setStyleSheet(
-            "ContextTray { background: %s; border: 1px solid %s; }"
-            % (CARD_BG, CARD_BORDER))
+            "ContextTray { background: #EFECE6; border: 1px solid #E5E3DC; }")
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 6, 10, 6)
         root.setSpacing(4)
@@ -461,7 +460,9 @@ class ContextTray(SimpleCardWidget):
         est = sum(x.est_tokens for x in pack.items if x.enabled) if pack else 0
         self.lbl_badge.setText("篮 %d · ≈%s" % (n, _fmt_tokens(est)) if n
                                else "上下文篮(空)")
-        self.lbl_title.setVisible(n > 0)
+        # 标题永久隐藏:徽标文案自带"上下文篮(空)"/"篮 N",避免头部拼出
+        # 「上下文篮 篮 9」双"篮"字(单测只断言 lbl_badge 文本,不受影响)
+        self.lbl_title.setVisible(False)
         self._n = n
         self._update_hint()
         self._set_usage(est, pack.budget_tokens if pack else 4000)

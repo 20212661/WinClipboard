@@ -13,19 +13,21 @@ from PySide6.QtWidgets import QApplication, QWidget, QFrame, QHBoxLayout, QLabel
 from qfluentwidgets import setTheme, setThemeColor, Theme
 
 # ============================================================
-# 设计 Token
+# 设计 Token —— Claude(Anthropic)暖调设计语言
 # ============================================================
-# 2026-10-15 起从 Atelier 纸感(米黄/墨色直角)收敛为中性浅灰白 +
-# 圆角软边框:消除直角黑框与白色输入框的脏色差,中文按钮文案不再
-# 被 mono/uppercase 杂志样式挤压(卡片 28px 小按钮曾被 padding 挤空)。
-PAPER = "#f5f6f8"          # 页面底色(中性浅灰白)
-INK = "#111111"            # 主文字
-INK_LIGHT = "#6B7280"      # 次文字(中性灰)
-ACCENT = "#1F3AFF"         # Études 蓝
-DANGER = "#E63B2E"         # 警示红
-SELECTION = INK            # 反相选中背景
+# 2026-10-15 起从 Atelier 纸感收敛为 Claude 暖调:羊皮纸暖白画布、
+# 暖炭黑文字、陶土橙(Terracotta)点缀;无刺眼冷蓝、无生硬深色边框。
+PAPER = "#F4F3EE"          # 画布/主窗口底色(羊皮纸暖白)
+INK = "#141413"            # 主文字(暖炭黑)
+INK_LIGHT = "#5E5D59"      # 次文字(暖灰)
+ACCENT = "#D97757"         # Claude 陶土橙
+ACCENT_HOVER = "#C6613F"   # 陶土橙悬停深一档
+DANGER = "#B3552F"         # 警示(暖红棕)
+SELECTION = INK
 
-BORDER_SOFT = "rgba(0,0,0,0.14)"   # 全局柔和边框
+BORDER_SOFT = "#E5E3DC"    # 全局柔和暖灰边框
+BORDER_HOVER = "#D5D2C8"   # 悬停边框
+SURFACE_PILL = "#EFECE6"   # 胶囊/次级控件底色
 
 # 行高 / 间距 (1px 网格)
 MASTHEAD_H = 56
@@ -112,9 +114,9 @@ QFrame#divider {{
 }}
 
 QLineEdit {{
-    background: #ffffff;
+    background: #FFFFFF;
     border: 1px solid {BORDER_SOFT};
-    border-radius: 6px;
+    border-radius: 8px;
     color: {INK};
     padding: 5px 10px;
     font-family: "{FONT_SANS}", "Inter", "Segoe UI";
@@ -130,7 +132,7 @@ QLineEdit::placeholder {{
 }}
 
 QListWidget {{
-    background: #ffffff;
+    background: #FFFFFF;
     border: 1px solid {BORDER_SOFT};
     border-radius: 6px;
     outline: none;
@@ -150,11 +152,11 @@ QListWidget::item:selected {{
 }}
 
 QListWidget::item:hover:!selected {{
-    background: rgba(0,0,0,0.04);
+    background: {SURFACE_PILL};
 }}
 
 QPlainTextEdit {{
-    background: #ffffff;
+    background: #FFFFFF;
     color: {INK};
     border: 1px solid {BORDER_SOFT};
     border-radius: 6px;
@@ -164,17 +166,17 @@ QPlainTextEdit {{
 }}
 
 QPushButton {{
-    background: #ffffff;
+    background: #FFFFFF;
     color: {INK};
     border: 1px solid {BORDER_SOFT};
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 5px 12px;
     font-family: "{FONT_SANS}", "Inter", "Segoe UI", "Microsoft YaHei UI";
     font-size: 12px;
 }}
 
 QPushButton:hover {{
-    background: rgba(0,0,0,0.05);
+    background: {SURFACE_PILL};
 }}
 
 QPushButton:pressed {{
@@ -195,7 +197,7 @@ QPushButton#Primary:hover {{
 }}
 
 QComboBox {{
-    background: #ffffff;
+    background: #FFFFFF;
     color: {INK};
     border: 1px solid {BORDER_SOFT};
     border-radius: 6px;
@@ -209,7 +211,7 @@ QComboBox::drop-down {{
 }}
 
 QComboBox QAbstractItemView {{
-    background: #ffffff;
+    background: #FFFFFF;
     color: {INK};
     border: 1px solid {BORDER_SOFT};
     border-radius: 6px;
@@ -218,7 +220,7 @@ QComboBox QAbstractItemView {{
 }}
 
 QSpinBox {{
-    background: #ffffff;
+    background: #FFFFFF;
     color: {INK};
     border: 1px solid {BORDER_SOFT};
     border-radius: 6px;
@@ -232,7 +234,7 @@ QScrollBar:vertical {{
 }}
 
 QScrollBar::handle:vertical {{
-    background: rgba(0,0,0,0.22);
+    background: {BORDER_HOVER};
     min-height: 24px;
     border-radius: 3px;
 }}
@@ -248,7 +250,7 @@ QScrollBar:horizontal {{
 }}
 
 QScrollBar::handle:horizontal {{
-    background: rgba(0,0,0,0.22);
+    background: {BORDER_HOVER};
     min-width: 24px;
     border-radius: 3px;
 }}

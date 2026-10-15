@@ -40,22 +40,22 @@ _PV_TEXT_CAP = 4000
 # (可在设置页换色),中性色与库全局样式表一致。不再自调配色。
 # ============================================================
 IS_DARK = False
-ACCENT = "#0078D4"
-ACCENT_SOFT = "rgba(0,120,212,0.14)"
-TEXT = "rgba(0,0,0,0.90)"
-SEC = "rgba(0,0,0,0.63)"
-TER = "rgba(0,0,0,0.45)"
-LINE = "rgba(0,0,0,0.08)"
-BG = "#f9f9f9"
-CARD_BG = "#ffffff"
-CARD_BORDER = "rgba(0,0,0,0.06)"
-FIELD_BG = "#ffffff"
-FIELD_BORDER = "rgba(0,0,0,0.09)"
-BADGE_BG = "rgba(0,0,0,0.05)"
-NAV_BG = "rgba(0,0,0,0.05)"
-THUMB_PH = "rgba(0,0,0,0.06)"
-THUMB_BORDER = "rgba(0,0,0,0.06)"
-GUTTER_BG = "#fafafa"       # 查看器行号栏(比内容卡片深半档)
+ACCENT = "#D97757"               # Claude 陶土橙(Terracotta)
+ACCENT_SOFT = "rgba(217,119,87,0.10)"
+TEXT = "#141413"                 # 暖炭黑
+SEC = "#5E5D59"
+TER = "#8C8A84"
+LINE = "#E5E3DC"
+BG = "#F4F3EE"                   # 羊皮纸暖白
+CARD_BG = "#FFFFFF"
+CARD_BORDER = "#E5E3DC"
+FIELD_BG = "#FFFFFF"
+FIELD_BORDER = "#E5E3DC"
+BADGE_BG = "#EFECE6"
+NAV_BG = "#ECEAE4"
+THUMB_PH = "#EFECE6"
+THUMB_BORDER = "#E5E3DC"
+GUTTER_BG = "#FAF9F5"       # 查看器行号栏(比内容卡片深半档)
 PANEL_TOP = CARD_BG
 PANEL_BOT = CARD_BG
 
@@ -70,27 +70,27 @@ def init_palette(dark):
         "ACCENT_SOFT": "rgba(%d,%d,%d,0.14)" % (acc.red(), acc.green(), acc.blue()),
     }
     values.update({
-        False: {   # 浅色,与 qfluentwidgets 浅色样式表一致
-            "TEXT": "rgba(0,0,0,0.90)", "SEC": "rgba(0,0,0,0.63)",
-            "TER": "rgba(0,0,0,0.45)", "LINE": "rgba(0,0,0,0.08)",
-            "BG": "#f3f3f3", "CARD_BG": "#ffffff",
-            "CARD_BORDER": "rgba(0,0,0,0.06)",
-            "FIELD_BG": "#ffffff", "FIELD_BORDER": "rgba(0,0,0,0.09)",
-            "BADGE_BG": "rgba(0,0,0,0.05)", "NAV_BG": "rgba(0,0,0,0.05)",
-            "THUMB_PH": "rgba(0,0,0,0.06)", "THUMB_BORDER": "rgba(0,0,0,0.06)",
-            "GUTTER_BG": "#fafafa",
-            "DIFF_ADD": "#1f7a3f", "DIFF_DEL": "#c0392b", "DIFF_CTX": "rgba(0,0,0,0.45)",
+        False: {   # Claude Warm Light(暖纸白 + 陶土橙)
+            "TEXT": "#141413", "SEC": "#5E5D59", "TER": "#8C8A84",
+            "LINE": "#E5E3DC", "BG": "#F4F3EE", "CARD_BG": "#FFFFFF",
+            "CARD_BORDER": "#E5E3DC",
+            "FIELD_BG": "#FFFFFF", "FIELD_BORDER": "#E5E3DC",
+            "BADGE_BG": "#EFECE6", "NAV_BG": "#ECEAE4",
+            "THUMB_PH": "#EFECE6", "THUMB_BORDER": "#E5E3DC",
+            "GUTTER_BG": "#FAF9F5",
+            "DIFF_ADD": "#3f7a4f", "DIFF_DEL": "#b3552f",
+            "DIFF_CTX": "#8C8A84",
         },
-        True: {    # 深色
-            "TEXT": "rgba(255,255,255,0.93)", "SEC": "rgba(255,255,255,0.65)",
-            "TER": "rgba(255,255,255,0.44)", "LINE": "rgba(255,255,255,0.08)",
-            "BG": "#1e1e1e", "CARD_BG": "#2b2b2b",
-            "CARD_BORDER": "rgba(255,255,255,0.08)",
-            "FIELD_BG": "#333333", "FIELD_BORDER": "rgba(255,255,255,0.10)",
-            "BADGE_BG": "rgba(255,255,255,0.08)", "NAV_BG": "rgba(255,255,255,0.06)",
-            "THUMB_PH": "rgba(255,255,255,0.08)", "THUMB_BORDER": "rgba(255,255,255,0.08)",
-            "GUTTER_BG": "#303030",
-            "DIFF_ADD": "#5ec97f", "DIFF_DEL": "#ef8080", "DIFF_CTX": "rgba(255,255,255,0.45)",
+        True: {    # Claude Warm Dark
+            "TEXT": "#ECECEC", "SEC": "#A6A49E", "TER": "#8C8A84",
+            "LINE": "#32312E", "BG": "#191918", "CARD_BG": "#232321",
+            "CARD_BORDER": "#32312E",
+            "FIELD_BG": "#2A2927", "FIELD_BORDER": "#32312E",
+            "BADGE_BG": "#2A2927", "NAV_BG": "#232321",
+            "THUMB_PH": "#2A2927", "THUMB_BORDER": "#32312E",
+            "GUTTER_BG": "#232321",
+            "DIFF_ADD": "#5ec97f", "DIFF_DEL": "#ef8080",
+            "DIFF_CTX": "rgba(255,255,255,0.45)",
         },
     }[bool(dark)])
     values["PANEL_TOP"] = values["CARD_BG"]

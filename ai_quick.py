@@ -4,7 +4,7 @@ import threading
 
 from PySide6.QtCore import QEvent, Qt, Signal, QPointF, QTimer
 from PySide6.QtGui import QColor, QCursor, QPainter, QPainterPath, QPen, QShortcut, QKeySequence
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame
 from qfluentwidgets import (BodyLabel, CaptionLabel, StrongBodyLabel, PlainTextEdit,
                             PushButton, PrimaryPushButton, ComboBox, CheckBox,
                             InfoBar, InfoBarPosition, themeColor, FluentIcon as FIF)
@@ -530,12 +530,20 @@ class EmbeddedAIPanel(QWidget):
         self._rec = None                 # 选中卡片记录(工作流一键入口用)
         self._svc_names = None
         self._services = []
+        # ---- Claude 三区布局:Pill 动作栏 / 阅读画布+轻结果条 / 一体式输入盒 ----
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        layout.addWidget(StrongBodyLabel("AI 工作台"))
-        # 快捷动作行(免找入口:一键设动作并发送);右栏仅 ~340px,
-        # 6 个按钮分两行排,避免挤压截断
+
+        pill_qss = (
+            "QPushButton { background: #EFECE6; color: #3D3C38;"
+            " border: 1px solid #E2DFD7; border-radius: 14px;"
+            " padding: 3px 12px; font-size: 12px; }"
+            "QPushButton:hover { background: #E5E2D9; border-color: #D0CCC0; }"
+            "QPushButton:checked { background: rgba(217,119,87,0.14);"
+            " color: #C6613F; border-color: rgba(217,119,87,0.35); }")
+
+        # 第一区:胶囊动作栏(340px 右栏分两行排布,视觉上仍是一组 Pill)
         quick = QHBoxLayout()
         quick.setSpacing(6)
         self._quick_btns = {}
@@ -543,7 +551,8 @@ class EmbeddedAIPanel(QWidget):
                            ("summarize", "总结"), ("polish", "润色")):
             b = PushButton(label)
             b.setCheckable(True)
-            b.setFixedHeight(28)
+            b.setFixedHeight(26)
+            b.setStyleSheet(pill_qss)
             b.clicked.connect(lambda _=False, k=key: self._pick_action(k))
             self._quick_btns[key] = b
             quick.addWidget(b)
@@ -552,7 +561,8 @@ class EmbeddedAIPanel(QWidget):
         tools_row = QHBoxLayout()
         tools_row.setSpacing(6)
         self.btn_copy_prompt = PushButton("复制 Prompt")
-        self.btn_copy_prompt.setFixedHeight(28)
+        self.btn_copy_prompt.setFixedHeight(26)
+        self.btn_copy_prompt.setStyleSheet(pill_qss)
         self.btn_copy_prompt.setToolTip(
             "不调用 AI 服务:当前材料 + 上下文包 + 问题组装为完整 Prompt,"
             "经隐私扫描自动脱敏后复制(无需配置 API Key)")
@@ -560,7 +570,8 @@ class EmbeddedAIPanel(QWidget):
         tools_row.addWidget(self.btn_copy_prompt)
         self.btn_workflow = PushButton("工作流")
         self.btn_workflow.setIcon(FIF.DOWN.icon())   # 图标箭头:不依赖字体字形
-        self.btn_workflow.setFixedHeight(28)
+        self.btn_workflow.setFixedHeight(26)
+        self.btn_workflow.setStyleSheet(pill_qss)
         self.btn_workflow.setToolTip(
             "以当前选中卡片为输入,一键运行已配置的工作流;"
             "绑定「当前活动包」的工作流会自动带上上下文篮内容")
@@ -568,38 +579,20 @@ class EmbeddedAIPanel(QWidget):
         tools_row.addWidget(self.btn_workflow)
         tools_row.addStretch(1)
         layout.addLayout(tools_row)
-        # 服务 + 上下文包
-        row = QHBoxLayout()
-        self.service = ComboBox()
-        self.service.setMinimumWidth(150)
-        self.service.setToolTip("使用「AI 服务」页配置的模型;留空时先去配置")
-        self.use_context = CheckBox("附加当前上下文包")
-        row.addWidget(self.service, 1)
-        row.addWidget(self.use_context)
-        layout.addLayout(row)
-        # 材料(随左侧选中卡片)
-        self.lbl_material = CaptionLabel("材料：未选择卡片")
-        self.lbl_material.setWordWrap(True)
-        layout.addWidget(self.lbl_material)
-        # 提问框(Ctrl+Enter 发送)
-        self.question = PlainTextEdit()
-        self.question.setFixedHeight(60)
-        self.question.setPlaceholderText("输入问题，Ctrl+Enter 发送；无服务时用「复制 Prompt」")
-        self.question.installEventFilter(self)
-        layout.addWidget(self.question)
-        controls = QHBoxLayout()
-        self.status = CaptionLabel("选择动作或直接提问")
-        self.status.setWordWrap(True)
-        self.stop = PushButton("停止")
-        self.send_button = PrimaryPushButton("发送")
-        controls.addWidget(self.status, 1)
-        controls.addWidget(self.stop)
-        controls.addWidget(self.send_button)
-        layout.addLayout(controls)
+
+        # 第二区:阅读画布(占满主空间)+ 轻量结果条
         self.output = PlainTextEdit()
         self.output.setReadOnly(True)
         self.output.setPlaceholderText("AI 回答显示在这里")
+        self.output.setStyleSheet(
+            "QPlainTextEdit { background: #FFFFFF; border: 1px solid #E5E3DC;"
+            " border-radius: 12px; padding: 12px; color: #141413; }")
         layout.addWidget(self.output, 1)
+        result_qss = (
+            "QPushButton { background: transparent; border: 1px solid #E5E3DC;"
+            " border-radius: 6px; padding: 2px 10px; color: #5E5D59; }"
+            "QPushButton:hover { background: #EFECE6; }"
+            "QPushButton:disabled { color: #B9B7B0; }")
         bottom = QHBoxLayout()
         bottom.setSpacing(6)
         self.copy = PushButton("复制")
@@ -610,8 +603,71 @@ class EmbeddedAIPanel(QWidget):
         self.pack = PushButton("入上下文包")
         self.pack.setToolTip("把 AI 回答加入当前上下文包，作为后续提问的素材")
         for button in (self.copy, self.paste, self.history, self.pack):
+            button.setFixedHeight(26)
+            button.setStyleSheet(result_qss)
+        bottom.addStretch(1)
+        for button in (self.copy, self.paste, self.history, self.pack):
             bottom.addWidget(button)
         layout.addLayout(bottom)
+        self.status = CaptionLabel("选择动作或直接提问")
+        self.status.setWordWrap(True)
+        self.status.setStyleSheet("color: #8C8A84; background: transparent;")
+        layout.addWidget(self.status)
+
+        # 第三区:一体式大圆角输入盒(材料行 + 无边框输入 + 模型/发送行)
+        self.composer = QFrame()
+        self.composer.setObjectName("claudeComposer")
+        self.composer.setStyleSheet(
+            "QFrame#claudeComposer { background: #FFFFFF;"
+            " border: 1px solid #D8D5CC; border-radius: 14px; }")
+        clay = QVBoxLayout(self.composer)
+        clay.setContentsMargins(10, 8, 10, 8)
+        clay.setSpacing(4)
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+        self.material_label = CaptionLabel("材料：未选择卡片")
+        self.material_label.setStyleSheet(
+            "color: #8C8A84; background: transparent; font-size: 11px;")
+        top_row.addWidget(self.material_label, 1)
+        self.use_context = CheckBox("附加上下文篮")
+        self.use_context.setStyleSheet("color: #5E5D59;")
+        top_row.addWidget(self.use_context)
+        clay.addLayout(top_row)
+        self.question = PlainTextEdit()
+        self.question.setFixedHeight(60)
+        self.question.setPlaceholderText("输入问题，Ctrl+Enter 发送；无服务时用「复制 Prompt」")
+        self.question.setStyleSheet(
+            "QPlainTextEdit { border: none; background: transparent;"
+            " padding: 2px 0px; color: #141413; }")
+        self.question.installEventFilter(self)
+        clay.addWidget(self.question)
+        send_row = QHBoxLayout()
+        send_row.setSpacing(6)
+        self.service = ComboBox()
+        self.service.setMinimumWidth(120)
+        self.service.setToolTip("使用「AI 服务」页配置的模型;留空时先去配置")
+        self.service.setStyleSheet(
+            "QComboBox { background: #F4F3EE; border: 1px solid #E5E3DC;"
+            " border-radius: 8px; color: #5E5D59; }"
+            "QComboBox QAbstractItemView { background: #FFFFFF;"
+            " border: 1px solid #E5E3DC; border-radius: 8px;"
+            " selection-background-color: #D97757; selection-color: #FFFFFF; }")
+        self.stop = PushButton("停止")
+        self.stop.setFixedHeight(28)
+        self.stop.setStyleSheet(result_qss)
+        self.send_button = PrimaryPushButton("发送")
+        self.send_button.setFixedHeight(28)
+        self.send_button.setStyleSheet(
+            "QPushButton { background: #D97757; color: #FFFFFF; border: none;"
+            " border-radius: 8px; padding: 5px 14px; font-weight: 600; }"
+            "QPushButton:hover { background: #C6613F; }"
+            "QPushButton:disabled { background: rgba(217,119,87,0.40); }")
+        send_row.addWidget(self.service)
+        send_row.addStretch(1)
+        send_row.addWidget(self.stop)
+        send_row.addWidget(self.send_button)
+        clay.addLayout(send_row)
+        layout.addWidget(self.composer)
         self.send_button.clicked.connect(self.send)
         self.stop.clicked.connect(self.cancel)
         self.copy.clicked.connect(self.copy_answer)
@@ -637,16 +693,15 @@ class EmbeddedAIPanel(QWidget):
                 title = lines[0] if lines else ""
         self._material = text[:MAX_INPUT_CHARS]
         self._rec = rec if kind == "text" else None   # 工作流入口复用记录身份
-        self._material = text[:MAX_INPUT_CHARS]
         if title:
-            self.lbl_material.setText(
+            self.material_label.setText(
                 "材料（随选中卡片）：" + title[:60] + ("…" if len(title) > 60 else ""))
         elif rec is not None:
             kind_cn = {"image": "图片", "files": "文件"}.get(kind, kind)
-            self.lbl_material.setText(
+            self.material_label.setText(
                 "材料：当前选中为%s（快速 AI 处理文本；可勾选上下文包或直接提问）" % kind_cn)
         else:
-            self.lbl_material.setText("材料：未选择卡片（可勾选「附加当前上下文包」或先复制文字）")
+            self.material_label.setText("材料：未选择卡片（可勾选「附加当前上下文包」或先复制文字）")
 
     def _pick_action(self, key):
         # 手动互斥:再次点击取消勾选 → 回到「提问」语义

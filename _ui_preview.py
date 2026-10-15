@@ -32,7 +32,7 @@ cm.LOG_FILE = os.path.join(TMP, "app.log")
 os.makedirs(cm.IMAGE_DIR, exist_ok=True)
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QPixmap, QIcon
+from PySide6.QtGui import QPixmap, QIcon, QColor
 from PySide6.QtCore import Qt, QObject
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else "light"
@@ -43,8 +43,9 @@ app.setQuitOnLastWindowClosed(False)
 import winclipboard_qt as wq
 
 if MODE != "baseline":
-    from qfluentwidgets import setTheme, Theme
+    from qfluentwidgets import setTheme, Theme, setThemeColor
     setTheme(Theme.DARK if MODE == "dark" else Theme.LIGHT)
+    setThemeColor(QColor("#D97757"))   # Claude 陶土橙(qfw 默认为青色,须显式覆盖)
     wq.init_palette(MODE == "dark")
 wq.apply_fonts(app)           # 中文回退字族(qfluentwidgets 字族表一并覆盖)
 
