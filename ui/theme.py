@@ -228,13 +228,13 @@ QSpinBox {{
 }}
 
 QScrollBar:vertical {{
-    background: {PAPER};
-    width: 8px;
+    background: transparent;
+    width: 6px;
     border: none;
 }}
 
 QScrollBar::handle:vertical {{
-    background: {BORDER_HOVER};
+    background: #DCD9D0;
     min-height: 24px;
     border-radius: 3px;
 }}
@@ -244,13 +244,13 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
 }}
 
 QScrollBar:horizontal {{
-    background: {PAPER};
-    height: 8px;
+    background: transparent;
+    height: 6px;
     border: none;
 }}
 
 QScrollBar::handle:horizontal {{
-    background: {BORDER_HOVER};
+    background: #DCD9D0;
     min-width: 24px;
     border-radius: 3px;
 }}

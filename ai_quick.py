@@ -530,71 +530,43 @@ class EmbeddedAIPanel(QWidget):
         self._rec = None                 # 选中卡片记录(工作流一键入口用)
         self._svc_names = None
         self._services = []
-        # ---- Claude 三区布局:Pill 动作栏 / 阅读画布+轻结果条 / 一体式输入盒 ----
+        # ---- Claude 布局:阅读画布(主空间) / 轻结果条 / 胶囊动作栏 / 一体输入盒 ----
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
         pill_qss = (
             "QPushButton { background: #EFECE6; color: #3D3C38;"
-            " border: 1px solid #E2DFD7; border-radius: 14px;"
-            " padding: 3px 12px; font-size: 12px; }"
+            " border: 1px solid #E2DFD7; border-radius: 13px;"
+            " padding: 4px 12px; font-size: 12px; }"
             "QPushButton:hover { background: #E5E2D9; border-color: #D0CCC0; }"
             "QPushButton:checked { background: rgba(217,119,87,0.14);"
             " color: #C6613F; border-color: rgba(217,119,87,0.35); }")
 
-        # 第一区:胶囊动作栏(340px 右栏分两行排布,视觉上仍是一组 Pill)
-        quick = QHBoxLayout()
-        quick.setSpacing(6)
-        self._quick_btns = {}
-        for key, label in (("explain", "解释"), ("translate", "翻译"),
-                           ("summarize", "总结"), ("polish", "润色")):
-            b = PushButton(label)
-            b.setCheckable(True)
-            b.setFixedHeight(26)
-            b.setStyleSheet(pill_qss)
-            b.clicked.connect(lambda _=False, k=key: self._pick_action(k))
-            self._quick_btns[key] = b
-            quick.addWidget(b)
-        quick.addStretch(1)
-        layout.addLayout(quick)
-        tools_row = QHBoxLayout()
-        tools_row.setSpacing(6)
-        self.btn_copy_prompt = PushButton("复制 Prompt")
-        self.btn_copy_prompt.setFixedHeight(26)
-        self.btn_copy_prompt.setStyleSheet(pill_qss)
-        self.btn_copy_prompt.setToolTip(
-            "不调用 AI 服务:当前材料 + 上下文包 + 问题组装为完整 Prompt,"
-            "经隐私扫描自动脱敏后复制(无需配置 API Key)")
-        self.btn_copy_prompt.clicked.connect(self.copy_prompt)
-        tools_row.addWidget(self.btn_copy_prompt)
-        self.btn_workflow = PushButton("工作流")
-        self.btn_workflow.setIcon(FIF.DOWN.icon())   # 图标箭头:不依赖字体字形
-        self.btn_workflow.setFixedHeight(26)
-        self.btn_workflow.setStyleSheet(pill_qss)
-        self.btn_workflow.setToolTip(
-            "以当前选中卡片为输入,一键运行已配置的工作流;"
-            "绑定「当前活动包」的工作流会自动带上上下文篮内容")
-        self.btn_workflow.clicked.connect(self._workflow_menu)
-        tools_row.addWidget(self.btn_workflow)
-        tools_row.addStretch(1)
-        layout.addLayout(tools_row)
-
-        # 第二区:阅读画布(占满主空间)+ 轻量结果条
-        self.output = PlainTextEdit()
-        self.output.setReadOnly(True)
-        self.output.setPlaceholderText("AI 回答显示在这里")
-        self.output.setStyleSheet(
+        # 阅读画布:无回答且未生成时透明融入面板(只留一句引导),
+        # 生成中/有回答才切换为白底阅读卡(见 _sync_buttons)
+        self._reading_qss = (
             "QPlainTextEdit { background: #FFFFFF; border: 1px solid #E5E3DC;"
             " border-radius: 12px; padding: 12px; color: #141413; }")
+        self._guide_qss = (
+            "QPlainTextEdit { background: transparent; border: none;"
+            " color: #8C8A84; font-size: 13px; }")
+        self.output = PlainTextEdit()
+        self.output.setReadOnly(True)
+        self.output.setPlaceholderText(
+            "选中左侧剪贴板卡片，点击下方快捷胶囊或直接输入问题…")
         layout.addWidget(self.output, 1)
+
+        # 结果条:没有回答时整体隐藏(不摆一排禁用灰钮)
+        self._result_bar = QWidget()
+        bottom = QHBoxLayout(self._result_bar)
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(6)
         result_qss = (
             "QPushButton { background: transparent; border: 1px solid #E5E3DC;"
             " border-radius: 6px; padding: 2px 10px; color: #5E5D59; }"
             "QPushButton:hover { background: #EFECE6; }"
             "QPushButton:disabled { color: #B9B7B0; }")
-        bottom = QHBoxLayout()
-        bottom.setSpacing(6)
         self.copy = PushButton("复制")
         self.paste = PushButton("贴回原窗")
         self.paste.setToolTip("粘贴回原窗口（从外部窗口呼出主界面时的那个窗口）")
@@ -608,13 +580,54 @@ class EmbeddedAIPanel(QWidget):
         bottom.addStretch(1)
         for button in (self.copy, self.paste, self.history, self.pack):
             bottom.addWidget(button)
-        layout.addLayout(bottom)
-        self.status = CaptionLabel("选择动作或直接提问")
+        layout.addWidget(self._result_bar)
+
+        # 状态行:静默起步,仅在有事要说时出现
+        self.status = CaptionLabel("")
         self.status.setWordWrap(True)
         self.status.setStyleSheet("color: #8C8A84; background: transparent;")
+        self.status.setVisible(False)
         layout.addWidget(self.status)
 
-        # 第三区:一体式大圆角输入盒(材料行 + 无边框输入 + 模型/发送行)
+        # 动作胶囊栏:紧贴输入盒上方(视线集中在底部操作区)
+        quick = QHBoxLayout()
+        quick.setSpacing(6)
+        self._quick_btns = {}
+        for key, label in (("explain", "✨ 解释"), ("translate", "🌐 翻译"),
+                           ("summarize", "📝 总结"), ("polish", "✒️ 润色")):
+            b = PushButton(label)
+            b.setCheckable(True)
+            b.setFixedHeight(26)
+            b.setStyleSheet(pill_qss)
+            b.clicked.connect(lambda _=False, k=key: self._pick_action(k))
+            self._quick_btns[key] = b
+            quick.addWidget(b)
+        quick.addStretch(1)
+        layout.addLayout(quick)
+        tools_row = QHBoxLayout()
+        tools_row.setSpacing(6)
+        self.btn_copy_prompt = PushButton("📋 复制 Prompt")
+        self.btn_copy_prompt.setFixedHeight(26)
+        self.btn_copy_prompt.setStyleSheet(pill_qss)
+        self.btn_copy_prompt.setToolTip(
+            "不调用 AI 服务:当前材料 + 上下文包 + 问题组装为完整 Prompt,"
+            "经隐私扫描自动脱敏后复制(无需配置 API Key)")
+        self.btn_copy_prompt.clicked.connect(self.copy_prompt)
+        tools_row.addWidget(self.btn_copy_prompt)
+        # 纯文本标签:qfw 按钮的图标绘制与自定义 QSS padding 冲突会叠在
+        # 文字上,不再 setIcon
+        self.btn_workflow = PushButton("⚡ 工作流")
+        self.btn_workflow.setFixedHeight(26)
+        self.btn_workflow.setStyleSheet(pill_qss)
+        self.btn_workflow.setToolTip(
+            "以当前选中卡片为输入,一键运行已配置的工作流;"
+            "绑定「当前活动包」的工作流会自动带上上下文篮内容")
+        self.btn_workflow.clicked.connect(self._workflow_menu)
+        tools_row.addWidget(self.btn_workflow)
+        tools_row.addStretch(1)
+        layout.addLayout(tools_row)
+
+        # 一体式大圆角输入盒(材料行 + 无边框输入 + 模型/发送行)
         self.composer = QFrame()
         self.composer.setObjectName("claudeComposer")
         self.composer.setStyleSheet(
@@ -646,9 +659,10 @@ class EmbeddedAIPanel(QWidget):
         self.service = ComboBox()
         self.service.setMinimumWidth(120)
         self.service.setToolTip("使用「AI 服务」页配置的模型;留空时先去配置")
+        # 右侧留出下拉箭头位,防止占位文字末尾与箭头粘连
         self.service.setStyleSheet(
             "QComboBox { background: #F4F3EE; border: 1px solid #E5E3DC;"
-            " border-radius: 8px; color: #5E5D59; }"
+            " border-radius: 8px; padding: 3px 26px 3px 10px; color: #5E5D59; }"
             "QComboBox QAbstractItemView { background: #FFFFFF;"
             " border: 1px solid #E5E3DC; border-radius: 8px;"
             " selection-background-color: #D97757; selection-color: #FFFFFF; }")
@@ -794,9 +808,16 @@ class EmbeddedAIPanel(QWidget):
 
     def _notice(self, message):
         self.status.setText(message)
+        self.status.setVisible(bool(message))
 
     def _sync_buttons(self):
         busy = self._active is not None
+        # 结果条:无回答整体隐藏;阅读画布:空态透明引导,
+        # 生成中/有回答切换为白底阅读卡
+        self._result_bar.setVisible(bool(self._answer))
+        self.output.setStyleSheet(
+            self._reading_qss if (busy or self._answer)
+            else self._guide_qss)
         self.send_button.setEnabled(not busy and len(self._pending) < 2)
         self.stop.setEnabled(busy)
         for widget in (self.service, self.use_context, self.question):
