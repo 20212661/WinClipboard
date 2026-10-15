@@ -428,7 +428,9 @@ class ProviderCard(SimpleCardWidget):
 class ServicesPage(QWidget):
     """AI 供应商管理(OpenCode 风格):供应商卡片 + 预设/自定义两种添加入口。"""
 
-    def __init__(self, app):
+    def __init__(self, app, embedded=False):
+        """embedded=True:作为「AI 模型与服务」区块内嵌进设置页
+        (紧凑边距、小节标题;False 保持独立页面形态,兼容旧测试)。"""
         super().__init__()
         self.app = app
         self.setObjectName("servicesPage")
@@ -436,11 +438,16 @@ class ServicesPage(QWidget):
         self.cards = []
 
         v = QVBoxLayout(self)
-        v.setContentsMargins(36, 24, 36, 16)
+        v.setContentsMargins(0, 8, 0, 8 if embedded else 16)
         v.setSpacing(10)
 
         head = QHBoxLayout()
-        head.addWidget(TitleLabel("AI 服务"))
+        if embedded:
+            sec = StrongBodyLabel("AI 模型与服务")
+            sec.setFont(font(14, QFont.DemiBold))
+            head.addWidget(sec)
+        else:
+            head.addWidget(TitleLabel("AI 服务"))
         head.addStretch(1)
         b_cfg = PushButton("打开配置文件", self)
         b_cfg.setIcon(FIF.DOCUMENT.icon())
@@ -1008,7 +1015,7 @@ class WorkflowPage(QWidget):
                 added += 1
         cm.save_config(cfg)
         self.refresh()
-        InfoBar.success("示例已加入", "新增 %d 个工作流模板;请到「AI 服务」填入密钥后使用" % added,
+        InfoBar.success("示例已加入", "新增 %d 个工作流模板;请到 设置 →「AI 模型与服务」填入密钥后使用" % added,
                         parent=self, position=InfoBarPosition.TOP_RIGHT)
 
 

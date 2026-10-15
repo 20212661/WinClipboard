@@ -243,7 +243,9 @@ check("种子幂等", len(json.load(open(cm.CONFIG_FILE, encoding="utf-8"))
 
 a.show_services()
 pump(0.3)
-check("导航切到 AI 服务页", a.win.stackedWidget.currentWidget() is a.win.services_page)
+# AI 服务已并入设置页:show_services 应切到设置并保留 services_page 引用
+check("show_services 切到设置页", a.win.stackedWidget.currentWidget() is a.win.settings_page
+      and a.win.services_page.parent() is not None)
 a.show_ai_hub()
 pump(0.2)
 

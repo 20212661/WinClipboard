@@ -657,8 +657,8 @@ class EmbeddedAIPanel(QWidget):
         send_row = QHBoxLayout()
         send_row.setSpacing(6)
         self.service = ComboBox()
-        self.service.setMinimumWidth(120)
-        self.service.setToolTip("使用「AI 服务」页配置的模型;留空时先去配置")
+        self.service.setMinimumWidth(100)
+        self.service.setToolTip("使用设置页「AI 模型与服务」里配置的模型")
         # 右侧留出下拉箭头位,防止占位文字末尾与箭头粘连
         self.service.setStyleSheet(
             "QComboBox { background: #F4F3EE; border: 1px solid #E5E3DC;"
@@ -676,7 +676,13 @@ class EmbeddedAIPanel(QWidget):
             " border-radius: 8px; padding: 5px 14px; font-weight: 600; }"
             "QPushButton:hover { background: #C6613F; }"
             "QPushButton:disabled { background: rgba(217,119,87,0.40); }")
+        self.btn_cfg_svc = PushButton("配置…")
+        self.btn_cfg_svc.setFixedHeight(28)
+        self.btn_cfg_svc.setStyleSheet(result_qss)
+        self.btn_cfg_svc.setToolTip("跳转到设置页的「AI 模型与服务」区块")
+        self.btn_cfg_svc.clicked.connect(self._configure_services)
         send_row.addWidget(self.service)
+        send_row.addWidget(self.btn_cfg_svc)
         send_row.addStretch(1)
         send_row.addWidget(self.stop)
         send_row.addWidget(self.send_button)
@@ -781,6 +787,14 @@ class EmbeddedAIPanel(QWidget):
         menu.addAction(am)
         menu.exec(self.btn_workflow.mapToGlobal(
             self.btn_workflow.rect().bottomLeft()))
+
+    def _configure_services(self):
+        """跳设置页「AI 模型与服务」区块(替身环境降级提示)。"""
+        fn = getattr(self.app, "show_services", None)
+        if fn is None:
+            self._notice("当前环境没有 AI 服务配置页")
+            return
+        fn()
 
     def _manage_workflows(self):
         hub = getattr(self.app, "show_ai_hub", None)

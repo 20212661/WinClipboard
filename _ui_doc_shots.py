@@ -6,7 +6,7 @@
     python _ui_doc_shots.py dark
 
 输出 docs/ui/2026-10-15/<名称>_<主题>.png:
-    main_history / main_workflow / main_services / main_private / main_settings
+    main_history / main_workflow / main_private / main_settings(滚至 AI 模型与服务区)
     quickpaste / viewer_code / viewer_json / viewer_md / viewer_csv
     viewer_files / viewer_image / viewer_diff / quick_ai / wheel
 
@@ -248,14 +248,13 @@ shot(win, "main_history", settle=2.0)
 win.switchTo(win.workflow_page)
 shot(win, "main_workflow")
 
-win.switchTo(win.services_page)
-shot(win, "main_services")
+# AI 服务已并入设置页:设置页截图滚动到「AI 模型与服务」区块再拍
+win.switchTo(win.settings_page)
+win.settings_page.scroll.ensureWidgetVisible(win.services_page)
+shot(win, "main_settings")
 
 win.switchTo(win.private_page)
 shot(win, "main_private")
-
-win.switchTo(win.settings_page)
-shot(win, "main_settings")
 
 # ---- 2) 快捷粘贴浮层(Alt+`) ----
 from quickpaste import QuickPasteWindow   # noqa: E402

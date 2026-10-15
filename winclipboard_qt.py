@@ -1450,7 +1450,7 @@ class HistoryPage(QWidget):
 # 主窗口(FluentWindow:库标准导航壳,所有功能收进单一窗口)
 # ============================================================
 class MainWindow(FluentWindow):
-    """单一主窗口:左侧导航 = 剪贴板 / 工作流 / AI 服务 / 私密区 / 设置。
+    """单一主窗口:左侧导航 = 剪贴板 / 工作流 / 私密区 / 设置(AI 服务并入设置页)。
 
     热键或托盘切换显示;点窗口关闭按钮 = 隐藏(程序常驻托盘)。
     """
@@ -1500,12 +1500,14 @@ class MainWindow(FluentWindow):
                 pass
         self.history_page = HistoryPage(app)
         self.workflow_page = WorkflowPage(app)
-        self.services_page = ServicesPage(app)
         self.private_page = PrivatePage(app)
         self.settings_page = SettingsPage(app)
+        # AI 服务为低频配置:并入设置页「AI 模型与服务」区块,
+        # 左侧一级导航精简为 剪贴板/工作流/私密区/设置
+        self.services_page = ServicesPage(app, embedded=True)
+        self.settings_page._body_lay.addWidget(self.services_page)
         self.addSubInterface(self.history_page, FIF.HISTORY, "剪贴板")
         self.addSubInterface(self.workflow_page, FIF.ROBOT, "工作流")
-        self.addSubInterface(self.services_page, FIF.CLOUD, "AI 服务")
         self.addSubInterface(self.private_page, FIF.IOT, "私密区")
         self.addSubInterface(self.settings_page, FIF.SETTING, "设置",
                              NavigationItemPosition.BOTTOM)
@@ -1975,6 +1977,8 @@ class SettingsPage(QWidget):
         lay.setSpacing(20)
         scroll.setWidget(body)
         outer.addWidget(scroll, 1)
+        self.scroll = scroll           # 供 show_services 定位滚动
+        self._body_lay = lay           # 供 AI 服务区块内嵌
         cfg = app.cfg
         self._health_done.connect(self._show_health_result)
 
@@ -3790,7 +3794,11 @@ class WinClipboardApp(QObject):
 
     def show_services(self):
         self.win.services_page.refresh()   # 配置可能在别处变动(如工作流页填入示例)
-        self.win.switchTo(self.win.services_page)
+        self.win.switchTo(self.win.settings_page)
+        scroll = getattr(self.win.settings_page, "scroll", None)
+        if scroll is not None:
+            QTimer.singleShot(0, lambda: scroll.ensureWidgetVisible(
+                self.win.services_page))
 
     def run_workflow(self, wf, rec, auto=False):
         try:
