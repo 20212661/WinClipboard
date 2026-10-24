@@ -65,6 +65,9 @@ a = Analysis(
         "PySide6.QtPdf",
         "PySide6.QtSql",
         "PySide6.QtTest",
+        # Pillow 大件:AVIF 编码器(剪贴板图片不产生 AVIF)与 Tk 桥(无 tkinter)
+        "PIL._avif",
+        "PIL._imagingtk",
         # 注意:不能排除 QtXml/QtSvg/QtNetwork —— qfluentwidgets、
         # frameless 运行时按需导入,排了就 "No module named"(实测 QtXml 踩坑)
     ],
@@ -78,7 +81,15 @@ a = Analysis(
 # PySide6 自身的二进制/插件由 PyInstaller 的官方 hook 收集,不需手动 collect
 from PyInstaller.utils.hooks import collect_data_files  # noqa: E402
 
-a.datas += collect_data_files("qfluentwidgets")
+# PyInstaller 6.22 起 collect_data_files 返回 (源文件, 目标目录) 二元组,
+# 而 COLLECT 的 TOC 只收 (目标名, 源路径, 类型) 三元组,必须手工转换。
+_qfw_datas = []
+for _src, _dir in collect_data_files(
+        # .mimosa/hook-state 是安全钩子写进包目录的运行状态,不是程序资源
+        "qfluentwidgets", excludes=[".mimosa/**/*", "**/.mimosa/**/*"]):
+    _dest = _dir.replace("\\", "/") + "/" + os.path.basename(_src)
+    _qfw_datas.append((_dest, _src, "DATA"))
+a.datas += _qfw_datas
 
 # Windows Qt wheels use the OS ICU API (unversioned ucnv_* exports).
 # A third-party icuuc.dll discovered through PATH, e.g. Poppler's versioned
@@ -89,6 +100,26 @@ qt_package_dir = os.path.normcase(os.path.dirname(PySide6.__file__))
 a.binaries = [entry for entry in a.binaries
               if os.path.basename(entry[0]).lower() != "icuuc.dll"
               or os.path.normcase(os.path.dirname(entry[1])) == qt_package_dir]
+
+# 减体积:excludes 只挡得住 Python 绑定模块,挡不住底层 Qt DLL/插件,
+# 必须按文件名过滤。全是 QWidget+QSS 应用用不到的大件:软件 OpenGL 兜底
+# (QSS 走光栅渲染)、QML/Quick 全家、PDF 库与其图片插件、触屏虚拟键盘、
+# 备用平台后端(qwindows.dll 才是实际使用的)、Pillow 的 AVIF 编码器。
+_DROP_FILES = {
+    "opengl32sw.dll",
+    "qt6quick.dll", "qt6qml.dll", "qt6qmlmeta.dll",
+    "qt6qmlmodels.dll", "qt6qmlworkerscript.dll",
+    "qt6pdf.dll", "qpdf.dll",
+    "qt6virtualkeyboard.dll", "qtvirtualkeyboardplugin.dll",
+    "qdirect2d.dll", "qminimal.dll",
+    "qtuiotouchplugin.dll",
+    # 注意:qoffscreen.dll 必须保留——打包冒烟测试用 QT_QPA_PLATFORM=offscreen
+    # 验证 EXE,砍了它验证管线自己就起不来。
+}
+
+a.binaries = [entry for entry in a.binaries
+              if os.path.basename(entry[0]).lower() not in _DROP_FILES
+              and not os.path.basename(entry[0]).lower().startswith(("_avif.", "_imagingtk."))]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 

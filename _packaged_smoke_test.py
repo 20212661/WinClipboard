@@ -43,7 +43,7 @@ def verify_archive(exe):
                  "win32_host", "privacy_store", "history_store",
                  "ctxpack.model", "ctxpack.budget", "ctxpack.assemble",
                  "ctxpack.store", "ctxpack.service", "ctxpack.ui_tray"):
-        source = compile((root / (name + ".py")).read_text(encoding="utf-8-sig"),
+        source = compile((root / (name.replace(".", os.sep) + ".py")).read_text(encoding="utf-8-sig"),
                          name + ".py", "exec")
         if code_signature(pyz.extract(name)) != code_signature(source):
             raise AssertionError("Packaged module differs from source: " + name)
