@@ -888,10 +888,12 @@ class HistoryPage(QWidget):
         if self.ai_panel is not None:
             self.detail_stack.addWidget(self.ai_panel)
         dock_lay.addWidget(self.detail_stack, 1)
+        # 右栏显隐与页签选中态是两件事:显隐只看 preview_visible 配置
+        # (旧底部预览开关的延续,归 toggle_preview);页签默认停在「预览」,
+        # 切换归 set_detail_mode,不再拿 btn_preview 的选中态表达显隐。
         preview_on = bool(getattr(app, "cfg", {}).get("preview_visible", True))
         self.detail_stack.setVisible(preview_on)
-        self.btn_preview.setChecked(preview_on)
-        self.preview.setVisible(preview_on)
+        self.btn_preview.setChecked(True)
 
         history_panel = QFrame()
         history_panel.setObjectName("historySurface")
@@ -1520,7 +1522,7 @@ class HistoryPage(QWidget):
                     rt(path, visible=True)  # 可见请求:生成完下次选中即有
                 self.pv_img.setText("生成缩略图中…")
             self.pv_badge.setText("截图 · 放大预览")
-            self.pv_stats.setText("%s × %s · 双击可全屏查看" %
+            self.pv_stats.setText("%s × %s · 双击卡片全屏查看" %
                                   (rec.get("w", 0), rec.get("h", 0)))
             self._pv_display = ""
             return
@@ -1611,13 +1613,33 @@ class HistoryPage(QWidget):
         add_records_to_pack(app, [rec])
 
     def toggle_preview(self, on):
-        self.btn_preview.setChecked(on)
-        self.app.cfg["preview_visible"] = bool(on)
+        """右栏内容(预览/处理页)整体显隐——旧底部预览条开关的兼容入口。
+
+        只管 detail_stack 可见性与 preview_visible 配置持久化;
+        当前停在哪个页签归 set_detail_mode,两者互不混淆。
+        """
+        on = bool(on)
+        self.detail_stack.setVisible(on)
+        self.app.cfg["preview_visible"] = on
         cm.save_config(self.app.cfg)
-        self.preview.setVisible(on)
         if on:
             self.update_preview()
         self._resize_to_content()
+
+    def set_detail_mode(self, mode):
+        """右栏页签切换:"preview"=预览页,"process"=AI 处理页。
+
+        只改 detail_stack 当前页与两个页签的选中态,不动右栏显隐;
+        ai_panel 构建失败时「处理」一律落回「预览」。
+        """
+        proc = (mode == "process") and (self.ai_panel is not None)
+        self.detail_stack.setCurrentIndex(1 if proc else 0)
+        self.btn_process.setChecked(proc)
+        self.btn_preview.setChecked(not proc)
+        if not proc:
+            # 处理页期间预览页不可见,update_preview 会跳过;切回预览页
+            # 补一次刷新,避免显示旧选中内容
+            self.update_preview()
 
     def ensure_visible(self, vi):
         card = self.card_at(vi)     # 置顶组重排后控件下标≠视图下标,按记录找卡
