@@ -3,8 +3,10 @@ import math
 import threading
 
 from PySide6.QtCore import QEvent, Qt, Signal, QPointF, QTimer
-from PySide6.QtGui import QColor, QCursor, QPainter, QPainterPath, QPen, QShortcut, QKeySequence
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame
+from PySide6.QtGui import (QColor, QCursor, QFont, QPainter, QPainterPath, QPen,
+                           QShortcut, QKeySequence)
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFrame,
+                               QStackedWidget, QLabel)
 from qfluentwidgets import (BodyLabel, CaptionLabel, StrongBodyLabel, PlainTextEdit,
                             PushButton, PrimaryPushButton, ComboBox, CheckBox,
                             InfoBar, InfoBarPosition, themeColor, FluentIcon as FIF)
@@ -540,8 +542,10 @@ class EmbeddedAIPanel(QWidget):
             " border: 1px solid #E2DFD7; border-radius: 13px;"
             " padding: 4px 12px; font-size: 12px; }"
             "QPushButton:hover { background: #E5E2D9; border-color: #D0CCC0; }"
-            "QPushButton:checked { background: rgba(217,119,87,0.14);"
-            " color: #C6613F; border-color: rgba(217,119,87,0.35); }")
+            "QPushButton:checked { background: %s;"
+            " color: %s; border-color: %s; }"
+            % (ui_base.accent_rgba(0.14), ui_base.ACCENT_TEXT,
+               ui_base.accent_rgba(0.35)))
 
         # 阅读画布:无回答且未生成时透明融入面板(只留一句引导),
         # 生成中/有回答才切换为白底阅读卡(见 _sync_buttons)
@@ -553,9 +557,15 @@ class EmbeddedAIPanel(QWidget):
             " color: #8C8A84; font-size: 13px; }")
         self.output = PlainTextEdit()
         self.output.setReadOnly(True)
-        self.output.setPlaceholderText(
-            "选中左侧剪贴板卡片，点击下方快捷胶囊或直接输入问题…")
-        layout.addWidget(self.output, 1)
+        self.output.setPlaceholderText("AI 正在生成…")
+        # 阅读区做成两页:空态(引导) / 有内容(白底阅读卡)。空态用居中的
+        # 三行提示,而不是把一句灰字丢在空白画布左上角。
+        self._canvas = QStackedWidget()
+        self._empty_canvas = self._build_empty_canvas()
+        self._canvas.addWidget(self._empty_canvas)
+        self._canvas.addWidget(self.output)
+        self._canvas.setCurrentIndex(0)
+        layout.addWidget(self._canvas, 1)
 
         # 结果条:没有回答时整体隐藏(不摆一排禁用灰钮)
         self._result_bar = QWidget()
@@ -675,7 +685,7 @@ class EmbeddedAIPanel(QWidget):
             "QPushButton { background: #D97757; color: #FFFFFF; border: none;"
             " border-radius: 8px; padding: 5px 14px; font-weight: 600; }"
             "QPushButton:hover { background: #C6613F; }"
-            "QPushButton:disabled { background: rgba(217,119,87,0.40); }")
+            "QPushButton:disabled { background: %s; }" % ui_base.accent_rgba(0.40))
         self.btn_cfg_svc = PushButton("配置…")
         self.btn_cfg_svc.setFixedHeight(28)
         self.btn_cfg_svc.setStyleSheet(result_qss)
@@ -820,18 +830,63 @@ class EmbeddedAIPanel(QWidget):
 
     # ---- 请求纪律(与 QuickAIWindow 一致) ----
 
+    def _build_empty_canvas(self):
+        """阅读区的空态:居中图标 + 两行引导(替代空白画布上的一句灰字)。"""
+        w = QWidget()
+        w.setStyleSheet("background: transparent;")
+        v = QVBoxLayout(w)
+        v.setContentsMargins(16, 24, 16, 24)
+        v.setSpacing(8)
+        v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        tile = QWidget(w)
+        tile.setFixedSize(44, 44)
+        tile.setStyleSheet(
+            "background: %s; border-radius: 13px;" % ui_base.BADGE_BG)
+        tl = QVBoxLayout(tile)
+        tl.setContentsMargins(0, 0, 0, 0)
+        ic = QLabel(tile)
+        pm = FIF.CHAT.icon().pixmap(20, 20)
+        ic.setPixmap(pm)
+        ic.setStyleSheet("background: transparent;")
+        tl.addWidget(ic, 0, Qt.AlignmentFlag.AlignCenter)
+
+        t1 = QLabel("选一张卡片，或直接提问", w)
+        f = ui_base.font(10, QFont.Weight.DemiBold)
+        t1.setFont(f)
+        t1.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        t1.setStyleSheet("color: %s; background: transparent;" % ui_base.TEXT)
+
+        t2 = QLabel("解释 / 翻译 / 总结 / 润色 一键发送，回答在这里阅读", w)
+        t2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        t2.setWordWrap(True)
+        t2.setStyleSheet("color: %s; background: transparent;" % ui_base.SEC)
+
+        t3 = QLabel("没配 API Key？用「复制 Prompt」把材料粘给任意网页 AI", w)
+        t3.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        t3.setWordWrap(True)
+        t3.setStyleSheet("color: %s; background: transparent;" % ui_base.TER)
+
+        v.addWidget(tile, 0, Qt.AlignmentFlag.AlignHCenter)
+        v.addSpacing(2)
+        v.addWidget(t1)
+        v.addWidget(t2)
+        v.addWidget(t3)
+        return w
+
     def _notice(self, message):
         self.status.setText(message)
         self.status.setVisible(bool(message))
 
     def _sync_buttons(self):
         busy = self._active is not None
-        # 结果条:无回答整体隐藏;阅读画布:空态透明引导,
-        # 生成中/有回答切换为白底阅读卡
+        # 结果条:无回答整体隐藏;阅读画布:空态显示引导页,生成中/有回答
+        # 切到白底阅读卡
         self._result_bar.setVisible(bool(self._answer))
+        waiting = bool(busy or self._answer)
+        self._canvas.setCurrentIndex(1 if waiting else 0)
         self.output.setStyleSheet(
-            self._reading_qss if (busy or self._answer)
-            else self._guide_qss)
+            self._reading_qss if waiting else self._guide_qss)
         self.send_button.setEnabled(not busy and len(self._pending) < 2)
         self.stop.setEnabled(busy)
         for widget in (self.service, self.use_context, self.question):

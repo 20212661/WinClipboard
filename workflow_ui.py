@@ -30,7 +30,8 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout,
                                QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem,
                                QGraphicsEllipseItem, QGraphicsPathItem,
                                QGraphicsLineItem, QGraphicsTextItem, QStyle,
-                               QFileDialog, QSizePolicy, QListWidget, QLineEdit,
+                               QFileDialog, QSizePolicy, QListWidget, QListWidgetItem,
+                               QStyledItemDelegate, QLineEdit,
                                QPlainTextEdit, QPushButton, QSizeGrip,
                                QSpacerItem, QStackedWidget, QTreeWidgetItem,
                                QTableWidgetItem, QHeaderView)
@@ -61,6 +62,7 @@ from perf_probe import PerfSpan, since, stamp
 import ui_base
 from ui_base import *  # noqa: F401,F403
 from ui_base import ensure_onscreen, _fic
+from ui.kit import PageHeader, EmptyState, card_qss  # noqa: F401
 
 import sys as _sys
 ui_base.register(_sys.modules[__name__])   # 调色板随主题同步本模块全局
@@ -438,7 +440,11 @@ class ServicesPage(QWidget):
         self.cards = []
 
         v = QVBoxLayout(self)
-        v.setContentsMargins(0, 8, 0, 8 if embedded else 16)
+        # 独立页面形态(旧测试/独立窗口)给足页边距;内嵌进设置页时由父布局负责
+        if embedded:
+            v.setContentsMargins(0, 8, 0, 8)
+        else:
+            v.setContentsMargins(32, 24, 32, 16)
         v.setSpacing(10)
 
         head = QHBoxLayout()
@@ -884,6 +890,155 @@ class WorkflowEditorWindow(QWidget):
         self.deleteLater()
 
 
+_STEP_TONE = {"ai": "accent", "web": "sand", "human": "green",
+              "clipboard": "neutral", "transform": "neutral", "if": "neutral"}
+
+
+class WorkflowDelegate(QStyledItemDelegate):
+    """工作流卡片:图标瓦片 + 名称 + 步骤药丸链。
+
+    早期这里是裸 QListWidget 文本行(「名称\\n3 步:GLM → DeepSeek → 人工」),
+    和剪贴板页的卡片流完全是两种语言。改成卡片后,一眼能看出「几步、什么
+    类型、哪几步连 AI」。
+    """
+
+    HEIGHT = 76
+    TILE = 34
+    RADIUS = 10
+
+    def sizeHint(self, option, index):
+        return QSize(option.rect.width(), self.HEIGHT)
+
+    def _chips(self, wf):
+        out = []
+        for st in (wf.get("steps") or []):
+            kind = str(st.get("kind") or "ai").lower()
+            out.append((wfs.describe(st), _STEP_TONE.get(kind, "neutral")))
+        return out
+
+    def paint(self, painter, option, index):
+        wf = index.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(wf, dict):
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+        outer = option.rect
+        card = QRectF(outer.left() + 2, outer.top() + 3,
+                      outer.width() - 10, outer.height() - 6)
+        hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected) \
+            and bool(option.state & QStyle.StateFlag.State_Active)
+
+        path = QPainterPath()
+        path.addRoundedRect(card, self.RADIUS, self.RADIUS)
+        painter.setClipPath(path)
+        if selected:
+            c = QColor(ACCENT)
+            c.setAlpha(24)
+            painter.fillPath(path, c)
+            border = QColor(ACCENT)
+            border.setAlpha(115)
+        elif hover:
+            painter.fillPath(path, QColor(SURFACE_HOVER))
+            border = QColor(BORDER_HOVER)
+        else:
+            painter.fillPath(path, QColor(CARD_BG))
+            border = QColor(CARD_BORDER)
+        painter.setClipping(False)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(border, 1))
+        painter.drawPath(path)
+        if selected:
+            bar = QPainterPath()
+            bar.addRoundedRect(QRectF(card.left(), card.top(), 3,
+                                      card.height()), 1.5, 1.5)
+            painter.fillPath(bar, QColor(ACCENT))
+
+        # 图标瓦片
+        tile = QRectF(card.left() + 14, card.center().y() - self.TILE / 2,
+                      self.TILE, self.TILE)
+        tpath = QPainterPath()
+        tpath.addRoundedRect(tile, 9, 9)
+        painter.fillPath(tpath, QColor(BADGE_BG))
+        icon = FIF.ROBOT.icon()
+        if not icon.isNull():
+            icon.paint(painter, QRectF(tile.center().x() - 8,
+                                       tile.center().y() - 8, 16, 16).toRect())
+
+        x = tile.right() + 12
+        right_limit = card.right() - 16
+        # 名称
+        f_name = ui_base.font(11, QFont.Weight.DemiBold)
+        painter.setFont(f_name)
+        painter.setPen(QColor(TEXT))
+        painter.drawText(int(x), int(card.top() + 14),
+                         int(right_limit - x - 60), 20,
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         QFontMetrics(f_name).elidedText(
+                             str(wf.get("name") or "未命名"),
+                             Qt.TextElideMode.ElideRight,
+                             max(60, int(right_limit - x - 60))))
+
+        # 右侧「N 步」
+        f_num = ui_base.font(8)
+        painter.setFont(f_num)
+        painter.setPen(QColor(TER))
+        painter.drawText(int(right_limit - 84), int(card.top() + 14), 84, 20,
+                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                         "%d 步" % len(wf.get("steps") or []))
+
+        # 药丸链
+        chips = self._chips(wf)
+        cx = x
+        cy = card.top() + 40
+        f_chip = ui_base.font(8)
+        painter.setFont(f_chip)
+        fm = QFontMetrics(f_chip)
+        arrow_w = 14
+        for i, (text, tone_name) in enumerate(chips):
+            if cx > right_limit - 40:
+                painter.setPen(QColor(TER))
+                painter.drawText(int(cx), int(cy), 30, 20,
+                                 Qt.AlignmentFlag.AlignLeft
+                                 | Qt.AlignmentFlag.AlignVCenter, "…")
+                break
+            w = min(fm.horizontalAdvance(text) + 16, 130)
+            pill = QRectF(cx, cy, w, 20)
+            ppath = QPainterPath()
+            ppath.addRoundedRect(pill, 6, 6)
+            bg, fg = _tone_pair(tone_name)
+            painter.fillPath(ppath, bg)
+            painter.setPen(fg)
+            painter.drawText(pill.toRect(),
+                             Qt.AlignmentFlag.AlignCenter,
+                             fm.elidedText(text, Qt.TextElideMode.ElideRight,
+                                           int(w - 12)))
+            cx += w
+            if i < len(chips) - 1:
+                painter.setPen(QColor(TER))
+                painter.drawText(QRectF(cx, cy, arrow_w, 20).toRect(),
+                                 Qt.AlignmentFlag.AlignCenter, "›")
+                cx += arrow_w
+
+        painter.restore()
+
+
+def _tone_pair(name):
+    """药丸配色(与 ui.kit.Chip 同一套,避免两处各写一遍)。"""
+    if IS_DARK:
+        table = {"accent": ("#4A2E22", "#E9A084"), "sand": ("#3A2F22", "#D9BC94"),
+                 "green": ("#223530", "#8FD6A7"),
+                 "neutral": (BADGE_BG, SEC)}
+    else:
+        table = {"accent": ("#FBEDE7", "#B4552F"), "sand": ("#F4EDE1", "#7C5C34"),
+                 "green": ("#E9F1EA", "#37694A"),
+                 "neutral": (BADGE_BG, SEC)}
+    return QColor(table.get(name, table["neutral"])[0]), \
+        QColor(table.get(name, table["neutral"])[1])
+
+
 class WorkflowPage(QWidget):
     """工作流管理(常驻单例):列表 + 新建/编辑/删除 + 填入示例 + 打开服务管理。"""
 
@@ -893,48 +1048,66 @@ class WorkflowPage(QWidget):
         self.setObjectName("workflowPage")
 
         v = QVBoxLayout(self)
-        v.setContentsMargins(36, 24, 36, 16)
-        v.setSpacing(10)
-        ttl = TitleLabel("工作流")
-        v.addWidget(ttl)
-        hint = CaptionLabel("右键剪贴板页的文本条目 → 「工作流」即可运行。步骤可以是网页 AI(提示词进剪贴板、"
-                            "你去网页粘贴)、人工确认(把关/编辑)或本地 API,自由组合、逐步推进。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: %s;" % TER)
-        v.addWidget(hint)
+        v.setContentsMargins(32, 24, 32, 16)
+        v.setSpacing(14)
 
+        self.btn_new_header = PushButton("新建工作流", self)
+        self.btn_new_header.setIcon(FIF.ADD.icon())
+        self.btn_new_header.clicked.connect(self._new)
+        self.btn_runs_header = PushButton("运行记录", self)
+        self.btn_runs_header.setIcon(FIF.HISTORY.icon())
+        self.btn_runs_header.clicked.connect(self._open_runs)
+        v.addWidget(PageHeader(
+            "工作流",
+            "右键剪贴板页的文本条目 → 「工作流」即可运行。步骤可以是网页 AI(提示词进剪贴板、"
+            "你去网页粘贴)、人工确认(把关/编辑)或本地 API,自由组合、逐步推进。",
+            actions=[self.btn_runs_header, self.btn_new_header]))
+
+
+        # 卡片流(委托绘制):无外框,行间靠卡片圆角与留白分层
         self.lst = QListWidget()
-        self.lst.setFont(font(13))
+        self.lst.setObjectName("workflowList")
+        self.lst.setFont(font(11))
+        self.lst.setItemDelegate(WorkflowDelegate(self.lst))
+        self.lst.setSpacing(2)
+        self.lst.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        self.lst.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.lst.setStyleSheet(
-            "QListWidget { background: %s; border-radius: 12px;"
-            " border: 1px solid %s; outline: none; padding: 4px; }"
-            "QListWidget::item { color: %s; border-radius: 8px; padding: 9px 12px; }"
-            "QListWidget::item:hover { background: %s; }"
-            "QListWidget::item:selected { background: %s; color: %s; }"
-            % (FIELD_BG, FIELD_BORDER, TEXT, BADGE_BG, ACCENT_SOFT, ACCENT))
-        v.addWidget(self.lst, 1)
+            "QListWidget#workflowList { background: transparent; border: none;"
+            " outline: none; padding: 0px; }"
+            "QListWidget#workflowList::item { background: transparent;"
+            " border: none; }")
+        self.lst.itemDoubleClicked.connect(lambda _: self._edit_current())
+
+        self._empty = EmptyState(
+            FIF.ROBOT, "还没有工作流",
+            "工作流把「复制 → 处理 → 回贴」固定成一条可重复的步骤链。"
+            "可以先用示例模板看效果,再按需要增删步骤。",
+            "用示例模板开始", self._seed)
+
+        self._list_wrap = QWidget()
+        lw = QVBoxLayout(self._list_wrap)
+        lw.setContentsMargins(0, 0, 0, 0)
+        lw.setSpacing(0)
+        lw.addWidget(self.lst, 1)
+        lw.addWidget(self._empty, 1)
+        v.addWidget(self._list_wrap, 1)
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        b_new = PushButton("新建", self)
-        b_new.setIcon(FIF.ADD.icon())
         b_edit = PushButton("编辑", self)
         b_edit.setIcon(FIF.EDIT.icon())
         b_del = PushButton("删除", self)
         b_del.setIcon(FIF.DELETE.icon())
         b_seed = PushButton("填入示例模板", self)
         b_seed.setIcon(FIF.LIBRARY.icon())
-        b_hist = PushButton("运行记录", self)
-        b_hist.setIcon(FIF.HISTORY.icon())
         b_svc = PushButton("AI 服务…", self)
         b_svc.setIcon(FIF.CLOUD.icon())
-        b_new.clicked.connect(self._new)
         b_edit.clicked.connect(self._edit_current)
         b_del.clicked.connect(self._del_current)
         b_seed.clicked.connect(self._seed)
-        b_hist.clicked.connect(self._open_runs)
         b_svc.clicked.connect(self.app.show_services)
-        for b in (b_new, b_edit, b_del, b_seed, b_hist, b_svc):
+        for b in (b_edit, b_del, b_seed, b_svc):
             row.addWidget(b)
         row.addStretch(1)
         v.addLayout(row)
@@ -954,15 +1127,27 @@ class WorkflowPage(QWidget):
 
     def refresh(self):
         self.lst.clear()
-        for wf in self.app.cfg.get("ai_workflows") or []:
+        wfs = self.app.cfg.get("ai_workflows") or []
+        for wf in wfs:
             parts = []
             for st in wf.get("steps") or []:
                 k = st.get("kind", "ai")
                 parts.append("网页" if k == "web" else "人工" if k == "human"
                              else (st.get("service") or "AI"))
-            self.lst.addItem("%s\n%d 步:%s" % (wf.get("name", "未命名"),
-                                               len(wf.get("steps") or []),
-                                               " → ".join(parts)))
+            item = QListWidgetItem("%s\n%d 步:%s" % (wf.get("name", "未命名"),
+                                                    len(wf.get("steps") or []),
+                                                    " → ".join(parts)))
+            item.setData(Qt.ItemDataRole.UserRole, wf)     # 委托绘制用
+            item.setSizeHint(QSize(self.lst.viewport().width(),
+                                   WorkflowDelegate.HEIGHT))
+            item.setToolTip(str(wf.get("name") or ""))
+            self.lst.addItem(item)
+        # 空态与列表互斥(有工作流时不显示引导卡)
+        has = bool(wfs)
+        self.lst.setVisible(has)
+        self._empty.setVisible(not has)
+        if has and self.lst.currentRow() < 0:
+            self.lst.setCurrentRow(0)
 
     def _current(self):
         item = self.lst.currentItem()

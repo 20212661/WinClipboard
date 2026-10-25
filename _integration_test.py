@@ -780,9 +780,13 @@ if len(a._view) >= 3:
 # ---- 快捷键帮助 + 主题选项中文化 + 无障碍名 ----
 check("帮助文本含动态热键与分区", "显示 / 隐藏主窗口" in a.shortcut_help_text()
       and "历史列表" in a.shortcut_help_text() and "图片编辑" in a.shortcut_help_text())
-check("主题下拉中文化", [sp.combo_theme.itemText(i) for i in range(3)]
-      == ["跟随系统", "浅色", "深色"]
-      and sp.combo_theme.currentData() == str(a.cfg.get("theme", "auto")))
+# 主题只有「浅色」一项:启动期 apply_atelier_zero 强制浅色,旧版还列着
+# 跟随系统/深色,选中后 qfw 组件转深色而页面自绘色仍为浅色(浅底白字不可读)。
+# 深色要等各页面 QSS 全部改为调色板派生后才重新开放。
+check("主题下拉中文化", [sp.combo_theme.itemText(i)
+                        for i in range(sp.combo_theme.count())]
+      == ["浅色(当前固定)"]
+      and not sp.combo_theme.isEnabled())
 check("关键控件有无障碍名", a.panel.search.accessibleName() == "搜索剪贴历史"
       and a.panel.cmb_src.accessibleName() != "")
 

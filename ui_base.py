@@ -56,6 +56,8 @@ NAV_BG = "#ECEAE4"
 THUMB_PH = "#EFECE6"
 THUMB_BORDER = "#E5E3DC"
 GUTTER_BG = "#FAF9F5"       # 查看器行号栏(比内容卡片深半档)
+SURFACE_HOVER = "#FCFBF9"   # 卡片悬停底色(比白卡深半档)
+ACCENT_TEXT = "#B4552F"     # 主题色在小字上的可读加深版
 PANEL_TOP = CARD_BG
 PANEL_BOT = CARD_BG
 
@@ -78,6 +80,7 @@ def init_palette(dark):
             "BADGE_BG": "#EFECE6", "NAV_BG": "#ECEAE4",
             "THUMB_PH": "#EFECE6", "THUMB_BORDER": "#E5E3DC",
             "GUTTER_BG": "#FAF9F5",
+            "SURFACE_HOVER": "#FCFBF9", "ACCENT_TEXT": "#B4552F",
             "DIFF_ADD": "#3f7a4f", "DIFF_DEL": "#b3552f",
             "DIFF_CTX": "#8C8A84",
         },
@@ -89,6 +92,7 @@ def init_palette(dark):
             "BADGE_BG": "#2A2927", "NAV_BG": "#232321",
             "THUMB_PH": "#2A2927", "THUMB_BORDER": "#32312E",
             "GUTTER_BG": "#232321",
+            "SURFACE_HOVER": "#262624", "ACCENT_TEXT": "#E9A084",
             "DIFF_ADD": "#5ec97f", "DIFF_DEL": "#ef8080",
             "DIFF_CTX": "rgba(255,255,255,0.45)",
         },
@@ -307,6 +311,17 @@ def _accent_tint(alpha):
     c = QColor(ACCENT)
     c.setAlpha(alpha)
     return c
+
+
+def accent_rgba(alpha):
+    """当前强调色的半透明 QSS 颜色(#AARRGGBB)。
+
+    自绘卡片的选中底色/描边一律走这里,设置页换主题色后跟着变;
+    写死 rgba(217,119,87,…) 会让色板形同虚设。
+    """
+    c = QColor(ACCENT)
+    return "#%02X%02X%02X%02X" % (max(0, min(255, int(round(alpha * 255)))),
+                                  c.red(), c.green(), c.blue())
 
 
 

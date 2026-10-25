@@ -41,7 +41,7 @@ cm.ICON_FILE = os.path.join(TMP, "icon.ico")
 os.makedirs(cm.IMAGE_DIR, exist_ok=True)
 
 from PySide6.QtWidgets import QApplication       # noqa: E402
-from PySide6.QtGui import QFont, QPixmap, QIcon  # noqa: E402
+from PySide6.QtGui import QFont, QPixmap, QIcon, QColor  # noqa: E402
 from PySide6.QtCore import Qt, QObject           # noqa: E402
 
 MODE = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("_") else "light"
@@ -54,9 +54,10 @@ app = QApplication([])
 app.setQuitOnLastWindowClosed(False)
 
 import winclipboard_qt as wq   # noqa: E402
-from qfluentwidgets import setTheme, Theme   # noqa: E402
+from qfluentwidgets import setTheme, setThemeColor, Theme   # noqa: E402
 
 setTheme(Theme.DARK if MODE == "dark" else Theme.LIGHT)
+setThemeColor(QColor("#D97757"))   # 与主程序 apply_atelier_zero 一致(否则库默认青色)
 wq.init_palette(MODE == "dark")
 wq.apply_fonts(app)           # 中文回退字族(qfluentwidgets 字族表一并覆盖)
 

@@ -13,20 +13,21 @@
 """
 import ctypes
 
-from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer
-from PySide6.QtGui import (QColor, QFont, QFontMetrics, QPainter, QPixmap,
-                           QStandardItemModel)
+from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import (QColor, QFontMetrics, QPainter, QPainterPath,
+                           QPen, QStandardItemModel)
 from PySide6.QtWidgets import (QAbstractItemView, QListView, QStyle,
                                QStyledItemDelegate, QVBoxLayout, QWidget)
-from qfluentwidgets import CaptionLabel, SearchLineEdit, isDarkTheme, themeColor
+from qfluentwidgets import CaptionLabel, SearchLineEdit
 
 import clipboard_manager as cm
+import ui_base
 
 CATS = ("all", "text", "link", "image", "files")
 CAT_LABEL = {"all": "全部", "text": "文本", "link": "链接",
              "image": "图片", "files": "文件"}
 GLYPH = {"text": "🧾", "link": "🔗", "image": "🖼", "files": "📁"}
-ROW_H = 46
+ROW_H = 50
 MAX_ROWS = 8
 LIST_CAP = 60                      # 浮层最多渲染的条数(再多的靠继续输入过滤)
 WIDTH = 520
@@ -75,11 +76,23 @@ def _restore_focus(hwnd):
 
 
 class _RowDelegate(QStyledItemDelegate):
-    """单行绘制:图标位(缩略图/字形)+ 标题 + 元信息 + 序号徽章。"""
+    """单行绘制:类型瓦片 + 标题 + 元信息 + 序号。
+
+    与主界面卡片同一套暖纸语言(白底、1px 边框、选中淡陶土 + 左侧指示条);
+    图标用 Fluent 矢量图标,不用 emoji(emoji 在中文 Windows 上是彩色字形,
+    和其余界面不是一套视觉)。
+    """
+
+    _ICONS = {"text": "DOCUMENT", "link": "LINK", "image": "PHOTO",
+              "files": "FOLDER"}
 
     def __init__(self, win):
         super().__init__(win)
         self.win = win
+
+    def _icon(self, kind):
+        from qfluentwidgets import FluentIcon as FIF
+        return getattr(FIF, self._ICONS.get(kind, "DOCUMENT"), FIF.DOCUMENT).icon()
 
     def paint(self, p, opt, index):
         rec = index.data(Qt.UserRole)
@@ -87,65 +100,76 @@ class _RowDelegate(QStyledItemDelegate):
             return
         p.save()
         p.setRenderHint(QPainter.Antialiasing)
-        r = opt.rect
-        hover = opt.state & QStyle.State_MouseOver
+        r = QRectF(opt.rect).adjusted(4, 2, -4, -2)
         sel = index.row() == self.win._sel
-        if sel or hover:
-            base = themeColor() if sel else QColor(128, 128, 128)
-            c = QColor(base)
-            c.setAlpha(52 if sel else 26)
-            p.setPen(Qt.NoPen)
-            p.drawRoundedRect(r.adjusted(4, 2, -4, -2), 7, 7)
-            p.setBrush(c)
-            p.drawRoundedRect(r.adjusted(4, 2, -4, -2), 7, 7)
-        # 图标位
-        tile = QRect(r.left() + 10, r.top() + 7, 32, 32)
-        thumb = self.win.thumb_of(rec)
-        if thumb is not None:
-            p.setPen(Qt.NoPen)
-            p.drawRoundedRect(tile, 6, 6)
-            p.setBrush(QColor(255, 255, 255, 16))
-            p.drawRoundedRect(tile, 6, 6)
-            pm = thumb.scaled(32, 32, Qt.KeepAspectRatio,
-                              Qt.SmoothTransformation)
-            p.drawPixmap(tile.x() + (32 - pm.width()) // 2,
-                         tile.y() + (32 - pm.height()) // 2, pm)
+        hover = bool(opt.state & QStyle.State_MouseOver)
+        path = QPainterPath()
+        path.addRoundedRect(r, 8, 8)
+        if sel:
+            c = QColor(ui_base.ACCENT)
+            c.setAlpha(22)
+            p.fillPath(path, c)
+            border = QColor(ui_base.ACCENT)
+            border.setAlpha(110)
+        elif hover:
+            p.fillPath(path, QColor(ui_base.SURFACE_HOVER))
+            border = QColor(ui_base.BORDER_HOVER)
         else:
-            p.setPen(QColor(255, 255, 255, 200) if isDarkTheme()
-                     else QColor(0, 0, 0, 170))
-            f = p.font()
-            f.setPointSize(13)
-            p.setFont(f)
-            p.drawText(tile, Qt.AlignCenter,
-                       GLYPH.get(rec["type"], "🧾"))
+            p.fillPath(path, QColor(ui_base.CARD_BG))
+            border = QColor(ui_base.LINE)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(border, 1))
+        p.drawPath(path)
+        if sel:
+            bar = QPainterPath()
+            bar.addRoundedRect(QRectF(r.left(), r.top(), 3, r.height()), 1.5, 1.5)
+            p.fillPath(bar, QColor(ui_base.ACCENT))
+
+        # 类型瓦片:有缩略图就贴缩略图(裁圆角),否则用矢量图标
+        tile = QRectF(r.left() + 8, r.center().y() - 15, 30, 30)
+        tp = QPainterPath()
+        tp.addRoundedRect(tile, 8, 8)
+        p.fillPath(tp, QColor(ui_base.BADGE_BG))
+        thumb = self.win.thumb_of(rec)
+        if thumb is not None and not thumb.isNull():
+            p.save()
+            p.setClipPath(tp)
+            pm = thumb.scaled(int(tile.width()), int(tile.height()),
+                              Qt.KeepAspectRatioByExpanding,
+                              Qt.SmoothTransformation)
+            p.drawPixmap(int(tile.center().x() - pm.width() / 2),
+                         int(tile.center().y() - pm.height() / 2), pm)
+            p.restore()
+        else:
+            ico = self._icon(rec.get("type"))
+            if not ico.isNull():
+                ico.paint(p, QRectF(tile.center().x() - 8,
+                                    tile.center().y() - 8, 16, 16).toRect())
+
         # 标题 + 元信息
-        dark = isDarkTheme()
-        title_area = QRect(tile.right() + 10, r.top() + 5,
-                           r.width() - tile.width() - 66, 20)
-        meta_area = QRect(title_area.x(), title_area.bottom() + 1,
-                          title_area.width(), 16)
-        tf = QFont()
-        tf.setPointSize(9)
+        fx = tile.right() + 10
+        fw = r.right() - fx - 34
+        tf = ui_base.font(10)
         p.setFont(tf)
-        p.setPen(QColor(255, 255, 255) if dark else QColor(20, 20, 20))
+        p.setPen(QColor(ui_base.TEXT))
         title = self.win.title_of(rec)
-        pinned = "📌 " if rec.get("pinned") else ""
-        p.drawText(title_area, Qt.AlignVCenter,
-                   pinned + QFontMetrics(tf).elidedText(
-                       title, Qt.ElideRight, title_area.width()))
-        mf = QFont()
-        mf.setPointSize(8)
+        if rec.get("pinned"):
+            title = "📌 " + title
+        p.drawText(QRectF(fx, r.top() + 7, fw, 18).toRect(),
+                   Qt.AlignVCenter,
+                   QFontMetrics(tf).elidedText(title, Qt.ElideRight, int(fw)))
+        mf = ui_base.font(8)
         p.setFont(mf)
-        p.setPen(QColor(160, 160, 160))
-        p.drawText(meta_area, Qt.AlignVCenter, self.win.meta_of(rec))
-        # 序号徽章(Ctrl+数字直选)
+        p.setPen(QColor(ui_base.TER))
+        p.drawText(QRectF(fx, r.top() + 25, fw, 14).toRect(), Qt.AlignVCenter,
+                   QFontMetrics(mf).elidedText(self.win.meta_of(rec),
+                                               Qt.ElideRight, int(fw)))
+        # 序号(Ctrl+数字直选)
         row = index.row()
         if row < 9:
-            nf = QFont()
-            nf.setPointSize(8)
-            p.setFont(nf)
-            p.setPen(QColor(150, 150, 150))
-            p.drawText(QRect(r.right() - 30, r.top(), 24, r.height()),
+            p.setFont(mf)
+            p.setPen(QColor(ui_base.ACCENT_TEXT if sel else ui_base.TER))
+            p.drawText(QRectF(r.right() - 28, r.top(), 20, r.height()).toRect(),
                        Qt.AlignVCenter | Qt.AlignRight, str(row + 1))
         p.restore()
 
@@ -173,8 +197,8 @@ class QuickPasteWindow(QWidget):
         self._arm_timer.timeout.connect(lambda: setattr(self, "_armed", True))
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 8, 10, 6)
-        lay.setSpacing(4)
+        lay.setContentsMargins(12, 10, 12, 12)
+        lay.setSpacing(6)
         self.search = SearchLineEdit(self)
         self.search.setPlaceholderText("搜索剪贴历史…")
         self.search.setClearButtonEnabled(True)
@@ -186,16 +210,38 @@ class QuickPasteWindow(QWidget):
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list.setSelectionMode(QAbstractItemView.NoSelection)
         self.list.setFocusPolicy(Qt.NoFocus)
+        # 细滚动条:默认样式在无边框浮层里是一根黑条,和暖纸底不搭
+        self.list.setStyleSheet(
+            "QListView { background: transparent; border: none; }"
+            "QScrollBar:vertical { background: transparent; width: 6px;"
+            " margin: 2px 0 2px 0; }"
+            "QScrollBar::handle:vertical { background: #DCD9D0;"
+            " border-radius: 3px; min-height: 24px; }"
+            "QScrollBar::handle:vertical:hover { background: #C9C5BA; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
+            " height: 0px; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {"
+            " background: transparent; }")
+        self.list.setViewportMargins(0, 2, 0, 2)
         self.list.clicked.connect(self._on_click)
         lay.addWidget(self.list, 1)
 
         self.footer = CaptionLabel("", self)
-        self.footer.setStyleSheet("color:#909090;")
+        self.footer.setMinimumHeight(18)
+        self.footer.setStyleSheet("color: %s;" % ui_base.TER)
         lay.addWidget(self.footer)
 
         self.model = QStandardItemModel(self)
         self.list.setModel(self.model)
         self._sync_footer()
+        self._apply_surface()
+
+    def _apply_surface(self):
+        """浮层底板:暖白 + 1px 边(无边框窗口靠 QSS 画边界,不做透明圆角)。"""
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(
+            "QuickPasteWindow { background: %s; border: 1px solid %s; }"
+            % (ui_base.BG, ui_base.LINE))
 
     # ---- 状态查询(供 delegate 回调) ----
     def thumb_of(self, rec):
