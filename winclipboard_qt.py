@@ -547,6 +547,17 @@ class HistoryPage(QWidget):
         self.brand_title.setStyleSheet("color: #181818; background: transparent;")
         brand.addWidget(self.brand_title)
         brand.addStretch(1)
+        # 右栏(预览/AI 处理)显隐入口:与 preview_visible 配置同义,
+        # 收起后整个右栏让位给左栏;页签切换是另一件事(set_detail_mode)
+        self.btn_detail = TransparentToolButton(FIF.VIEW, self)
+        self.btn_detail.setCheckable(True)
+        self.btn_detail.setFixedSize(32, 32)
+        self.btn_detail.setToolTip("显示 / 隐藏右侧详情(预览与 AI 处理)")
+        self.btn_detail.setChecked(bool(getattr(app, "cfg", {}).get(
+            "preview_visible", True)))
+        self.btn_detail.clicked.connect(
+            lambda: self.toggle_preview(self.btn_detail.isChecked()))
+        brand.addWidget(self.btn_detail)
         self.btn_pinboard = TransparentToolButton(FIF.PIN, self)
         self.btn_pinboard.setFixedSize(32, 32)
         self.btn_pinboard.setToolTip("打开图钉画布")
@@ -889,10 +900,11 @@ class HistoryPage(QWidget):
             self.detail_stack.addWidget(self.ai_panel)
         dock_lay.addWidget(self.detail_stack, 1)
         # 右栏显隐与页签选中态是两件事:显隐只看 preview_visible 配置
-        # (旧底部预览开关的延续,归 toggle_preview);页签默认停在「预览」,
-        # 切换归 set_detail_mode,不再拿 btn_preview 的选中态表达显隐。
+        # (旧底部预览开关的延续,归 toggle_preview/品牌行 btn_detail),
+        # 隐藏的是整个右栏——空壳页签头不占位,左栏自然占满;
+        # 页签默认停在「预览」,切换归 set_detail_mode。
         preview_on = bool(getattr(app, "cfg", {}).get("preview_visible", True))
-        self.detail_stack.setVisible(preview_on)
+        right_dock.setVisible(preview_on)
         self.btn_preview.setChecked(True)
 
         history_panel = QFrame()
@@ -903,6 +915,7 @@ class HistoryPage(QWidget):
         history_panel.setLayout(left)
         cols.addWidget(history_panel, 2)
         cols.addWidget(right_dock, 3)
+        self.right_dock = right_dock   # 显隐以整个右栏为单位(空壳页签头不占位)
         v.addLayout(cols, 1)
         v.addWidget(self.ctx_tray)
 
@@ -1613,13 +1626,15 @@ class HistoryPage(QWidget):
         add_records_to_pack(app, [rec])
 
     def toggle_preview(self, on):
-        """右栏内容(预览/处理页)整体显隐——旧底部预览条开关的兼容入口。
+        """右栏(预览/处理页)整体显隐——旧底部预览条开关的兼容入口。
 
-        只管 detail_stack 可见性与 preview_visible 配置持久化;
-        当前停在哪个页签归 set_detail_mode,两者互不混淆。
+        隐藏整个 right_dock(空壳页签头不占位,左栏占满),同步品牌行
+        btn_detail 选中态并持久化 preview_visible;当前停在哪个页签归
+        set_detail_mode,两者互不混淆。
         """
         on = bool(on)
-        self.detail_stack.setVisible(on)
+        self.right_dock.setVisible(on)
+        self.btn_detail.setChecked(on)
         self.app.cfg["preview_visible"] = on
         cm.save_config(self.app.cfg)
         if on:

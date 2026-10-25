@@ -94,6 +94,13 @@ class FakeApp(QObject):
     def show_services(self):
         pass
 
+    # HistoryPage 构造期直连的槽(连接时即取属性,FakeApp 必须提供)
+    def on_search(self, text=""):
+        pass
+
+    def paste_selected(self):
+        pass
+
 
 fake = FakeApp()
 
@@ -199,6 +206,36 @@ check("workflowui.list-refresh", wp.lst.count() == 1)
 we = wq.WorkflowEditorWindow(fake, fake.cfg["ai_workflows"][0], None)
 check("workflowui.editor", len(we._rows) == 1)
 we.close()
+
+# ---- 8. PR2 主界面交互收口:右栏 dock 级显隐 + 页签态 ----
+fake2 = FakeApp()
+hp = wq.HistoryPage(fake2)
+check("pr2.historypage-construct", hp is not None and not hp.grab().isNull())
+check("pr2.dock-default-visible", hp.right_dock.isVisibleTo(hp)
+      and hp.btn_detail.isChecked())
+hp.toggle_preview(False)
+check("pr2.dock-hidden-by-toggle",
+      not hp.right_dock.isVisibleTo(hp)
+      and not hp.btn_detail.isChecked()
+      and fake2.cfg.get("preview_visible") is False
+      and cm.load_config().get("preview_visible") is False)
+hp.set_detail_mode("process")   # 隐藏期间页签切换不应报错
+proc_idx = 1 if hp.ai_panel is not None else 0
+check("pr2.tabs-switch-while-hidden",
+      hp.detail_stack.currentIndex() == proc_idx
+      and hp.btn_process.isChecked() == (proc_idx == 1)
+      and not hp.btn_preview.isChecked())
+hp.toggle_preview(True)
+check("pr2.dock-restored", hp.right_dock.isVisibleTo(hp)
+      and hp.btn_detail.isChecked()
+      and hp.detail_stack.currentIndex() == proc_idx)   # 显隐不破坏页签态
+hp.btn_detail.click()           # 品牌行入口:点击即收起整个右栏
+check("pr2.detail-btn-collapses", not hp.right_dock.isVisibleTo(hp))
+hp.btn_detail.click()
+check("pr2.detail-btn-expands", hp.right_dock.isVisibleTo(hp))
+hp.set_detail_mode("preview")
+check("pr2.tabs-back-to-preview", hp.detail_stack.currentIndex() == 0
+      and hp.btn_preview.isChecked() and not hp.btn_process.isChecked())
 
 print()
 print("RESULT:", "PASS" if not FAILS else "FAILED: %s" % FAILS)
