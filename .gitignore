@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 python.txt.bak
 .mimosa/
+.workbuddy/
 _zcodework/
 mimosa_rules.bin
 _mimosa_rules.bin
