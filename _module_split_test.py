@@ -79,6 +79,9 @@ class FakeCore:
     def copy_record(self, rec):
         return True
 
+    def is_autostart(self):        # SettingsPage 构造时读取开机自启状态
+        return False
+
 
 class FakeApp(QObject):
     def __init__(self):
@@ -87,6 +90,7 @@ class FakeApp(QObject):
         self.core = FakeCore()
         self.icon = QIcon()
         self.win = QWidget()
+        self.private = []          # PrivatePage 构造/刷新按列表访问
         self._viewers = []
         self._thumbs = {}
         self._diffs = []
@@ -99,6 +103,9 @@ class FakeApp(QObject):
         pass
 
     def paste_selected(self):
+        pass
+
+    def show_shortcut_help(self):   # SettingsPage 快捷键说明入口
         pass
 
 
@@ -236,6 +243,22 @@ check("pr2.detail-btn-expands", hp.right_dock.isVisibleTo(hp))
 hp.set_detail_mode("preview")
 check("pr2.tabs-back-to-preview", hp.detail_stack.currentIndex() == 0
       and hp.btn_preview.isChecked() and not hp.btn_process.isChecked())
+
+# ---- 9. PR2 导航收敛:品牌菜单已删,入口不丢 ----
+check("pr2.brand-menu-removed",
+      not hasattr(hp, "_show_page_menu") and not hasattr(hp, "btn_brand")
+      and not hasattr(hp, "btn_settings") and not hasattr(hp, "_open_settings"))
+check("pr2.header-entries-kept",
+      hasattr(hp, "brand_icon") and hasattr(hp, "btn_detail")
+      and hasattr(hp, "btn_pinboard") and hasattr(hp, "_open_pinboard"))
+try:
+    pp = wq.PrivatePage(fake2)
+    sp2 = wq.SettingsPage(fake2)
+    check("pr2.pages-construct",
+          pp is not None and sp2 is not None
+          and not pp.grab().isNull() and not sp2.grab().isNull())
+except Exception as e:
+    check("pr2.pages-construct", False, "%s: %s" % (type(e).__name__, e))
 
 print()
 print("RESULT:", "PASS" if not FAILS else "FAILED: %s" % FAILS)

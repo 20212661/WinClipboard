@@ -533,15 +533,16 @@ class HistoryPage(QWidget):
         v.setContentsMargins(28, 18, 28, 18)
         v.setSpacing(12)
 
-        # ---- 参考图页头:品牌 / 图钉画布 / 设置。品牌图标同时保留四个功能页入口 ----
+        # ---- 页头:品牌标识 / 右栏显隐 / 图钉画布。功能页导航统一走左侧
+        # FluentWindow 导航(常驻 + 当前页高亮),品牌图标不再兼导航菜单 ----
         brand = QHBoxLayout()
         brand.setContentsMargins(4, 0, 4, 0)
         brand.setSpacing(10)
-        self.btn_brand = TransparentToolButton(FIF.PASTE, self)
-        self.btn_brand.setFixedSize(32, 32)
-        self.btn_brand.setToolTip("WinClipboard 功能导航")
-        self.btn_brand.clicked.connect(self._show_page_menu)
-        brand.addWidget(self.btn_brand)
+        self.brand_icon = QLabel(self)
+        self.brand_icon.setPixmap(FIF.PASTE.icon().pixmap(20, 20))
+        self.brand_icon.setFixedSize(32, 32)
+        self.brand_icon.setAlignment(Qt.AlignCenter)
+        brand.addWidget(self.brand_icon)
         self.brand_title = QLabel("WinClipboard")
         self.brand_title.setFont(body_font(17, QFont.Weight.Bold))
         self.brand_title.setStyleSheet("color: #181818; background: transparent;")
@@ -563,11 +564,6 @@ class HistoryPage(QWidget):
         self.btn_pinboard.setToolTip("打开图钉画布")
         self.btn_pinboard.clicked.connect(self._open_pinboard)
         brand.addWidget(self.btn_pinboard)
-        self.btn_settings = TransparentToolButton(FIF.SETTING, self)
-        self.btn_settings.setFixedSize(32, 32)
-        self.btn_settings.setToolTip("设置")
-        self.btn_settings.clicked.connect(self._open_settings)
-        brand.addWidget(self.btn_settings)
         v.addLayout(brand)
 
         # ---- 左右双栏:左 = 历史记录,右 = 预览 / AI 处理 ----
@@ -1593,27 +1589,8 @@ class HistoryPage(QWidget):
         InfoBar.success("已复制", "完整原始内容已复制,可切换到目标窗口粘贴", parent=self,
                         position=InfoBarPosition.TOP_RIGHT)
 
-    def _show_page_menu(self):
-        """品牌按钮菜单:四个功能页快捷导航(与左侧导航一致)。"""
-        menu = RoundMenu(parent=self)
-        # RoundMenu.addAction 只接受 QAction,传 str 首渲染即崩(qfluentwidgets 1.11.3 实测)
-        for icon, label, page in ((FIF.HISTORY, "剪贴板", "history_page"),
-                                  (FIF.ROBOT, "工作流", "workflow_page"),
-                                  (FIF.IOT, "私密区", "private_page"),
-                                  (FIF.SETTING, "设置", "settings_page")):
-            a = QAction(icon.icon(), label, menu)
-            menu.addAction(a)
-            a.triggered.connect(
-                lambda _=False, p=page:
-                    self.app.win.switchTo(getattr(self.app.win, p)))
-        menu.exec(self.btn_brand.mapToGlobal(
-            QPoint(0, self.btn_brand.height())))
-
     def _open_pinboard(self):
         self.app.pinboard.show_board()
-
-    def _open_settings(self):
-        self.app.win.switchTo(self.app.win.settings_page)
 
     def _pack_pv(self):
         """预览条「加入上下文包」:把选中条目快照进当前上下文包。"""
