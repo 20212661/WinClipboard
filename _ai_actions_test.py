@@ -560,6 +560,43 @@ check("sink.session-emits-after-destroy", not raised)
 s6.shutdown()
 check("sink.session-shutdown-final", s6.shutdown_flag and not s6.busy)
 
+# ============================================================
+# 9. PR3B-4:入口定义与 Registry 一致 + 六内置 E2E + 打包资源断言
+# ============================================================
+import ai_quick as _aq
+_p_t = _aq.build_prompt("translate", "MAT")
+check("unify.translate-registry-text",
+      "判断下面文本的语言" in _p_t and "MAT" in _p_t)
+check("unify.instruction-from-registry",
+      (_aq._registry_instruction("translate") or "") in _p_t)
+
+for _id in ("code_explain", "code_optimize", "code_comment",
+            "summarize", "translate", "to_markdown"):
+    _wf = ai.executor.resolve_workflow(fake.cfg, _id)
+    _rn = wq.WorkflowRunner(fake, _wf, "print(3)")
+    fake._ai_runners.append(_rn)
+    _rn._on_auto()
+    _dl = time.time() + 15
+    while time.time() < _dl and _rn.step_idx < 1:
+        app.processEvents()
+        time.sleep(0.02)
+    app.processEvents()
+    _r = _rn.results[0] if _rn.results else ""
+    check("unify.e2e.%s" % _id,
+          _rn.step_idx == 1 and "[model-a]" in _r and "print(3)" in _r,
+          "idx=%d r=%s" % (_rn.step_idx, _r[:60]))
+    _rn.close()
+    app.processEvents()
+
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "winclipboard.spec"), encoding="utf-8") as _f:
+    _spec = _f.read()
+check("unify.spec-datas-ai-actions",
+      '("ai/actions", "ai/actions")' in _spec and '"ai.registry"' in _spec)
+check("unify.actions-dir-shipped",
+      len(list(__import__("pathlib").Path(
+          ai.registry.BUILTIN_ACTIONS_DIR).glob("*.json"))) == 6)
+
 print()
 print("RESULT:", "PASS" if not FAILS else "FAILED: %s" % FAILS)
 sys.exit(0 if not FAILS else 1)
