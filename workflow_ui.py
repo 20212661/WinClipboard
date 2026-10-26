@@ -183,9 +183,14 @@ class AIStepBridge(QObject):
             self._runner._worker = None
         job = self._jobs.pop(rid, None)
         if job is not None:
-            job[1](ok, text)     # → runner._on_done(_dead 时运行台自忽略)
-        if self._runner._dead:
-            self._runner.close()  # 等待中的关闭在此收尾(原 _worker_finished)
+            job[1](ok, text)     # → runner._on_done:结果/runlog/游标推进
+        r = self._runner
+        if r._dead:
+            r.close()            # 等待中的关闭在此收尾
+        elif r._auto and r.step_idx < len(r.steps):
+            r._run_step()        # 自动模式链推(原 _worker_finished 职责)
+        else:
+            r._update_ui()
 
 
 class ModelWorker(QThread):
@@ -1319,6 +1324,7 @@ class WorkflowRunner(QWidget):
         self.cur = content                 # 链上当前内容(可能是人工编辑后的)
         self.results = []                  # 每步产出的文本
         self._worker = None
+        self._bridge = AIStepBridge(self)   # AI 步骤执行层(PR3B-3)
         self._waiting = None               # 等待输入面板(卡部件)
         self._wait_body = None
         self._wait_confirm = None
@@ -1632,14 +1638,11 @@ class WorkflowRunner(QWidget):
             return False
 
     def _start_ai(self, svc, prompt, on_done):
-        """起 AIWorker 线程;返回句柄(cancel 为尽力而为:HTTP 不可中断,
-        迟到结果由 Job.cancelled 丢弃)。"""
-        w = AIWorker(svc, prompt, self.step_idx)
-        w.done.connect(lambda _i, ok, text: on_done(ok, text))
-        w.finished.connect(self._worker_finished)
-        self._worker = w
-        w.start()
-        return w
+        """经 AIStepBridge(ai.session.ChatSession)后台执行;返回句柄
+        (cancel=停止接收迟到结果,HTTP 不可中断,槽位由迟到分发释放)。"""
+        h = self._bridge.start(self.step_idx, svc, prompt, on_done)
+        self._worker = h
+        return h
 
     def _run_step(self):
         if self._worker is not None or self._waiting is not None \
