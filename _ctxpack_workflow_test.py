@@ -243,10 +243,86 @@ class AskDialogTests(WfBase):
         with patch.object(cm, "ai_chat", slow_ai):
             dlg._send()
             dlg._cancel_ai()                             # 立即放弃
-            ok = self.spin(lambda: not dlg._zombies, timeout=3)
+            ok = self.spin(lambda: not dlg._session.pending, timeout=3)
             self.assertTrue(ok)
         self.assertIsNone(dlg._answer)                   # 迟到结果被丢弃
         self.assertTrue(dlg.btn_send.isEnabled())
+        dlg.close()
+
+    def test_duplicate_send_guard_while_busy(self):
+        # 会话执行规则与另两个 AI 面板一致:busy 期间二次发送零网络调用
+        self.seed_pack()
+        dlg = self.ask_dlg()
+        dlg.txt_q.setPlainText("问题")
+        dlg._gate = lambda prompt, svc: prompt
+        import threading as _th
+        gate = _th.Event()
+
+        def slow_ai(service, prompt):
+            self.ai_calls.append(prompt)
+            gate.wait(3)
+            return True, "答"
+        with patch.object(cm, "ai_chat", slow_ai):
+            dlg._send()
+            dlg._send()                                  # busy:应被拦
+            self.assertEqual(len(self.ai_calls), 1)
+            gate.set()
+            self.assertTrue(self.spin(lambda: not dlg._session.pending))
+        dlg.close()
+
+    def test_pack_change_during_flight_frozen(self):
+        # 发送后改篮不影响在途:拼装在发送时一次性快照
+        _svc, p = self.seed_pack()
+        dlg = self.ask_dlg()
+        dlg.txt_q.setPlainText("总结")
+        dlg._gate = lambda prompt, svc: prompt
+        import threading as _th
+        gate = _th.Event()
+        expected = assemble(p, question="总结", include_sensitive=True).text
+
+        def slow_ai(service, prompt):
+            self.ai_calls.append(prompt)
+            gate.wait(3)
+            return True, "答"
+        with patch.object(cm, "ai_chat", slow_ai):
+            dlg._send()
+            _svc.add_snapshot("text", "发送后又加的资料", captured_at=1.0)
+            gate.set()
+            self.assertTrue(self.spin(lambda: not dlg._session.pending))
+        self.assertEqual(self.ai_calls, [expected])      # 在途=发送时快照
+        dlg.close()
+
+    def test_close_during_flight_drops_late(self):
+        self.seed_pack()
+        dlg = self.ask_dlg()
+        dlg.txt_q.setPlainText("问题")
+        dlg._gate = lambda prompt, svc: prompt
+
+        def slow_ai(service, prompt):
+            self.ai_calls.append(prompt)
+            time.sleep(0.15)
+            return True, "关窗后的迟到"
+        with patch.object(cm, "ai_chat", slow_ai):
+            dlg._send()
+            dlg.close()                                  # closeEvent 内部取消
+            self.assertTrue(self.spin(lambda: not dlg._session.pending,
+                                      timeout=3))
+        self.assertIsNone(dlg._answer)
+        self.assertEqual(dlg.txt_result.toPlainText(), "")
+
+    def test_error_path_feedback(self):
+        self.seed_pack()
+        dlg = self.ask_dlg()
+        dlg.txt_q.setPlainText("问题")
+        dlg._gate = lambda prompt, svc: prompt
+        with patch.object(cm, "ai_chat",
+                          return_value=(False, "服务 401 未授权")), \
+                patch("ctxpack.ui_ask.InfoBar") as _ib:
+            dlg._send()
+            self.assertTrue(self.spin(lambda: not dlg._session.pending))
+            self.assertTrue(_ib.error.called)            # 失败如实提示
+        self.assertIsNone(dlg._answer)
+        self.assertTrue(dlg.btn_send.isEnabled())        # 按钮恢复可重试
         dlg.close()
 
 

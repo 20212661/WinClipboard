@@ -1,6 +1,5 @@
 """Quick AI: clipboard snapshot -> action wheel -> reusable result window."""
 import math
-import threading
 
 from PySide6.QtCore import QEvent, Qt, Signal, QPointF, QTimer
 from PySide6.QtGui import (QColor, QCursor, QFont, QPainter, QPainterPath, QPen,

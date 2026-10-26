@@ -68,15 +68,17 @@ class ResultSink:
         except Exception as exc:
             return False, cm.sanitize_log(str(exc))
 
-    def save_pack(self, answer):
+    def save_pack(self, answer, title=None):
         """加入当前上下文包(ctxpack 快照;敏感确认由 add_text_to_pack
-        内部处理)→ (ok, 错误摘录|空)。与旧实现一致:成败提示由该接口
-        内部的 toast 承担,此处不再二次提示。"""
+        内部处理)→ (ok, 错误摘录|空)。title 缺省用构造时的 pack_title,
+        可按调用方语境覆盖(如「带上下文提问」用问题前缀);与旧实现
+        一致:成败提示由该接口内部的 toast 承担,此处不再二次提示。"""
         if not answer:
             return False, EMPTY
         try:
             from ctxpack.ui_tray import add_text_to_pack
-            add_text_to_pack(self.app, answer, title=self._pack_title)
+            add_text_to_pack(self.app, answer,
+                             title=title if title is not None else self._pack_title)
             return True, ""
         except Exception as exc:
             return False, cm.sanitize_log(str(exc))

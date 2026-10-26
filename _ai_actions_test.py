@@ -531,6 +531,9 @@ with patch("ctxpack.ui_tray.add_text_to_pack",
     check("sink.pack-ok", k.save_pack("答案") == (True, ""))
     check("sink.pack-title", _pack_calls == [("答案", "单测回答")])
     check("sink.pack-empty", k.save_pack("") == (False, "empty"))
+    check("sink.pack-title-override",
+          k.save_pack("答案2", title="回答:自定义") == (True, "")
+          and _pack_calls[-1] == ("答案2", "回答:自定义"))
 
 # -- 出口绝不发起模型调用 --
 with patch.object(cm, "ai_chat") as _no_chat:

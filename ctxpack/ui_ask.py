@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """「带上下文提问」小对话框(非常驻窗口):问题 + 包选择 + 发送。
 
-发送链路(§7.4):assemble(含已放行敏感条目)→ 隐私闸(未确认则
-**无网络调用**)→ 复用 workflow_ui.AIWorker 的 API AI 后台调用与取消 →
-结果回主线程;提供 复制 / 存入历史 / 加入当前包。不新写 HTTP 客户端。"""
+发送链路(§7.4,PR3B-2B 起统一会话层):assemble(含已放行敏感条目)
+→ 隐私闸(未确认则**无网络调用**)→ ai.session.ChatSession 后台调用与
+取消(daemon 线程,迟到结果丢弃,HTTP 在途不可中断);结果出口走
+ai.sink.ResultSink(复制/存历史/入包)。拼装在发送时一次性完成——
+发送后改篮不影响在途请求(快照语义)。不新写 HTTP 客户端。"""
 import sys as _sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPlainTextEdit,
                                QVBoxLayout, QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox,
@@ -18,6 +20,8 @@ import ui_base
 from ui_base import *  # noqa: F401,F403
 ui_base.register(_sys.modules[__name__])
 
+from ai import session as _ai_session
+from ai.sink import ResultSink as _ResultSink
 from .budget import BudgetError
 from .ui_tray import _toast, tray_service
 from .assemble import assemble
@@ -26,11 +30,17 @@ from .assemble import assemble
 class AskContextDialog(QWidget):
     """带上下文一次性提问(P5 预留 thread 多轮,当前单轮)。"""
 
+    completed = Signal(int, bool, str)
+
     def __init__(self, app, parent=None):
         super().__init__(None)
         self.app = app
-        self._worker = None
-        self._zombies = []            # 已放弃但仍在跑的线程(保引用防析构崩溃)
+        # 与 QuickAIWindow/EmbeddedAIPanel 同一 ChatSession 纪律;
+        # QThread 僵尸列表不再需要(daemon 线程自清理)
+        self._session = _ai_session.ChatSession(self.completed.emit)
+        self.completed.connect(self._on_done, Qt.QueuedConnection)
+        self._pending = self._session.pending
+        self._sink = _ResultSink(app, pack_title="带上下文提问回答")
         self._answer = None
         self._sent_prompt = ""
         self.setWindowTitle("带上下文提问 · WinClipboard")
@@ -179,7 +189,7 @@ class AskContextDialog(QWidget):
     # ---- 发送链路:拼装 → 隐私闸 → AI 线程 ----
 
     def _send(self):
-        if self._worker is not None:
+        if not self._session.can_start():
             return
         question = self.txt_q.toPlainText().strip()
         if not question:
@@ -212,46 +222,32 @@ class AskContextDialog(QWidget):
         self._sent_prompt = gated
         self.btn_send.setEnabled(False)
         self.btn_cancel_ai.setVisible(True)
-        from workflow_ui import AIWorker        # 复用 API 调用与取消机制
-        self._worker = AIWorker(svc_ai, gated)
-        self._worker.done.connect(self._on_done)
-        self._worker.start()
+        # 快照语义:拼装在发送时一次性完成,此后改篮不影响在途请求
+        self._session.spawn(svc_ai, gated)
 
     def _default_service(self):
         services = self.app.cfg.get("ai_services") or []
         return services[0] if services else None
 
     def _gate(self, prompt, svc):
-        """隐私闸必经:命中敏感内容三选一(遮盖/原样/取消);取消=None。"""
-        hits, masked = cm.privacy_scan(prompt)
-        if not hits:
-            return prompt
+        """隐私闸必经:策略在 ai.session.authorize(取消=None 不发)。"""
+        return _ai_session.authorize(prompt, svc, self._confirm_gate)
+
+    def _confirm_gate(self, hits, masked, endpoint):
         from workflow_ui import PrivacyGateDialog
-        dlg = PrivacyGateDialog(self, hits, masked,
-                                str(svc.get("base_url") or ""))
+        dlg = PrivacyGateDialog(self, hits, masked, endpoint)
         dlg.exec()
-        if dlg.choice == "mask":
-            return masked
-        if dlg.choice == "raw":
-            return prompt
-        return None
+        return dlg.choice
 
     def _cancel_ai(self):
-        """放弃等待:迟到结果丢弃(与工作流 Job.cancel 同语义,HTTP 不可中断)。"""
-        if self._worker is not None:
-            self._zombies.append(self._worker)
-            self._worker = None
-            self.btn_send.setEnabled(True)
-            self.btn_cancel_ai.setVisible(False)
+        """放弃等待:迟到结果丢弃(会话核语义,HTTP 在途不可中断)。"""
+        self._session.stop_receiving()
+        self.btn_send.setEnabled(True)
+        self.btn_cancel_ai.setVisible(False)
 
-    def _on_done(self, _idx, ok, text):
-        sender = self.sender()
-        if sender in self._zombies:
-            self._zombies.remove(sender)     # 已放弃:只回收引用,不呈现
+    def _on_done(self, request_id, ok, text):
+        if not self._session.receive(request_id):
             return
-        if self._worker is not sender:
-            return
-        self._worker = None
         self.btn_send.setEnabled(True)
         self.btn_cancel_ai.setVisible(False)
         if not ok:
@@ -263,29 +259,30 @@ class AskContextDialog(QWidget):
         for b in (self.btn_copy, self.btn_to_history, self.btn_to_pack):
             b.setEnabled(True)
 
-    # ---- 结果动作 ----
+    # ---- 结果动作(统一 ResultSink) ----
 
     def _copy_answer(self):
         if not self._answer:
             return
-        from viewer import _copy_or_warn
-        _copy_or_warn(self.app, self._answer, self)
+        ok, _ = self._sink.copy(self._answer)
+        if not ok:
+            _toast(self.app, "error", "复制失败",
+                   "剪贴板写入失败,请重试", parent=self)
 
     def _save_to_history(self):
         if not self._answer:
             return
-        try:
-            self.app.core.add_item(("text", self._answer, {}, ""))
+        ok, err = self._sink.save_history(self._answer)
+        if ok:
             _toast(self.app, "success", "已存入历史", "回答已作为新条目入史")
-        except Exception as e:
-            _toast(self.app, "error", "存入历史失败", str(e)[:160], parent=self)
+        else:
+            _toast(self.app, "error", "存入历史失败", err[:160], parent=self)
 
     def _save_to_pack(self):
         if not self._answer:
             return
-        from .ui_tray import add_text_to_pack
-        add_text_to_pack(self.app, self._answer,
-                         title="回答:" + self.txt_q.toPlainText().strip()[:24])
+        self._sink.save_pack(self._answer,
+                             title="回答:" + self.txt_q.toPlainText().strip()[:24])
 
     def closeEvent(self, e):
         self._cancel_ai()
