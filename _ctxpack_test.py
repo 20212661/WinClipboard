@@ -289,6 +289,33 @@ class AssembleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             assemble(p, fmt="bogus")
 
+    def test_file_list_stale_path_annotated(self):
+        # PR2.5:file_list 在拼装(实际使用)时检测路径存在性——
+        # 失效行尾标注、进警告;包内快照 content 保持不变
+        import os
+        import tempfile
+        good = os.path.join(tempfile.mkdtemp(prefix="wclb_stale_"),
+                            "存在.txt")
+        with open(good, "w", encoding="utf-8") as f:
+            f.write("x")
+        bad = os.path.join(tempfile.mkdtemp(prefix="wclb_stale_"),
+                           "已删除.txt")
+        with open(bad, "w", encoding="utf-8") as f:
+            f.write("y")
+        os.remove(bad)                       # 入包后源文件消失
+        raw = good + "\n" + bad
+        p = fresh_pack()
+        p.items = [item("file_list", raw, title="文件列表")]
+        a = assemble(p)
+        self.assertIn(bad + " [文件已不存在]", a.text)      # 失效行有标注
+        self.assertNotIn(good + " [", a.text)               # 存在行不误伤
+        self.assertIn(bad, a.text)                           # 路径保留(标注非删除)
+        self.assertTrue(any("不存在" in w for w in a.warnings))
+        self.assertEqual(p.items[0].content, raw)            # 快照不变
+        # Markdown 格式同路径检测
+        self.assertIn("[文件已不存在]",
+                      assemble(p, fmt="markdown").text)
+
 
 class PerfTests(unittest.TestCase):
 

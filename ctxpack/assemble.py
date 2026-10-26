@@ -5,6 +5,7 @@ UI 的「预览拼装结果」与工作流运行共用本函数,保证所见即�
 安全默认:include_sensitive=False 时敏感条目不拼入(dropped 注明
 sensitive_blocked)——只有经过隐私闸确认的发送路径才允许传 True。
 """
+import os
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -151,6 +152,11 @@ def assemble(pack, budget: Optional[int] = None, fmt: str = FMT_XML,
     if sensitive_in:
         warnings.append("包含敏感标记条目 %d 条:%s(发送前必须经隐私确认)"
                         % (len(sensitive_in), "、".join(sensitive_in)))
+    for e in alloc.entries:
+        stale = _annotate_stale_paths(e)
+        if stale:
+            warnings.append("「%s」有 %d 个文件路径已不存在(已在拼装文本中标注)"
+                            % (e.item.title, stale))
 
     lines: List[str] = []
     if pack.preamble:
@@ -173,6 +179,27 @@ def assemble(pack, budget: Optional[int] = None, fmt: str = FMT_XML,
         dropped=list(alloc.dropped),
         warnings=warnings,
     )
+
+
+def _annotate_stale_paths(entry) -> int:
+    """file_list 条目在拼装(实际使用)时检测路径存在性,失效行尾加标注。
+
+    只改拼装副本 entry.content,不改包内条目 item.content——快照语义
+    保持不变(历史删除/磁盘清理不回写包)。返回失效路径数;
+    非 file_list 条目原样返回 0(其内容不是路径,不做存在性检测)。"""
+    if entry.item.kind != "file_list":
+        return 0
+    out, stale = [], 0
+    for ln in str(entry.content or "").splitlines():
+        p = ln.strip()
+        if p and not os.path.exists(p):
+            out.append("%s [文件已不存在]" % ln)
+            stale += 1
+        else:
+            out.append(ln)
+    if stale:
+        entry.content = "\n".join(out)
+    return stale
 
 
 def _find_item(items, iid):
