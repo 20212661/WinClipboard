@@ -229,6 +229,51 @@ class QuickAI(unittest.TestCase):
             self.w.wheel.grab().save(str(output / ("wheel_" + mode + ".png")))
 
 
+class RegistryUnificationTests(unittest.TestCase):
+    """PR3B-4:入口动作定义与 Registry 统一(同 id 同提示词;未覆盖走兼容路径)。"""
+
+    def test_translate_uses_registry_definition(self):
+        p = qa.build_prompt("translate", "hello")
+        self.assertIn("判断下面文本的语言", p)        # Registry 内置文案
+        self.assertNotIn("将下面的内容翻译为中文", p)  # 旧本地文案让位
+        self.assertIn("hello", p)
+
+    def test_summarize_uses_registry_definition(self):
+        p = qa.build_prompt("summarize", "内容")
+        self.assertIn("先一句话摘要", p)
+
+    def test_uncovered_actions_keep_local_text(self):
+        # Registry 未定义 explain/polish:保留本地文案(规则 6 兼容路径)
+        self.assertIn("用清楚易懂的中文解释", qa.build_prompt("explain", "x"))
+        self.assertIn("润色", qa.build_prompt("polish", "x"))
+
+    def test_user_override_wins(self):
+        import json as _json
+        from pathlib import Path
+        import ai as _ai
+        ud = Path(_sandbox.name) / "user_acts"
+        ud.mkdir(exist_ok=True)
+        (ud / "ov.json").write_text(_json.dumps(
+            {"id": "translate", "name": "翻译", "workflow": "translate"},
+            ensure_ascii=False), encoding="utf-8")
+        _ai.init(str(ud))
+        try:
+            cfg = {"ai_workflows": [{"name": "翻译", "steps": [
+                {"kind": "ai", "service": "", "prompt": "用户版翻译:{input}"}]}]}
+            p = qa.build_prompt("translate", "材料", cfg=cfg)
+            self.assertIn("用户版翻译", p)
+        finally:
+            _ai.init()      # 还原纯内置,不泄漏到其他用例
+
+    def test_icon_whitelist_and_fallback(self):
+        from qfluentwidgets import FluentIcon as _FIF
+        self.assertIs(qa.registry_action_icon({"icon": "DICTIONARY"}),
+                      _FIF.DICTIONARY)
+        self.assertIsNone(qa.registry_action_icon({"icon": "HACKED"}))
+        self.assertIsNone(qa.registry_action_icon({}))
+        self.assertIsNone(qa.registry_action_icon(None))
+
+
 class DualPanelConsistency(unittest.TestCase):
     """PR3B-1:QuickAIWindow 与 EmbeddedAIPanel 经同一 ChatSession 的行为一致性。"""
 
@@ -340,6 +385,27 @@ class DualPanelConsistency(unittest.TestCase):
             self.q.send()
             self.p.send()
             chat.assert_not_called()
+
+    def test_same_action_same_prompt_across_entries(self):
+        # PR3B-4 示范:translate 在快速窗(轮盘自动发送)与右栏生成
+        # 完全一致的 Prompt,且指令取自 Registry 定义
+        captured = []
+
+        def chat(svc, prompt):
+            captured.append(prompt)
+            return True, "答"
+
+        with patch.object(qa.cm, "ai_chat", side_effect=chat), \
+                patch.object(self.q, "_gate", side_effect=lambda p, s: p), \
+                patch.object(self.p, "_gate", side_effect=lambda p, s: p):
+            self.q.select_action("translate")   # 非 ask 带材料 → 自动发送
+            pump_until(self, lambda: len(captured) >= 1)
+            self.p._quick_btns["translate"].setChecked(True)
+            self.p.question.setPlainText("")    # 同输入:translate 无问题
+            self.p.send()
+            pump_until(self, lambda: len(captured) >= 2)
+        self.assertEqual(captured[0], captured[1])
+        self.assertIn("判断下面文本的语言", captured[0])
 
     def test_duplicate_done_never_fires_outlets(self):
         # 同一请求的结果回调重复到达:结果不重复执行出口(出口仅由用户点击触发)

@@ -37,13 +37,64 @@ def palette_color(value):
     return QColor(value)
 
 
-def build_prompt(action, text, question="", context=""):
+def _registry_instruction(action, cfg=None):
+    """同 id 的 Registry 动作 → 一次性指令文本(PR3B-4 统一定义源)。
+
+    取该动作解析出的工作流(用户 cfg 同名覆盖优先,回落内置)首个 AI
+    步骤模板,剥掉 {input}/{previous}/{origin}/{context} 占位——入口的
+    一次性拼装仍由 build_prompt 负责(防注入声明/材料/问题分节不变)。
+    Registry 未覆盖的入口动作返回 None,沿用本地 ACTIONS 文案。"""
+    try:
+        from ai.registry import get_registry
+        from ai.executor import resolve_workflow
+        defn = get_registry().get(action)
+        if defn is None:
+            return None
+        wf = resolve_workflow(cfg, defn.get("workflow"))
+        if not wf:
+            return None
+        tpl = ""
+        for st in wf.get("steps") or []:
+            kind = (st or {}).get("kind")
+            if kind in ("ai", None, ""):     # 旧配置缺 kind 视为 ai
+                tpl = str(st.get("prompt") or "")
+                break
+        if not tpl:
+            return None
+        for ph in ("{input}", "{previous}", "{origin}", "{context}"):
+            tpl = tpl.replace(ph, "")
+        return tpl.rstrip(" \t\r\n:：") or None
+    except Exception:
+        return None      # Registry 层任何异常都不拦入口,退回本地文案
+
+
+# Registry 动作图标的 UI 白名单:JSON 的 icon 字段是外部输入,不得直接
+# getattr 取 FluentIcon 属性(动态属性风险);白名单外一律回退 None。
+AI_ACTION_ICONS = {
+    "EMBED": FIF.EMBED,
+    "DEVELOPER_TOOLS": FIF.DEVELOPER_TOOLS,
+    "CODE": FIF.CODE,
+    "BOOK_SHELF": FIF.BOOK_SHELF,
+    "DICTIONARY": FIF.DICTIONARY,
+    "LABEL": FIF.LABEL,
+}
+
+
+def registry_action_icon(defn):
+    """Registry 动作定义 → 白名单内 FluentIcon;未知/缺失安全回退 None。"""
+    return AI_ACTION_ICONS.get(str((defn or {}).get("icon") or ""))
+
+
+def build_prompt(action, text, question="", context="", cfg=None):
     """One pass: inserted material is literal, never a prompt template."""
     if action == "context":      # 旧入口键归一到合并后的「提问」
         action = "ask"
     instruction = next((x[2] for x in ACTIONS if x[0] == action), None)
     if instruction is None:
         raise ValueError("未知 AI 动作")
+    reg = _registry_instruction(action, cfg)
+    if reg is not None:
+        instruction = reg        # 同 id 动作:Registry 定义优先(统一定义源)
     if len(text) > MAX_INPUT_CHARS:
         raise ValueError("材料超过 64K 字符，请先选取需要处理的部分")
     if action == "ask" and not question.strip():
@@ -399,7 +450,8 @@ class QuickAIWindow(QWidget):
             context = self._assemble_context_or_none()
             prompt = build_prompt(ACTIONS[self.action.currentIndex()][0],
                                   self.input.toPlainText(),
-                                  self.question.toPlainText(), context)
+                                  self.question.toPlainText(), context,
+                                  cfg=getattr(self.app, "cfg", None))
         except Exception as exc:
             self._notice(str(exc))
             return
@@ -423,7 +475,8 @@ class QuickAIWindow(QWidget):
         try:
             context = self._assemble_context_or_none()
             prompt = build_prompt(ACTIONS[self.action.currentIndex()][0], self.input.toPlainText(),
-                                  self.question.toPlainText(), context)
+                                  self.question.toPlainText(), context,
+                                  cfg=getattr(self.app, "cfg", None))
             prompt = self._gate(prompt, service)
             if prompt is None:
                 self._notice("已取消发送")
@@ -932,7 +985,8 @@ class EmbeddedAIPanel(QWidget):
             question = self.question.toPlainText()
             if action == "ask" and not question.strip():
                 action = "explain"
-            prompt = build_prompt(action, self._material, question, context)
+            prompt = build_prompt(action, self._material, question, context,
+                                  cfg=getattr(self.app, "cfg", None))
         except Exception as exc:
             self._notice(str(exc))
             return
@@ -960,7 +1014,8 @@ class EmbeddedAIPanel(QWidget):
         try:
             context = self._assemble_context_or_none()
             prompt = build_prompt(self._current_action(), self._material,
-                                  self.question.toPlainText(), context)
+                                  self.question.toPlainText(), context,
+                                  cfg=getattr(self.app, "cfg", None))
             prompt = self._gate(prompt, service)
             if prompt is None:
                 self._notice("已取消发送")
