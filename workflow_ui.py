@@ -58,6 +58,7 @@ import clipboard_manager as cm
 import workflow_steps as wfs
 import workflow_runlog as wrl
 from perf_probe import PerfSpan, since, stamp
+from ai import session as _ai_session
 
 import ui_base
 from ui_base import *  # noqa: F401,F403
@@ -122,6 +123,69 @@ class PrivacyGateDialog(MessageBoxBase):
         self.accept()
 
 
+
+
+class _AIRequestHandle:
+    """Job.cancel 契约句柄:停止接收该请求的结果(迟到即弃)。
+
+    isRunning() 与旧 AIWorker(QThread)同名同义:请求仍在途(在
+    session.pending 中)——closeEvent 据此决定等待收尾还是立即关闭。"""
+
+    def __init__(self, bridge, rid):
+        self._bridge = bridge
+        self._rid = rid
+
+    def cancel(self):
+        self._bridge.cancel(self._rid)
+
+    def isRunning(self):
+        return self._rid in self._bridge._session.pending
+
+
+class AIStepBridge(QObject):
+    """AI 步骤执行适配器(PR3B-3):WorkflowRunner ←组合→ ai.session.ChatSession。
+
+    线程边界:session 的 daemon 线程经 arrived 信号(Qt queued)切回运行台
+    主线程后分发;运行台销毁后连接自动断开,迟到的 emit 由 session 的
+    RuntimeError 守卫吞掉,不再触碰已销毁 UI。槽位(_worker)清空与
+    _dead 收尾在此完成,时序等价旧 QThread 的 finished 信号。
+
+    隐私授权不在本层:AiStep 契约已过运行台 privacy_gate(主线程三选一),
+    传入 spawn 的 prompt 即最终发送全文——Session 不做二次授权/遮盖。"""
+
+    arrived = Signal(int, bool, str)          # (request_id, ok, text)
+
+    def __init__(self, runner, chat=None):
+        super().__init__(runner)
+        self._runner = runner
+        self._session = _ai_session.ChatSession(self.arrived.emit, chat=chat)
+        self._jobs = {}                       # rid -> (step_idx, on_done)
+        self.arrived.connect(self._dispatch)  # 工作线程 → 主线程(queued)
+
+    def start(self, step_idx, svc, prompt, on_done):
+        """登记并后台执行(prompt 按值冻结);返回可取消句柄。"""
+        rid = self._session.spawn(svc, prompt)
+        self._jobs[rid] = (step_idx, on_done)
+        return _AIRequestHandle(self, rid)
+
+    def cancel(self, rid):
+        """契约取消:登记摘除,迟到结果将被丢弃。HTTP 在途不可中断,
+        槽位与在途集合由迟到分发时释放(与旧 QThread finished 同步序,
+        期间保持 busy,避免取消后立刻重发造成并发)。"""
+        self._jobs.pop(rid, None)
+
+    def _dispatch(self, rid, ok, text):
+        self._session.pending.discard(rid)
+        if self._session.active == rid:
+            self._session.active = None
+        w = self._runner._worker
+        if isinstance(w, _AIRequestHandle) and w._rid == rid:
+            self._runner._worker = None
+        job = self._jobs.pop(rid, None)
+        if job is not None:
+            job[1](ok, text)     # → runner._on_done(_dead 时运行台自忽略)
+        if self._runner._dead:
+            self._runner.close()  # 等待中的关闭在此收尾(原 _worker_finished)
 
 
 class ModelWorker(QThread):

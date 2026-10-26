@@ -560,6 +560,85 @@ res = wfs.WebStep(prompt="卡号 4111111111111111 查一下").run(ctx)
 check("web.sensitive-cancel-no-copy", isinstance(res, wfs.Cancelled)
       and _copied == [])
 
+# ---- AIStepBridge 适配器(PR3B-3 提交 A:runner ←组合→ ChatSession) ----
+import threading as _th_bridge
+from PySide6.QtCore import QObject as _BridgeObj
+from workflow_ui import AIStepBridge, _AIRequestHandle
+
+_fr = _BridgeObj()
+_fr._worker = None
+_fr._dead = False
+_fr.closes = 0
+_fr.close = lambda: setattr(_fr, "closes", _fr.closes + 1)
+
+
+def _bridge_pump(cond, timeout=3.0):
+    end = time.time() + timeout
+    while not cond() and time.time() < end:
+        app.processEvents()
+        time.sleep(0.01)
+    return cond()
+
+
+def _mk_bridge(chat):
+    return AIStepBridge(_fr, chat=chat)
+
+
+# 1) 正常投递:on_done 一次、槽位清空、pending 归零、不触发 dead 收尾
+_gate_b = _th_bridge.Event()
+_seen = []
+
+
+def _chat_block(svc, prompt):
+    _seen.append(prompt)
+    _gate_b.wait(3)
+    return True, "答:" + prompt
+
+
+br = _mk_bridge(_chat_block)
+rec = []
+h = br.start(0, {"name": "S"}, "P1", lambda ok, t: rec.append((ok, t)))
+_fr._worker = h
+check("bridge.slot-busy", isinstance(h, _AIRequestHandle) and h.isRunning()
+      and _fr._worker is h and not br._session.can_start())
+_gate_b.set()
+check("bridge.deliver", _bridge_pump(lambda: not br._session.pending)
+      and rec == [(True, "答:P1")])
+check("bridge.slot-cleared", _fr._worker is None and not h.isRunning()
+      and _fr.closes == 0)
+check("bridge.prompt-frozen", _seen == ["P1"])
+
+# 2) 契约取消:登记摘除,迟到结果被丢弃;槽位由迟到分发释放(时序同旧 QThread)
+_gate_c = _th_bridge.Event()
+br2 = _mk_bridge(lambda svc, prompt: (_gate_c.wait(3), (True, "迟到"))[1])
+rec2 = []
+h2 = br2.start(1, {"name": "S"}, "P2", lambda ok, t: rec2.append((ok, t)))
+_fr._worker = h2
+h2.cancel()
+check("bridge.cancel-keeps-inflight-busy", h2.isRunning()
+      and not br2._session.can_start())   # HTTP 在途期间不放开重发
+_gate_c.set()
+check("bridge.late-dropped", _bridge_pump(lambda: not h2.isRunning())
+      and rec2 == [] and _fr._worker is None)
+
+# 3) 重复迟到分发:同 rid 再到一次,零副作用
+br.arrived.emit(1, True, "重复")           # rid=1 已在测试 1 分发过
+app.processEvents()
+check("bridge.duplicate-late-noop", rec == [(True, "答:P1")]
+      and not br._session.pending and _fr._worker is None)
+
+# 4) _dead 收尾:结果到达时若运行台在等待关闭,投递后 close()
+_gate_d = _th_bridge.Event()
+br3 = _mk_bridge(lambda svc, prompt: (_gate_d.wait(3), (True, "终"))[1])
+rec3 = []
+h3 = br3.start(2, {"name": "S"}, "P3", lambda ok, t: rec3.append((ok, t)))
+_fr._worker = h3
+_fr._dead = True                          # closeEvent 等待中
+_gate_d.set()
+check("bridge.dead-closes", _bridge_pump(lambda: _fr.closes >= 1)
+      and rec3 == [(True, "终")])
+_fr._dead = False
+
 print()
 print("RESULT:", "PASS" if not FAILS else "FAILED: %s" % FAILS)
 sys.exit(0 if not FAILS else 1)
