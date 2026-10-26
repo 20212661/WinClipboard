@@ -360,6 +360,113 @@ check("e2e.request-auto-ran",
 runner2.close()
 app.processEvents()
 
+# ============================================================
+# 7. ChatSession 会话核(PR3B-1)
+# ============================================================
+import threading as _th
+from ai import session as _ses
+
+# -- 生命周期:can_start/spawn/receive/迟到丢弃/停止接收/shutdown --
+got = []
+s = _ses.ChatSession(lambda rid, ok, text: got.append((rid, ok, text)))
+check("session.idle", not s.busy and s.can_start() and not s.shutdown_flag)
+
+blocked = _th.Event()
+
+
+def _slow_chat(svc, prompt):
+    blocked.wait(5)
+    return True, "slow:" + prompt
+
+
+s2 = _ses.ChatSession(lambda rid, ok, text: got.append((rid, ok, text)),
+                      chat=_slow_chat)
+rid1 = s2.spawn({"name": "X"}, "p1")
+check("session.spawn-busy", s2.busy and rid1 in s2.pending
+      and not s2.can_start())
+rid2 = s2.spawn({"name": "X"}, "p2")     # 第二条在途(上限 2)
+check("session.second-inflight", len(s2.pending) == 2 and not s2.can_start())
+s2.stop_receiving()                       # 停止接收:active 清空,迟到丢弃
+check("session.stop-receiving", not s2.busy and rid2 in s2.pending)
+blocked.set()
+_deadline = time.time() + 5
+while time.time() < _deadline and len(got) < 2:
+    time.sleep(0.02)
+check("session.late-dropped", len(got) == 2
+      and not s2.receive(got[0][0]) and not s2.receive(got[1][0])
+      and not s2.pending, str(got))
+
+s3 = _ses.ChatSession(lambda *a: None)
+r = s3.spawn({}, "p")
+s3.shutdown()
+check("session.shutdown-drops", not s3.receive(r) and s3.shutdown_flag
+      and not s3.busy and not s3.can_start())
+
+s4 = _ses.ChatSession(lambda *a: None)
+r4 = s4.spawn({}, "p")
+check("session.receive-presents", s4.receive(r4) and not s4.busy
+      and s4.can_start())
+
+# -- chat 异常 → (False, sanitize) 不炸线程 --
+def _boom(svc, prompt):
+    raise RuntimeError("连接失败 secret-token-12345678")
+
+s5 = _ses.ChatSession(lambda rid, ok, text: got.append((rid, ok, text)),
+                      chat=_boom)
+s5.spawn({}, "x")
+_d = time.time() + 5
+while time.time() < _d and not got:
+    time.sleep(0.02)
+check("session.chat-exception", got and got[-1][1] is False
+      and isinstance(got[-1][2], str) and got[-1][2], str(got[-1]))
+
+# -- authorize:无命中不弹窗;mask/raw/cancel 三义 --
+_confirm_calls = []
+def _confirm(choice):
+    def f(hits, masked, endpoint):
+        _confirm_calls.append((hits, endpoint))
+        return choice
+    return f
+
+_card = "卡号 4111111111111111 查一下"
+check("session.auth-no-hits",
+      _ses.authorize("普通内容", {"base_url": "http://u"}, _confirm("mask"))
+      == "普通内容" and not _confirm_calls)
+check("session.auth-mask",
+      _ses.authorize(_card, {"base_url": "http://u"}, _confirm("mask"))
+      != _card and _confirm_calls)
+check("session.auth-raw",
+      _ses.authorize(_card, {"base_url": "http://u"}, _confirm("raw"))
+      == _card)
+check("session.auth-cancel",
+      _ses.authorize(_card, {"base_url": "http://u"}, _confirm("cancel"))
+      is None)
+
+# -- resolve_service:副本隔离/越界 --
+_svcs = [{"name": "A", "api_key": "k"}]
+_r = _ses.resolve_service(_svcs, 0)
+_r["name"] = "改写"
+check("session.resolve-copy", _svcs[0]["name"] == "A"
+      and _ses.resolve_service(_svcs, 5) is None
+      and _ses.resolve_service([], 0) is None)
+
+# -- assemble_context:停用/空包报错/警告透传/快照文本 --
+check("session.ctx-disabled", _ses.assemble_context(False, lambda: None) == "")
+try:
+    _ses.assemble_context(True, lambda: None)
+    check("session.ctx-empty-error", False)
+except ValueError as e:
+    check("session.ctx-empty-error", "没有可用" in str(e))
+_warns = []
+class _A:
+    ok = True
+    text = "拼装快照"
+    warnings = ["w1", "w2"]
+check("session.ctx-text",
+      _ses.assemble_context(True, lambda: _A(),
+                            lambda w: _warns.extend(w)) == "拼装快照")
+check("session.ctx-warn-notify", _warns == ["w1", "w2"])
+
 print()
 print("RESULT:", "PASS" if not FAILS else "FAILED: %s" % FAILS)
 sys.exit(0 if not FAILS else 1)

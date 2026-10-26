@@ -12,6 +12,7 @@ from qfluentwidgets import (BodyLabel, CaptionLabel, StrongBodyLabel, PlainTextE
                             InfoBar, InfoBarPosition, themeColor, FluentIcon as FIF)
 import clipboard_manager as cm
 import ui_base
+from ai import session as _ai_session
 
 ACTIONS = (
     ("explain", "解释", "用清楚易懂的中文解释下面的内容。遇到代码或报错时说明原因和可行的处理办法。"),
@@ -81,23 +82,6 @@ def place_near_cursor(window):
     x = max(rect.left(), min(point.x() - window.width() // 2, rect.right() - window.width() + 1))
     y = max(rect.top(), min(point.y() - window.height() // 2, rect.bottom() - window.height() + 1))
     window.move(x, y)
-
-
-def spawn_chat(emit, service, prompt, request_id):
-    """后台线程调用 AI 服务;结果经 emit(request_id, ok, text) 排队回 UI 线程。
-
-    QuickAIWindow 与主界面内嵌 AI 工作台共用同一条发送纪律:请求线程为
-    daemon、最多两条在途、QApplication 已销毁时静默丢弃(RuntimeError)。"""
-    def run():
-        try:
-            ok, text = cm.ai_chat(service, prompt)
-        except Exception as exc:
-            ok, text = False, cm.sanitize_log(str(exc))
-        try:
-            emit(request_id, ok, text)
-        except RuntimeError:
-            pass  # QApplication has already been destroyed.
-    threading.Thread(target=run, name="quick-ai", daemon=True).start()
 
 
 class AIActionWheel(QWidget):
@@ -193,10 +177,10 @@ class QuickAIWindow(QWidget):
     def __init__(self, app):
         super().__init__(None, Qt.Tool | Qt.WindowStaysOnTopHint)
         self.app = app
-        self._serial = 0
-        self._active = None
-        self._pending = set()
-        self._shutdown = False
+        # 会话执行核(PR3B-1):串号/在途/迟到丢弃/线程纪律在 ai.session,
+        # 面板经属性转发保持 _active/_pending/_shutdown 外观不变
+        self._session = _ai_session.ChatSession(self.completed.emit)
+        self._pending = self._session.pending
         self._answer = ""
         self._target = 0
         QShortcut(QKeySequence("Escape"), self, activated=self.close)
@@ -371,26 +355,40 @@ class QuickAIWindow(QWidget):
             self.question.setFocus()
 
     def _gate(self, prompt, service):
-        hits, masked = cm.privacy_scan(prompt)
-        if not hits:
-            return prompt
+        """隐私授权:策略在 ai.session.authorize(扫描+三选一语义),
+        确认弹窗由本方法提供;测试可整体打桩替换。"""
+        return _ai_session.authorize(prompt, service, self._confirm_gate)
+
+    def _confirm_gate(self, hits, masked, endpoint):
         from workflow_ui import PrivacyGateDialog
-        dialog = PrivacyGateDialog(self, hits, masked, service.get("base_url") or "")
+        dialog = PrivacyGateDialog(self, hits, masked, endpoint)
         dialog.exec()
-        return masked if dialog.choice == "mask" else prompt if dialog.choice == "raw" else None
+        return dialog.choice
 
     def _assemble_context_or_none(self):
-        """勾选「附加上下文包」时拼装;失败抛 ValueError(send/copy 共用)。"""
-        if not self.use_context.isChecked():
-            return ""
+        """勾选「附加上下文包」时拼装快照;失败抛 ValueError(send/copy 共用)。"""
         from ctxpack.ui_tray import tray_service
-        assembled = tray_service(self.app).assemble_active(include_sensitive=True)
-        if assembled is None or not assembled.ok:
-            raise ValueError("没有可用的当前上下文包，请先添加资料或取消附加")
-        if assembled.warnings:
-            InfoBar.warning("上下文拼装提示", "；".join(assembled.warnings[:3]),
-                            parent=self, duration=6000)
-        return assembled.text
+        return _ai_session.assemble_context(
+            self.use_context.isChecked(),
+            lambda: tray_service(self.app).assemble_active(include_sensitive=True),
+            self._warn_context)
+
+    def _warn_context(self, warnings):
+        InfoBar.warning("上下文拼装提示", "；".join(warnings),
+                        parent=self, duration=6000)
+
+    # 会话状态转发:权威在 self._session,外观保持旧属性名(测试/调用方兼容)
+    @property
+    def _active(self):
+        return self._session.active
+
+    @_active.setter
+    def _active(self, value):
+        self._session.active = value
+
+    @property
+    def _shutdown(self):
+        return self._session.shutdown_flag
 
     def copy_prompt(self):
         """免 Key 复制:材料 + 上下文包 + 问题 → 完整 Prompt(隐私闸确认后
@@ -413,13 +411,13 @@ class QuickAIWindow(QWidget):
             self._notice("已复制完整 Prompt，可粘贴给任意 AI 工具")
 
     def send(self):
-        if self._shutdown or not self.isVisible() or self._active is not None or len(self._pending) >= 2:
+        if self._shutdown or not self.isVisible() or not self._session.can_start():
             return
-        index = self.service.currentIndex()
-        if not 0 <= index < len(getattr(self, "_services", [])):
+        service = _ai_session.resolve_service(
+            getattr(self, "_services", []), self.service.currentIndex())
+        if service is None:
             self._notice("请先在「AI 服务」页配置服务")
             return
-        service = dict(self._services[index])
         try:
             context = self._assemble_context_or_none()
             prompt = build_prompt(ACTIONS[self.action.currentIndex()][0], self.input.toPlainText(),
@@ -431,20 +429,15 @@ class QuickAIWindow(QWidget):
         except Exception as exc:
             self._notice(str(exc))
             return
-        self._serial += 1
-        request_id = self._serial
-        self._active = request_id
-        self._pending.add(request_id)
         self._answer = ""
         self.output.clear()
         self._notice("正在生成…")
         self._sync_buttons()
-        spawn_chat(self.completed.emit, service, prompt, request_id)
+        # 会话核冻结本次输入(prompt 按值入线程):此后切卡片/改篮不影响在途
+        self._session.spawn(service, prompt)
 
     def _on_done(self, request_id, ok, text):
-        self._pending.discard(request_id)
-        if request_id == self._active and not self._shutdown:
-            self._active = None
+        if self._session.receive(request_id):
             if ok:
                 self._answer = text
                 self.output.setPlainText(text)
@@ -455,7 +448,8 @@ class QuickAIWindow(QWidget):
         self._sync_buttons()
 
     def cancel(self):
-        self._active = None
+        # 停止接收(UI 丢弃迟到结果);HTTP 在途请求不会被中断
+        self._session.stop_receiving()
         self._notice("已停止等待，服务端请求可能仍在处理；迟到回答不会显示")
         self._sync_buttons()
 
@@ -502,8 +496,7 @@ class QuickAIWindow(QWidget):
             super().keyPressEvent(event)
 
     def shutdown(self):
-        self._shutdown = True
-        self.cancel()
+        self._session.shutdown()
         self.wheel.hide()
         self.hide()
 
