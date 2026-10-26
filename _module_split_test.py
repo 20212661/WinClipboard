@@ -190,7 +190,7 @@ for nm in ("ViewerWindow", "ImageViewerWindow", "DiffWindow",
            "icon_tile", "Badge", "ensure_onscreen", "rounded_pixmap",
            "ServicesPage", "WorkflowPage", "WorkflowEditorWindow",
            "WorkflowRunner", "WorkflowRunInspector", "ServiceEditorDialog",
-           "ProviderCard", "PrivacyGateDialog", "AIWorker", "ModelWorker"):
+           "ProviderCard", "PrivacyGateDialog", "PingSession", "ModelWorker"):
     check("compat.%s" % nm, hasattr(wq, nm))
 
 # ---- 7. workflow_ui 拆分:同一对象 + 构造 + 调色板同步 ----

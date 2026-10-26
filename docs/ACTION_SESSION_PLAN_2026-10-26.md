@@ -59,6 +59,8 @@ class ResultSink:                                     # 结果出口单实现(�
 
 ## 四、风险与守则
 
+> **实施状态(2026-10-26 更新)**:3B-1 ✅(017dff1/7430ffc,双面板迁 ChatSession+面板信号断链修复)→ 3B-2 ✅(0242b66/f8b394f ResultSink 三调用方统一;6320712 AskContextDialog 接入)→ **3B-3 ✅ 验收通过**(30708af AIStepBridge 适配器+8 单测 → 16bbb81 WorkflowRunner._start_ai 接线 → PingSession 替换 AIWorker/移除 _worker_finished,wq 兼容重导出同步;四条会话路径全部统一到 ai.session.ChatSession,cm.ai_chat 唯一出口;门禁 17/18,perf-semantics 仅 E 项环境抖动,双文件 A/B 于本轮起点代码复现同款失败=与本轮无关)。剩余 3B-4(UI 入口按 Registry 迁移+图标白名单)未启动。
+
 1. **不动的**:cm.ai_chat、粘贴事务、剪贴板监听、加密、数据库、WorkflowRunner 编排层。
 2. **线程模型切换风险**(daemon Thread → QThread 统一):quick-ai 现有"QApplication 已销毁时静默丢弃 RuntimeError"的纪律必须保留(session 内置,不依赖调用方)。
 3. **隐私语义冻结**:取消=不发送不复制(PRB2.5 已固化);session.authorize 是唯一授权点,任何路径不得绕过(含 WebStep 的剪贴板路径)。

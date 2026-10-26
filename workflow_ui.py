@@ -2,7 +2,7 @@
 """AI 工作流 UI 子系统(阶段 8 拆分,自 winclipboard_qt.py 迁出,行为不变):
 服务管理(ServiceEditor/ProviderCard/ServicesPage)、工作流编辑/管理/运行
 (WorkflowEditorWindow/WorkflowPage/WorkflowRunner)、运行记录查看
-(WorkflowRunInspector)、AIWorker/ModelWorker 后台线程与隐私门对话框。
+(WorkflowRunInspector)、AIStepBridge/PingSession 会话执行(ai.session.ChatSession)、ModelWorker 模型发现与隐私门对话框。
 数据层:workflow_steps(步骤契约)/ workflow_runlog(运行记录)/ cm(AI 调用)。
 """
 import os
@@ -69,19 +69,18 @@ import sys as _sys
 ui_base.register(_sys.modules[__name__])   # 调色板随主题同步本模块全局
 
 
-class AIWorker(QThread):
-    """后台调用 AI(阻塞的 cm.ai_chat 放到线程里,不冻结 UI)。"""
-    done = Signal(int, bool, str)     # step_idx, ok, text
+class PingSession(QObject):
+    """服务连通性测速的会话执行核(PR3B-3):daemon 线程 + queued 信号
+    回主线程,替代原 AIWorker(QThread)的测速调用。done 的首参数为
+    request_id(旧为恒 -1 的 step_idx,回调侧均不使用)。"""
+    done = Signal(int, bool, str)
 
-    def __init__(self, service, prompt, step_idx=-1, parent=None):
+    def __init__(self, parent):
         super().__init__(parent)
-        self.service = service
-        self.prompt = prompt
-        self.step_idx = step_idx
+        self._session = _ai_session.ChatSession(self.done.emit)
 
-    def run(self):
-        ok, text = cm.ai_chat(self.service, self.prompt)
-        self.done.emit(self.step_idx, ok, text)
+    def start(self, svc, prompt):
+        self._session.spawn(svc, prompt)
 
 
 class PrivacyGateDialog(MessageBoxBase):
@@ -408,7 +407,7 @@ class ServiceEditorDialog(MessageBoxBase):
             return
         self.btn_test.setEnabled(False)
         self.btn_test.setText("测试中…")
-        self._chat_worker = AIWorker(svc, "请只回复两个字母:OK", -1, self)
+        self._chat_worker = PingSession(self)
 
         def on_done(_idx, ok, text):
             self.btn_test.setEnabled(True)
@@ -422,7 +421,7 @@ class ServiceEditorDialog(MessageBoxBase):
                               position=InfoBarPosition.TOP_RIGHT, duration=-1)
 
         self._chat_worker.done.connect(on_done)
-        self._chat_worker.start()
+        self._chat_worker.start(svc, "请只回复两个字母:OK")
 
     def validate(self):
         provider = self.cmb_provider.currentText()
@@ -640,20 +639,20 @@ class ServicesPage(QWidget):
                 pass
 
         set_test_btn("测试中…", False)
-        self._test_worker = AIWorker(svc, "请只回复两个字母:OK", -1, self)
+        self._test_worker = PingSession(self)
 
         def on_done(_idx, ok, text):
             set_test_btn("测试", True)
             self._test_worker = None
             if ok:
                 InfoBar.success("连接成功", "「%s」回复:%s" % (svc.get("name"), text[:60]),
-                                parent=self, position=InfoBarPosition.TOP_RIGHT)
+                                position=InfoBarPosition.TOP_RIGHT)
             else:
                 InfoBar.error("连接失败", text[:200], parent=self,
                               position=InfoBarPosition.TOP_RIGHT, duration=-1)
 
         self._test_worker.done.connect(on_done)
-        self._test_worker.start()
+        self._test_worker.start(svc, "请只回复两个字母:OK")
 
     def _save(self):
         if not cm.save_config(self.app.cfg):
@@ -1749,15 +1748,6 @@ class WorkflowRunner(QWidget):
                           position=InfoBarPosition.TOP_RIGHT, duration=-1)
             return
         self._step_complete(idx, text)
-
-    def _worker_finished(self):
-        self._worker = None
-        if self._dead:
-            self.close()                       # 此时 worker 已结束,closeEvent 会真正关闭
-        elif self._auto and self.step_idx < len(self.steps):
-            self._run_step()                   # 自动模式:链式推进
-        else:
-            self._update_ui()
 
     # ---- 复制 / 关闭 ----
     def _copy_text(self, text):

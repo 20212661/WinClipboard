@@ -3131,7 +3131,7 @@ class ThumbLoader(QObject):
 from workflow_ui import (ServicesPage, WorkflowPage, WorkflowEditorWindow,  # noqa: F401
                         WorkflowRunner, WorkflowRunInspector,
                         ServiceEditorDialog, ProviderCard, PrivacyGateDialog,
-                        AIWorker, ModelWorker)
+                        PingSession, ModelWorker)
 
 
 
