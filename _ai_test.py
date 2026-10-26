@@ -568,8 +568,12 @@ from workflow_ui import AIStepBridge, _AIRequestHandle
 _fr = _BridgeObj()
 _fr._worker = None
 _fr._dead = False
+_fr._auto = False
+_fr.steps = []                 # 空步骤表:dispatch 的链推分支永不触发
 _fr.closes = 0
 _fr.close = lambda: setattr(_fr, "closes", _fr.closes + 1)
+_fr._update_ui = lambda: None
+_fr._run_step = lambda: None
 
 
 def _bridge_pump(cond, timeout=3.0):
