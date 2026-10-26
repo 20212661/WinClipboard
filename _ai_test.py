@@ -496,6 +496,70 @@ check("Editor.契约保存归一",
       and {"kind": "if", "pattern": "x"} in _saved
       and {"kind": "clipboard"} in _saved, str(_saved))
 
+# ---- WebStep 隐私门(PR2.5:复制提示词不再绕过敏感检查) ----
+import workflow_steps as wfs
+
+
+def _web_ctx(gate, copy_result=True):
+    box = []
+    ctx = wfs.WorkflowContext(
+        input_text="材料",
+        privacy_gate=gate,
+        copy_text=(lambda t: box.append(t) or True) if copy_result else None)
+    return ctx, box
+
+
+_web_prompt = "请翻译:材料内容"
+_gate_svcs = []
+
+
+def _gate_pass(p, svc):
+    _gate_svcs.append(svc)
+    return p
+
+
+ctx, box = _web_ctx(_gate_pass)
+res = wfs.WebStep(prompt=_web_prompt).run(ctx)
+check("web.gate-pass", isinstance(res, wfs.Wait) and box == [_web_prompt])
+check("web.gate-svc-label",
+      _gate_svcs and _gate_svcs[0].get("base_url") == "网页 AI")
+
+ctx, box = _web_ctx(lambda p, svc: "MASKED")
+res = wfs.WebStep(prompt=_web_prompt).run(ctx)
+check("web.gate-mask", isinstance(res, wfs.Wait) and box == ["MASKED"])
+
+ctx, box = _web_ctx(lambda p, svc: None)      # 用户取消
+res = wfs.WebStep(prompt=_web_prompt).run(ctx)
+check("web.gate-cancel", isinstance(res, wfs.Cancelled)
+      and box == [] and "隐私门拦截" in res.reason)
+
+ctx, box = _web_ctx(None)      # 宿主未提供门(旧宿主兼容):原样复制
+res = wfs.WebStep(prompt=_web_prompt).run(ctx)
+check("web.no-gate-host", isinstance(res, wfs.Wait) and box == [_web_prompt])
+
+ctx, box = _web_ctx(_gate_pass, copy_result=None)   # 复制失败
+res = wfs.WebStep(prompt=_web_prompt).run(ctx)
+check("web.copy-fail-halt", isinstance(res, wfs.Done) and res.halt
+      and "复制失败" in (res.note and res.note[0] or ""))
+
+_hits, _masked = cm.privacy_scan("卡号 4111111111111111 查一下")
+check("web.scan-detects-sensitive", bool(_hits) and "▇" in _masked,
+      str(_hits))
+_copied = []
+
+
+def _gate_cancel_card(p, svc):
+    hits, masked = cm.privacy_scan(p)
+    return None if hits else p
+
+
+ctx = wfs.WorkflowContext(
+    input_text="x", privacy_gate=_gate_cancel_card,
+    copy_text=lambda t: _copied.append(t) or True)
+res = wfs.WebStep(prompt="卡号 4111111111111111 查一下").run(ctx)
+check("web.sensitive-cancel-no-copy", isinstance(res, wfs.Cancelled)
+      and _copied == [])
+
 print()
 print("RESULT:", "PASS" if not FAILS else "FAILED: %s" % FAILS)
 sys.exit(0 if not FAILS else 1)

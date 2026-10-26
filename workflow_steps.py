@@ -238,6 +238,13 @@ class WebStep(WorkflowStep):
 
     def run(self, ctx):
         prompt = ctx.render(self.prompt)
+        if ctx.privacy_gate is not None:
+            # 与 AiStep 同一道门:提示词虽只复制到剪贴板,但终将粘进
+            # 网页 AI——沿用三选一(遮盖/原样/取消)。取消则不复制、
+            # 不覆盖剪贴板、不打开网页。
+            prompt = ctx.privacy_gate(prompt, {"base_url": "网页 AI"})
+            if prompt is None:
+                return Cancelled("隐私门拦截")
         copied = None
         if ctx.copy_text is not None:
             # 只写剪贴板:自动 Ctrl+V 会打进当前窗口。
