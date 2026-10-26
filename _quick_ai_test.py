@@ -341,6 +341,20 @@ class DualPanelConsistency(unittest.TestCase):
             self.p.send()
             chat.assert_not_called()
 
+    def test_duplicate_done_never_fires_outlets(self):
+        # 同一请求的结果回调重复到达:结果不重复执行出口(出口仅由用户点击触发)
+        self.q.question.setPlainText("q")
+        with patch.object(qa.cm, "ai_chat", side_effect=self._chat_ok([], "答案")), \
+                patch.object(self.q, "_gate", side_effect=lambda p, s: p):
+            self.q.send()
+            pump_until(self, lambda: not self.q._pending)
+        rid = self.q._session._serial
+        self.q._on_done(rid, True, "答案")          # 迟到重复回调
+        self.q._on_done(rid, True, "答案")
+        self.app.core.copy_text.assert_not_called()
+        self.app.core.paste_text.assert_not_called()
+        self.app.core.add_item.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

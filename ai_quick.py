@@ -13,6 +13,8 @@ from qfluentwidgets import (BodyLabel, CaptionLabel, StrongBodyLabel, PlainTextE
 import clipboard_manager as cm
 import ui_base
 from ai import session as _ai_session
+from ai import sink as _ai_sink
+from ai.sink import ResultSink as _ResultSink
 
 ACTIONS = (
     ("explain", "解释", "用清楚易懂的中文解释下面的内容。遇到代码或报错时说明原因和可行的处理办法。"),
@@ -181,6 +183,7 @@ class QuickAIWindow(QWidget):
         # 面板经属性转发保持 _active/_pending/_shutdown 外观不变
         self._session = _ai_session.ChatSession(self.completed.emit)
         self._pending = self._session.pending
+        self._sink = _ResultSink(app, pack_title="快速 AI 回答")
         self._answer = ""
         self._target = 0
         QShortcut(QKeySequence("Escape"), self, activated=self.close)
@@ -454,35 +457,29 @@ class QuickAIWindow(QWidget):
         self._sync_buttons()
 
     def copy_answer(self):
-        if not self.app.core.copy_text(self._answer):
-            self._notice("剪贴板写入失败，请重试")
-        else:
-            self._notice("已复制")
+        ok, _ = self._sink.copy(self._answer)
+        self._notice("已复制" if ok else "剪贴板写入失败，请重试")
 
     def paste_answer(self):
-        target = self._target
-        if not target or not cm.win32gui.IsWindow(target) or target == int(self.winId()):
+        # 出口执行在 ResultSink(失焦不写剪贴板/核心粘贴事务/置前台);
+        # 本方法只映射提示与窗口收起
+        ok, detail = self._sink.paste_back(
+            self._answer, self._target, exclude_hwnd=int(self.winId()))
+        if detail == _ai_sink.TARGET_GONE:
             self._notice("原窗口已失效，请使用复制按钮")
             return
-        if not self.app.core.paste_text(self._answer, force=True, target_hwnd=target):
+        if not ok:
             self._notice("剪贴板写入失败，请重试")
             return
         self.hide()
-        try:
-            cm.win32gui.SetForegroundWindow(target)
-        except Exception:
-            pass  # Core paste transaction aborts if foreground cannot be restored.
 
     def save_history(self):
-        try:
-            self.app.core.add_item(("text", self._answer))
-            self._notice("已交给历史捕获管线；敏感内容会进入私密区")
-        except Exception as exc:
-            self._notice("存入历史失败：" + cm.sanitize_log(str(exc)))
+        ok, err = self._sink.save_history(self._answer)
+        self._notice("已交给历史捕获管线；敏感内容会进入私密区" if ok
+                     else "存入历史失败：" + err)
 
     def save_pack(self):
-        from ctxpack.ui_tray import add_text_to_pack
-        add_text_to_pack(self.app, self._answer, title="快速 AI 回答")
+        self._sink.save_pack(self._answer)
 
     def closeEvent(self, event):
         self.cancel()
@@ -523,6 +520,7 @@ class EmbeddedAIPanel(QWidget):
         # _on_done(面板停在「正在生成…」,两次发送后占满在途上限)
         self.completed.connect(self._on_done, Qt.QueuedConnection)
         self._pending = self._session.pending
+        self._sink = _ResultSink(app, pack_title="AI 工作台回答")
         self._answer = ""
         self._material = ""
         self._rec = None                 # 选中卡片记录(工作流一键入口用)
@@ -998,37 +996,29 @@ class EmbeddedAIPanel(QWidget):
     # ---- 结果动作 ----
 
     def copy_answer(self):
-        if not self.app.core.copy_text(self._answer):
-            self._notice("剪贴板写入失败，请重试")
-        else:
-            self._notice("已复制")
+        ok, _ = self._sink.copy(self._answer)
+        self._notice("已复制" if ok else "剪贴板写入失败，请重试")
 
     def paste_answer(self):
-        target = int(getattr(self.app, "_paste_target", 0) or 0)
-        if not target or not cm.win32gui.IsWindow(target):
+        ok, detail = self._sink.paste_back(
+            self._answer, int(getattr(self.app, "_paste_target", 0) or 0))
+        if detail == _ai_sink.TARGET_GONE:
             self._notice("没有可回贴的原窗口（从外部窗口呼出主界面后再试）")
             return
-        if not self.app.core.paste_text(self._answer, force=True, target_hwnd=target):
+        if not ok:
             self._notice("剪贴板写入失败，请重试")
             return
         win = getattr(self.app, "win", None)
         if win is not None:
             win.hide()
-        try:
-            cm.win32gui.SetForegroundWindow(target)
-        except Exception:
-            pass  # Core paste transaction aborts if foreground cannot be restored.
 
     def save_history(self):
-        try:
-            self.app.core.add_item(("text", self._answer))
-            self._notice("已交给历史捕获管线；敏感内容会进入私密区")
-        except Exception as exc:
-            self._notice("存入历史失败：" + cm.sanitize_log(str(exc)))
+        ok, err = self._sink.save_history(self._answer)
+        self._notice("已交给历史捕获管线；敏感内容会进入私密区" if ok
+                     else "存入历史失败：" + err)
 
     def save_pack(self):
-        from ctxpack.ui_tray import add_text_to_pack
-        add_text_to_pack(self.app, self._answer, title="AI 工作台回答")
+        self._sink.save_pack(self._answer)
 
     def shutdown(self):
         self._session.shutdown()
