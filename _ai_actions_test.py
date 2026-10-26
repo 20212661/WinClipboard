@@ -20,6 +20,7 @@ import json
 import time
 import tempfile
 import threading
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -466,6 +467,95 @@ check("session.ctx-text",
       _ses.assemble_context(True, lambda: _A(),
                             lambda w: _warns.extend(w)) == "拼装快照")
 check("session.ctx-warn-notify", _warns == ["w1", "w2"])
+
+# ============================================================
+# 8. ResultSink 结果出口(PR3B-2A)
+# ============================================================
+from types import SimpleNamespace as _NS
+from ai.sink import ResultSink as _Sink
+
+_core = Mock()
+_core.copy_text.return_value = True
+_core.paste_text.return_value = True
+_sink_app = _NS(core=_core)
+k = _Sink(_sink_app, pack_title="单测回答")
+
+# -- copy:成功/失败/空 --
+check("sink.copy-ok", k.copy("答案") == (True, ""))
+_core.copy_text.return_value = False
+check("sink.copy-fail", k.copy("答案") == (False, "clipboard"))
+_core.copy_text.return_value = True
+check("sink.copy-empty", k.copy("") == (False, "empty"))
+
+# -- paste_back:目标失效三态 + 成功签名 --
+check("sink.paste-zero-target",
+      k.paste_back("答案", 0) == (False, "target_gone"))
+_core.paste_text.reset_mock()
+check("sink.paste-gone-no-write",
+      k.paste_back("答案", 0)[1] == "target_gone"
+      and not _core.paste_text.called)
+with patch.object(cm.win32gui, "IsWindow", return_value=False):
+    check("sink.paste-window-gone",
+          k.paste_back("答案", 77) == (False, "target_gone"))
+_fore = []
+with patch.object(cm.win32gui, "IsWindow", return_value=True), \
+        patch.object(cm.win32gui, "SetForegroundWindow",
+                     side_effect=lambda h: _fore.append(h)):
+    check("sink.paste-ok", k.paste_back("答案", 456) == (True, "")
+          and _fore == [456])
+    _core.paste_text.assert_called_once_with("答案", force=True, target_hwnd=456)
+_core.paste_text.reset_mock()
+with patch.object(cm.win32gui, "IsWindow", return_value=True), \
+        patch.object(cm.win32gui, "SetForegroundWindow", lambda h: None):
+    check("sink.paste-exclude-self",
+          k.paste_back("答案", 456, exclude_hwnd=456) == (False, "target_gone"))
+    _core.paste_text.return_value = False
+    check("sink.paste-clipboard-fail",
+          k.paste_back("答案", 456) == (False, "clipboard"))
+_core.paste_text.return_value = True
+
+# -- save_history:捕获管线元组 + 异常脱敏摘录 --
+_core.add_item.return_value = None
+okc, detc = k.save_history("答案")
+check("sink.history-ok", okc and _core.add_item.call_args[0] == (("text", "答案"),))
+_core.add_item.side_effect = OSError("disk full 私钥 sk-abcdef123456")
+okc, detc = k.save_history("答案")
+check("sink.history-fail", not okc and "disk full" in detc)
+_core.add_item.side_effect = None
+
+# -- save_pack:标题透传/空守卫 --
+_pack_calls = []
+with patch("ctxpack.ui_tray.add_text_to_pack",
+           side_effect=lambda app, text, title=None, **kw:
+           _pack_calls.append((text, title))):
+    check("sink.pack-ok", k.save_pack("答案") == (True, ""))
+    check("sink.pack-title", _pack_calls == [("答案", "单测回答")])
+    check("sink.pack-empty", k.save_pack("") == (False, "empty"))
+
+# -- 出口绝不发起模型调用 --
+with patch.object(cm, "ai_chat") as _no_chat:
+    k.copy("答案")
+    with patch.object(cm.win32gui, "IsWindow", return_value=True), \
+            patch.object(cm.win32gui, "SetForegroundWindow", lambda h: None):
+        k.paste_back("答案", 9)
+    k.save_history("答案")
+    k.save_pack("答案")
+    _no_chat.assert_not_called()
+
+# -- 窗口销毁后的迟到回执:emit 抛 RuntimeError 被会话核吞掉 --
+def _dead_emit(rid, ok, text):
+    raise RuntimeError("Internal C++ object (面板) already deleted.")
+
+s6 = _ses.ChatSession(_dead_emit, chat=lambda svc, prompt: (True, "迟到"))
+raised = False
+try:
+    s6.spawn({}, "x")     # 不应向调用方抛 RuntimeError
+except RuntimeError:
+    raised = True
+# emit 失败 = 窗口已销毁,该 rid 无人 receive,留待 shutdown 收尾
+check("sink.session-emits-after-destroy", not raised)
+s6.shutdown()
+check("sink.session-shutdown-final", s6.shutdown_flag and not s6.busy)
 
 print()
 print("RESULT:", "PASS" if not FAILS else "FAILED: %s" % FAILS)

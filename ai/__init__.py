@@ -20,4 +20,5 @@ from .workflows import BUILTIN_WORKFLOWS  # noqa: F401
 from .executor import (ActionRequest, ActionResult,  # noqa: F401
                        resolve_workflow, run_action, run_request)
 from . import session  # noqa: F401
+from .sink import ResultSink  # noqa: F401
 from . import executor  # noqa: F401
