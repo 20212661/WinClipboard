@@ -229,5 +229,118 @@ class QuickAI(unittest.TestCase):
             self.w.wheel.grab().save(str(output / ("wheel_" + mode + ".png")))
 
 
+class DualPanelConsistency(unittest.TestCase):
+    """PR3B-1:QuickAIWindow 与 EmbeddedAIPanel 经同一 ChatSession 的行为一致性。"""
+
+    def setUp(self):
+        self.app = SimpleNamespace(
+            cfg={"ai_services": [{"name": "T", "base_url": "http://u", "model": "m"}]},
+            win=QWidget(),
+            core=SimpleNamespace(copy_text=Mock(return_value=True),
+                                 paste_text=Mock(return_value=True),
+                                 add_item=Mock()))
+        self.q = qa.QuickAIWindow(self.app)
+        self.q.show()          # QuickAIWindow.send 有 isVisible 守卫
+        self.q._snapshot = "共享材料"   # select_action 会用快照重填输入框
+        # 用 ask 动作+预填问题:非 ask 动作带材料会触发自动发送,打穿补丁窗口
+        self.q.select_action("ask")
+        self.q.question.setPlainText("怎么看?")
+        self.p = qa.EmbeddedAIPanel(self.app)
+        self.p.set_material({"type": "text", "content": "共享材料"})
+        self.p.refresh_services()
+        self.p.question.setPlainText("怎么看?")   # 面板默认动作=ask,问题必填
+
+    def tearDown(self):
+        self.q.shutdown()
+        self.p.shutdown()
+        self.app.win.close()
+        qt.processEvents()
+
+    def _chat_ok(self, captured, answer):
+        def chat(service, prompt):
+            captured.append(prompt)
+            return True, answer
+        return chat
+
+    def test_same_input_same_flow(self):
+        captured = []
+        with patch.object(qa.cm, "ai_chat",
+                          side_effect=self._chat_ok(captured, "同一回答")), \
+                patch.object(self.q, "_gate", side_effect=lambda p, s: p), \
+                patch.object(self.p, "_gate", side_effect=lambda p, s: p):
+            self.q.send()
+            self.p.send()
+            pump_until(self, lambda: not self.q._pending and not self.p._pending)
+        self.assertEqual(self.q._answer, "同一回答")
+        self.assertEqual(self.p._answer, "同一回答")
+        self.assertIn("共享材料", captured[0])
+        self.assertIn("共享材料", captured[1])
+        self.assertIn("已完成", self.q.status.text())
+        self.assertIn("已完成", self.p.status.text())
+
+    def test_cancel_during_flight_drops_late_result(self):
+        import threading
+        gate = threading.Event()
+
+        def chat(service, prompt):
+            gate.wait(3)
+            return True, "迟到"
+
+        with patch.object(qa.cm, "ai_chat", side_effect=chat), \
+                patch.object(self.q, "_gate", side_effect=lambda p, s: p), \
+                patch.object(self.p, "_gate", side_effect=lambda p, s: p):
+            self.q.send()
+            self.p.send()
+            self.q.cancel()
+            self.p.cancel()
+            gate.set()
+            pump_until(self, lambda: not self.q._pending and not self.p._pending)
+        self.assertEqual(self.q.output.toPlainText(), "")
+        self.assertEqual(self.p.output.toPlainText(), "")
+        self.assertIn("已停止等待", self.q.status.text())
+        self.assertIn("已停止等待", self.p.status.text())
+
+    def test_material_switch_during_flight_keeps_request(self):
+        import threading
+        prompts = []
+        gate = threading.Event()
+
+        def chat(service, prompt):
+            prompts.append(prompt)
+            gate.wait(3)
+            return True, "答"
+
+        with patch.object(qa.cm, "ai_chat", side_effect=chat), \
+                patch.object(self.p, "_gate", side_effect=lambda p, s: p):
+            self.p.send()
+            pump_until(self, lambda: len(prompts) == 1)
+            # 生成中切历史卡片:材料不抢占(在途请求在 spawn 时已冻结)
+            self.p.set_material({"type": "text", "content": "新卡片材料"})
+            gate.set()
+            pump_until(self, lambda: not self.p._pending)
+        self.assertIn("共享材料", prompts[0])
+        self.assertNotIn("新卡片材料", prompts[0])
+        self.assertEqual(self.p._answer, "答")
+        self.assertEqual(self.p._material, "共享材料")
+
+    def test_gate_cancel_blocks_both(self):
+        with patch.object(self.q, "_gate", return_value=None), \
+                patch.object(self.p, "_gate", return_value=None), \
+                patch.object(qa.cm, "ai_chat") as chat:
+            self.q.send()
+            self.p.send()
+            chat.assert_not_called()
+        self.assertIn("已取消", self.q.status.text())
+        self.assertIn("已取消", self.p.status.text())
+
+    def test_inflight_cap_blocks_both(self):
+        self.q._pending.update((1, 2))
+        self.p._pending.update((1, 2))
+        with patch.object(qa.cm, "ai_chat") as chat:
+            self.q.send()
+            self.p.send()
+            chat.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

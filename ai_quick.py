@@ -504,7 +504,8 @@ class QuickAIWindow(QWidget):
 class EmbeddedAIPanel(QWidget):
     """主界面右栏常驻 AI 工作台。
 
-    与 QuickAIWindow 共用 build_prompt / 隐私闸 / spawn_chat 发送纪律:
+    与 QuickAIWindow 共用 build_prompt 与 ai.session.ChatSession 发送纪律
+    (隐私授权/上下文快照/在途上限/迟到丢弃同一套策略):
     - 顶部快捷动作(解释/翻译/总结/润色)+「复制 Prompt」(免 Key:组装
       完整 Prompt 经 privacy_scan 自动脱敏后复制);
     - 中部服务选择 + 附加上下文包 + 提问框(Ctrl+Enter 发送);材料随
@@ -516,10 +517,12 @@ class EmbeddedAIPanel(QWidget):
     def __init__(self, app, parent=None):
         super().__init__(parent)
         self.app = app
-        self._serial = 0
-        self._active = None
-        self._pending = set()
-        self._shutdown = False
+        # 会话执行核(PR3B-1):与 QuickAIWindow 同一 ChatSession 纪律
+        self._session = _ai_session.ChatSession(self.completed.emit)
+        # 存量断链修复:completed 信号此前从未连接,结果永远回不到
+        # _on_done(面板停在「正在生成…」,两次发送后占满在途上限)
+        self.completed.connect(self._on_done, Qt.QueuedConnection)
+        self._pending = self._session.pending
         self._answer = ""
         self._material = ""
         self._rec = None                 # 选中卡片记录(工作流一键入口用)
@@ -890,25 +893,38 @@ class EmbeddedAIPanel(QWidget):
             button.setEnabled(bool(self._answer) and not busy)
 
     def _assemble_context_or_none(self):
-        if not self.use_context.isChecked():
-            return ""
         from ctxpack.ui_tray import tray_service
-        assembled = tray_service(self.app).assemble_active(include_sensitive=True)
-        if assembled is None or not assembled.ok:
-            raise ValueError("没有可用的当前上下文包，请先添加资料或取消附加")
-        if assembled.warnings:
-            InfoBar.warning("上下文拼装提示", "；".join(assembled.warnings[:3]),
-                            parent=self, duration=6000)
-        return assembled.text
+        return _ai_session.assemble_context(
+            self.use_context.isChecked(),
+            lambda: tray_service(self.app).assemble_active(include_sensitive=True),
+            self._warn_context)
+
+    def _warn_context(self, warnings):
+        InfoBar.warning("上下文拼装提示", "；".join(warnings),
+                        parent=self, duration=6000)
 
     def _gate(self, prompt, service):
-        hits, masked = cm.privacy_scan(prompt)
-        if not hits:
-            return prompt
+        """隐私授权:策略在 ai.session.authorize,确认弹窗由本方法提供。"""
+        return _ai_session.authorize(prompt, service, self._confirm_gate)
+
+    def _confirm_gate(self, hits, masked, endpoint):
         from workflow_ui import PrivacyGateDialog
-        dialog = PrivacyGateDialog(self, hits, masked, service.get("base_url") or "")
+        dialog = PrivacyGateDialog(self, hits, masked, endpoint)
         dialog.exec()
-        return masked if dialog.choice == "mask" else prompt if dialog.choice == "raw" else None
+        return dialog.choice
+
+    # 会话状态转发:权威在 self._session,外观保持旧属性名
+    @property
+    def _active(self):
+        return self._session.active
+
+    @_active.setter
+    def _active(self, value):
+        self._session.active = value
+
+    @property
+    def _shutdown(self):
+        return self._session.shutdown_flag
 
     def copy_prompt(self):
         """免 Key 复制:当前动作 + 材料 + 上下文包 + 问题 → privacy_scan
@@ -935,15 +951,15 @@ class EmbeddedAIPanel(QWidget):
             self._notice("已复制完整 Prompt，可粘贴给任意 AI 工具")
 
     def send(self):
-        if self._shutdown or self._active is not None or len(self._pending) >= 2:
+        if not self._session.can_start():
             return
         if not self._services:
             self.refresh_services()
-        index = self.service.currentIndex()
-        if not 0 <= index < len(self._services):
+        service = _ai_session.resolve_service(
+            self._services, self.service.currentIndex())
+        if service is None:
             self._notice("请先在「AI 服务」页配置服务，或用「复制 Prompt」")
             return
-        service = dict(self._services[index])
         try:
             context = self._assemble_context_or_none()
             prompt = build_prompt(self._current_action(), self._material,
@@ -955,20 +971,15 @@ class EmbeddedAIPanel(QWidget):
         except Exception as exc:
             self._notice(str(exc))
             return
-        self._serial += 1
-        request_id = self._serial
-        self._active = request_id
-        self._pending.add(request_id)
         self._answer = ""
         self.output.clear()
         self._notice("正在生成…")
         self._sync_buttons()
-        spawn_chat(self.completed.emit, service, prompt, request_id)
+        # 会话核冻结本次输入:此后切卡片/改篮不影响在途
+        self._session.spawn(service, prompt)
 
     def _on_done(self, request_id, ok, text):
-        self._pending.discard(request_id)
-        if request_id == self._active and not self._shutdown:
-            self._active = None
+        if self._session.receive(request_id):
             if ok:
                 self._answer = text
                 self.output.setPlainText(text)
@@ -979,7 +990,8 @@ class EmbeddedAIPanel(QWidget):
         self._sync_buttons()
 
     def cancel(self):
-        self._active = None
+        # 停止接收(UI 丢弃迟到结果);HTTP 在途请求不会被中断
+        self._session.stop_receiving()
         self._notice("已停止等待，服务端请求可能仍在处理；迟到回答不会显示")
         self._sync_buttons()
 
@@ -1019,5 +1031,4 @@ class EmbeddedAIPanel(QWidget):
         add_text_to_pack(self.app, self._answer, title="AI 工作台回答")
 
     def shutdown(self):
-        self._shutdown = True
-        self.cancel()
+        self._session.shutdown()
