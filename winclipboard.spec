@@ -6,7 +6,10 @@ import os
 
 block_cipher = None
 
-datas = []
+datas = [
+    # AI 动作注册表的内置动作定义(运行时扫描装载,静态分析看不见)
+    ("ai/actions", "ai/actions"),
+]
 
 a = Analysis(
     ["winclipboard_qt.py"],
@@ -26,6 +29,11 @@ a = Analysis(
         "perf_probe",
         "ai_quick",
         "pinboard",
+        # AI Action Registry(PR3A:动作 JSON 数据 + 注册表/执行器)
+        "ai",
+        "ai.registry",
+        "ai.executor",
+        "ai.workflows",
         # 阶段 8 拆分出的模块(静态导入为主,此处兜底)
         "ui_base",
         "viewer",

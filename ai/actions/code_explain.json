@@ -1,0 +1,9 @@
+{
+    "id": "code_explain",
+    "name": "解释代码",
+    "description": "解释代码的用途与关键逻辑",
+    "workflow": "code_explain",
+    "icon": "EMBED",
+    "applies": ["text"],
+    "order": 1
+}

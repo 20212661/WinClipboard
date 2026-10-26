@@ -31,6 +31,7 @@ SUITES = [
     ("core", "_core_test.py", 600, True),
     ("storage", "_storage_regression_test.py", 900, True),
     ("ai", "_ai_test.py", 600, True),
+    ("ai-actions", "_ai_actions_test.py", 600, True),
     ("pinboard", "_pinboard_test.py", 900, True),
     ("classifier", "_classifier_test.py", 600, True),
     ("privacy", "_privacy_regression_test.py", 600, True),

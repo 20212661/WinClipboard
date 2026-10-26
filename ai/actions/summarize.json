@@ -1,0 +1,9 @@
+{
+    "id": "summarize",
+    "name": "总结",
+    "description": "一句话摘要 + 要点列表",
+    "workflow": "summarize",
+    "icon": "BOOK_SHELF",
+    "applies": ["text"],
+    "order": 4
+}
