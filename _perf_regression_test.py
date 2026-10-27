@@ -283,6 +283,16 @@ def ui_parts():
     panel.show()
     app.processEvents()
 
+    def pump_until(predicate, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            app.processEvents(QEventLoop.AllEvents, 50)
+            if predicate():
+                return True
+            time.sleep(0.01)
+        app.processEvents(QEventLoop.AllEvents, 50)
+        return bool(predicate())
+
     # D:快速连续搜索 → 旧批次不污染新视图
     view_a = core.filter_view("all", "行 00")
     panel.set_view(view_a, hist)               # 大视图,大量 pending
@@ -347,11 +357,12 @@ def ui_parts():
           panel._win_lo < lo_before or lo_before == 0,
           "lo %d → %d" % (lo_before, panel._win_lo))
     if lo_before > 0:
-        back_recs = [hist[i] for i in
-                     range(panel._win_lo, min(lo_before, panel._win_limit))]
+        back_recs = panel._full_seq[panel._win_lo:min(lo_before, panel._win_limit)]
+        materialized = pump_until(lambda: all(
+            id(r) in {id(c.rec) for c in panel._cards} for r in back_recs))
         have = {id(c.rec) for c in panel._cards}
         check("E 补回段记录全部物化",
-              all(id(r) in have for r in back_recs),
+              materialized,
               "缺 %d/%d" % (sum(1 for r in back_recs if id(r) not in have),
                             len(back_recs)))
 
@@ -390,7 +401,10 @@ def ui_parts():
           next(iter(host._thumbs)) == "y" and list(host._thumbs)[-1] == "x")
 
     # F2:ThumbLoader 可见优先 + 失败表 + 关停
-    loader = wq.ThumbLoader(fake)
+    # 暂不启动 worker，才能稳定检查队列顺序和容量。
+    from unittest.mock import patch
+    with patch.object(wq.threading.Thread, "start"):
+        loader = wq.ThumbLoader(fake)
     fake._thumb_loader = loader
     from PIL import Image
     ok_png = os.path.join(TMP, "ok.png")
@@ -406,12 +420,15 @@ def ui_parts():
           and q_visible_first[2] == ok_png, str(q_visible_first))
     check("F2 预热超载被丢弃", loader._q.qsize() <= 240 + 2,
           str(loader._q.qsize()))
-    t1 = time.time()
-    while (ok_png in loader._pending or bad in loader._pending) \
-            and time.time() - t1 < 10:
-        app.processEvents()
-        time.sleep(0.02)
-    app.processEvents()          # 投递 worker 线程排队的 loaded 信号
+    loader.shutdown()
+    check("F2 预热队列关闭后排空", loader._q.qsize() == 0)
+    # 解码测试使用独立 loader，避免预热失败挤出有界失败表中的目标。
+    loader = wq.ThumbLoader(fake)
+    fake._thumb_loader = loader
+    loader.submit(ok_png, visible=True)
+    loader.submit(bad, visible=True)
+    pump_until(lambda: ok_png in fake._thumbs and bad in loader._failed
+               and bad not in loader._pending)
     check("F2 成功解码进缓存", ok_png in fake._thumbs,
           "pending=%s failed=%s" % (ok_png in loader._pending,
                                     ok_png in loader._failed))

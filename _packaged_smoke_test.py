@@ -42,7 +42,9 @@ def verify_archive(exe):
                  "ui_base", "viewer", "image_editor", "workflow_ui",
                  "win32_host", "privacy_store", "history_store",
                  "ctxpack.model", "ctxpack.budget", "ctxpack.assemble",
-                 "ctxpack.store", "ctxpack.service", "ctxpack.ui_tray"):
+                 "ctxpack.store", "ctxpack.service", "ctxpack.ui_tray",
+                 "ai.registry", "ai.executor", "ai.session", "ai.sink",
+                 "ai.workflows"):
         source = compile((root / (name.replace(".", os.sep) + ".py")).read_text(encoding="utf-8-sig"),
                          name + ".py", "exec")
         if code_signature(pyz.extract(name)) != code_signature(source):
@@ -51,7 +53,17 @@ def verify_archive(exe):
                      "winclipboard_qt.py", "exec")
     if code_signature(marshal.loads(archive.extract("winclipboard_qt"))) != code_signature(source):
         raise AssertionError("Packaged UI differs from source")
-    return "matches current source"
+    from ai.registry import ActionRegistry
+    actions_dir = exe.parent / "_internal" / "ai" / "actions"
+    expected = {"translate", "summarize", "code_explain", "code_optimize",
+                "code_comment", "to_markdown"}
+    reg = ActionRegistry()
+    count = reg.scan_dir(actions_dir)
+    if count != 6 or reg.errors or {item["id"] for item in reg.all()} != expected:
+        raise AssertionError("Packaged actions invalid: dir=%s count=%s errors=%s ids=%s" %
+                             (actions_dir, count, reg.errors,
+                              [item["id"] for item in reg.all()]))
+    return "matches current source; six packaged actions loaded"
 
 
 def encrypted_json(records):
@@ -156,7 +168,8 @@ def build_provenance(root):
 
 
 def main():
-    exe = Path("dist/WinClipboard/WinClipboard.exe").resolve()
+    exe = Path(sys.argv[1] if len(sys.argv) > 1 else
+               "dist/WinClipboard/WinClipboard.exe").resolve()
     if not exe.is_file():
         raise FileNotFoundError(exe)
     # Suppress event-based captures from current applications. The app may

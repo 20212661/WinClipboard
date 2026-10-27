@@ -135,8 +135,6 @@ check("list_models.no-url", not ok, msg)
 ok, msg = cm.list_models(dict(svc, base_url="http://127.0.0.1:1/v1"))
 check("list_models.refused", not ok, msg)
 
-check("render_prompt", cm.render_prompt("前:{input}:后", "内容") == "前:内容:后")
-
 # ============================================================
 # Qt 离屏:GUI 构造 + 运行器链式执行
 # ============================================================

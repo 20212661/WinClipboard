@@ -903,7 +903,7 @@ class EmbeddedAIPanel(QWidget):
         t1.setAlignment(Qt.AlignmentFlag.AlignCenter)
         t1.setStyleSheet("color: %s; background: transparent;" % ui_base.TEXT)
 
-        t2 = QLabel("解释 / 翻译 / 总结 / 润色 一键发送，回答在这里阅读", w)
+        t2 = QLabel("选择解释 / 翻译 / 总结 / 润色后点发送，回答在这里阅读", w)
         t2.setAlignment(Qt.AlignmentFlag.AlignCenter)
         t2.setWordWrap(True)
         t2.setStyleSheet("color: %s; background: transparent;" % ui_base.SEC)

@@ -226,8 +226,7 @@ class AskContextDialog(QWidget):
         self._session.spawn(svc_ai, gated)
 
     def _default_service(self):
-        services = self.app.cfg.get("ai_services") or []
-        return services[0] if services else None
+        return cm.ai_service_by_name(self.app.cfg, "")
 
     def _gate(self, prompt, svc):
         """隐私闸必经:策略在 ai.session.authorize(取消=None 不发)。"""
